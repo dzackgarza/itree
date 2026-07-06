@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1234567891,
+    "node_id": "R_kwDOABcDEs4AAAB",
+    "number": 43,
+    "title": "Decomposition: Implement core features",
+    "user": {
+      "login": "testuser",
+      "id": 1234567,
+      "type": "User"
+    },
+    "state": "open",
+    "locked": false,
+    "html_url": "https://github.com/testowner/testrepo/issues/43",
+    "url": "https://api.github.com/repos/testowner/testrepo/issues/43"
+  },
+  {
+    "id": 1234567893,
+    "node_id": "R_kwDOABcDEs4AAAD",
+    "number": 45,
+    "title": "Decomposition: Add CLI commands",
+    "user": {
+      "login": "testuser",
+      "id": 1234567,
+      "type": "User"
+    },
+    "state": "open",
+    "locked": false,
+    "html_url": "https://github.com/testowner/testrepo/issues/45",
+    "url": "https://api.github.com/repos/testowner/testrepo/issues/45"
+  }
+]
