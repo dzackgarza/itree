@@ -103,6 +103,10 @@ class IssueRef(BaseModel):
         return self.repo_ref
 
 
+class Milestone(BaseModel):
+    title: str
+
+
 class GithubIssue(BaseModel):
     """Subset of GitHub issue JSON needed by the traversal layer."""
 
@@ -115,6 +119,8 @@ class GithubIssue(BaseModel):
     html_url: str
     body: str | None = None
     state_reason: str | None = None
+    milestone: Milestone | None = None
+    pull_request: dict | None = None
 
     @property
     def is_open(self) -> bool:
