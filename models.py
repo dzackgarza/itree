@@ -104,6 +104,7 @@ class IssueRef(BaseModel):
 
 
 class Milestone(BaseModel):
+    model_config = ConfigDict(frozen=True)
     title: str
 
 
