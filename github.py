@@ -158,3 +158,12 @@ class GithubApi(BaseModel):
             fields={"state": "closed", "state_reason": reason.value},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
+
+    def list_blocked_by(self, number: int) -> tuple[GithubIssue, ...]:
+        """List all issues blocking this issue."""
+        try:
+            proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/blocked_by")
+            items: list[dict] = json.loads(proc.stdout)
+            return tuple(GithubIssue.model_validate(item) for item in items)
+        except Exception:
+            return ()
