@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from .models import IssueRef, TreeNode
-from .traversal import materialize
+from .models import RepoDag, TreeNode
 
 
 class TreeViolation(BaseModel):
@@ -14,23 +13,42 @@ class TreeViolation(BaseModel):
     issue_number: int | None = None
 
 
-def _has_open_descendant(node: TreeNode) -> bool:
-    """Check if node has any open descendant in its subtree.
+def validate_dag(dag: RepoDag) -> list[TreeViolation]:
+    """Validate DAG-level structural invariants.
 
-    Uses short-circuiting recursion to avoid unnecessary allocations.
+    Checks for:
+    - Fragmented forest: more than one root means the graph is not a tree.
+    - Orphaned issues: issues not reachable from any root.
 
     Args:
-        node: The TreeNode to check.
+        dag: The full repository DAG to validate.
 
     Returns:
-        True if any descendant (excluding self) is open, False otherwise.
+        List of TreeViolation objects describing structural failures.
     """
-    for child in node.children:
-        if child.issue.is_open:
-            return True
-        if _has_open_descendant(child):
-            return True
-    return False
+    violations: list[TreeViolation] = []
+    roots = dag.roots
+    orphans = dag.orphans
+
+    if len(roots) > 1:
+        root_numbers = ", ".join(f"#{r.number}" for r in roots)
+        violations.append(
+            TreeViolation(
+                code="fragmented_forest",
+                message=f"graph has {len(roots)} roots ({root_numbers}) \u2014 not a single tree",
+            )
+        )
+
+    for orphan in orphans:
+        violations.append(
+            TreeViolation(
+                code="orphaned_issue",
+                message=f"issue #{orphan.number} \"{orphan.title}\" is not reachable from any root",
+                issue_number=orphan.number,
+            )
+        )
+
+    return violations
 
 
 def validate_tree(root: TreeNode) -> list[TreeViolation]:
@@ -39,6 +57,8 @@ def validate_tree(root: TreeNode) -> list[TreeViolation]:
     Checks for:
     - Duplicate reachable issues
     - Open internal nodes whose decomposition has no open descendants
+
+    Uses TreeNode.preorder() for traversal.
 
     Args:
         root: The root TreeNode to validate.
@@ -50,44 +70,26 @@ def validate_tree(root: TreeNode) -> list[TreeViolation]:
     violations: list[TreeViolation] = []
     seen: set[int] = set()
 
-    def walk(node: TreeNode, *, is_root: bool) -> None:
-        """Recursively walk the tree and collect violations.
-
-        Args:
-            node: The current TreeNode being visited.
-            is_root: Whether this node is the root of the tree.
-        """
+    for node in root.preorder():
         if node.issue.id in seen:
-            violations.append(TreeViolation(
-                code="duplicate_reachable_issue",
-                message=f"issue #{node.issue.number} appears more than once under root",
-                issue_number=node.issue.number,
-            ))
-            return
+            violations.append(
+                TreeViolation(
+                    code="duplicate_reachable_issue",
+                    message=f"issue #{node.issue.number} appears more than once under root",
+                    issue_number=node.issue.number,
+                )
+            )
+            continue
         seen.add(node.issue.id)
 
-        if node.issue.is_open and node.children and not _has_open_descendant(node):
-            violations.append(TreeViolation(
-                code="dead_open_internal_node",
-                message=f"open internal issue #{node.issue.number} has no open descendants",
-                issue_number=node.issue.number,
-            ))
+        if node.issue.is_open and node.children and all(child.first_open_leaf() is None for child in node.children):
+            violations.append(
+                TreeViolation(
+                    code="dead_open_internal_node",
+                    message=f"open internal issue #{node.issue.number} has no open descendants",
+                    issue_number=node.issue.number,
+                )
+            )
 
-        for child in node.children:
-            walk(child, is_root=False)
-
-    walk(root, is_root=True)
     return violations
 
-
-def full_validate(root: IssueRef) -> list[TreeViolation]:
-    """Perform full validation of the tree rooted at the given issue.
-
-    Args:
-        root: The root issue reference.
-
-    Returns:
-        List of TreeViolation objects describing any issues found.
-    """
-    tree = materialize(root)
-    return validate_tree(tree)

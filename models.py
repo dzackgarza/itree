@@ -60,8 +60,7 @@ class IssueRef(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    owner: str = Field(..., pattern=r"^[^/\s#]+$")
-    repo: str = Field(..., pattern=r"^[^/\s#]+$")
+    repo_ref: RepoRef
     number: IssueNumber
 
     @classmethod
@@ -80,20 +79,28 @@ class IssueRef(BaseModel):
         m = re.fullmatch(r"(?P<owner>[^/\s#]+)/(?P<repo>[^/\s#]+)#(?P<number>[1-9]\d*)", raw)
         if not m:
             raise ValueError(f"expected OWNER/REPO#NUMBER, got {raw!r}")
-        return cls(owner=m["owner"], repo=m["repo"], number=int(m["number"]))
+        return cls(repo_ref=RepoRef(owner=m["owner"], repo=m["repo"]), number=int(m["number"]))
 
     @property
     def slug(self) -> str:
         """Return the issue reference as OWNER/REPO#NUMBER string."""
-        return f"{self.owner}/{self.repo}#{self.number}"
+        return f"{self.repo_ref.slug}#{self.number}"
+
+    @property
+    def owner(self) -> str:
+        return self.repo_ref.owner
+
+    @property
+    def repo(self) -> str:
+        return self.repo_ref.repo
 
     def same_repo(self, other: IssueRef) -> bool:
         """Check if this issue is in the same repository as another issue reference."""
-        return (self.owner, self.repo) == (other.owner, other.repo)
+        return self.repo_ref == other.repo_ref
 
     def to_repo_ref(self) -> RepoRef:
         """Extract the repository reference from this issue reference."""
-        return RepoRef(owner=self.owner, repo=self.repo)
+        return self.repo_ref
 
 
 class GithubIssue(BaseModel):
@@ -122,16 +129,6 @@ class TreeNode(BaseModel):
 
     issue: GithubIssue
     children: tuple[TreeNode, ...] = ()
-
-    @property
-    def is_leaf(self) -> bool:
-        """Check if this node has no open children (is a leaf in the traversal tree)."""
-        return len(self.open_children) == 0
-
-    @property
-    def open_children(self) -> tuple[TreeNode, ...]:
-        """Return only the open child nodes."""
-        return tuple(c for c in self.children if c.issue.is_open)
 
     def preorder(self) -> tuple[TreeNode, ...]:
         """Return all nodes in the tree in preorder traversal order."""
@@ -234,3 +231,81 @@ class DetachRequest(BaseModel):
         if not self.parent.same_repo(self.child):
             raise ValueError("detach arguments must be in the same repository")
         return self
+
+
+class RepoDag(BaseModel):
+    """Full directed acyclic graph of a repository's issue tree.
+
+    Constructed by scanning every issue and its sub-issues.  This is
+    the single source of truth that all query commands operate on.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_ref: RepoRef
+
+    # Every issue in the repo, keyed by issue number.
+    issues: dict[int, GithubIssue]
+
+    # Adjacency list: parent_number -> ordered tuple of child numbers.
+    children_of: dict[int, tuple[int, ...]]
+
+    # Pre-computed inverse: child_number -> parent_number.
+    parent_of: dict[int, int] = Field(default_factory=dict, repr=False)
+
+    @model_validator(mode="after")
+    def _compute_derived(self) -> Self:
+        """Build derived views once at construction time."""
+        parent_of: dict[int, int] = {}
+        for parent, kids in self.children_of.items():
+            for kid in kids:
+                parent_of[kid] = parent
+        object.__setattr__(self, "parent_of", parent_of)
+        return self
+
+    @property
+    def slug(self) -> str:
+        return self.repo_ref.slug
+
+    @property
+    def roots(self) -> tuple[GithubIssue, ...]:
+        """Issues that are not sub-issues of any other issue."""
+        parents = self.parent_of
+        return tuple(
+            issue
+            for num, issue in sorted(self.issues.items())
+            if num not in parents
+        )
+
+    @property
+    def orphans(self) -> tuple[GithubIssue, ...]:
+        """Issues not reachable from any root (disconnected from the DAG).
+
+        Walks the adjacency list directly — no TreeNode materialization needed.
+        """
+        reachable: set[int] = set()
+        for root in self.roots:
+            self._collect_reachable(root.number, reachable)
+        return tuple(
+            issue
+            for num, issue in sorted(self.issues.items())
+            if num not in reachable
+        )
+
+    def _collect_reachable(self, number: int, out: set[int]) -> None:
+        """DFS from ``number`` marking all reachable nodes via the adjacency list."""
+        if number in out:
+            return
+        out.add(number)
+        for kid in self.children_of.get(number, ()):
+            self._collect_reachable(kid, out)
+
+    def materialize_root(self, root_number: int) -> "TreeNode":
+        """Build a TreeNode tree from the DAG rooted at the given issue."""
+        issue = self.issues[root_number]
+        kids = self.children_of.get(root_number, ())
+        children = tuple(self.materialize_root(k) for k in kids)
+        return TreeNode(issue=issue, children=children)
+
+
+

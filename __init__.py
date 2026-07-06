@@ -10,17 +10,19 @@ from .models import (
     IssueRef,
     IssueState,
     MoveRequest,
+    RepoDag,
     RepoRef,
     TreeNode,
 )
-from .traversal import get_descendants_preorder, get_direct_children, materialize, next_leaf
-from .validate import TreeViolation, full_validate, validate_tree
+from .traversal import build_dag
+from .validate import TreeViolation, validate_dag, validate_tree
 
 __all__ = [
     "app",
     "GithubApi",
     "IssueRef",
     "RepoRef",
+    "RepoDag",
     "GithubIssue",
     "TreeNode",
     "IssueState",
@@ -29,10 +31,7 @@ __all__ = [
     "DetachRequest",
     "MoveRequest",
     "TreeViolation",
-    "materialize",
-    "next_leaf",
-    "get_direct_children",
-    "get_descendants_preorder",
+    "build_dag",
+    "validate_dag",
     "validate_tree",
-    "full_validate",
 ]

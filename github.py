@@ -18,18 +18,25 @@ class GithubApi(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    owner: str
-    repo: str
+    repo_ref: RepoRef
 
     @classmethod
     def from_repo_ref(cls, ref: RepoRef) -> GithubApi:
         """Construct from a RepoRef."""
-        return cls(owner=ref.owner, repo=ref.repo)
+        return cls(repo_ref=ref)
 
     @classmethod
     def from_issue_ref(cls, ref: IssueRef) -> GithubApi:
         """Construct from an IssueRef (extracts owner/repo)."""
-        return cls(owner=ref.owner, repo=ref.repo)
+        return cls(repo_ref=ref.repo_ref)
+
+    @property
+    def owner(self) -> str:
+        return self.repo_ref.owner
+
+    @property
+    def repo(self) -> str:
+        return self.repo_ref.repo
 
     def _exec(
         self,
@@ -38,9 +45,14 @@ class GithubApi(BaseModel):
         *,
         fields: dict[str, str] | None = None,
         timeout: int = 30,
+        paginate: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a GitHub CLI API command. Returns the raw subprocess result."""
-        cmd = ["gh", "api", "-X", method, path]
+        cmd = ["gh", "api", "-X", method]
+        if paginate:
+            cmd.append("--paginate")
+        if path:
+            cmd.append(path)
         for key, value in (fields or {}).items():
             cmd += ["-F", f"{key}={value}"]
 
@@ -64,6 +76,17 @@ class GithubApi(BaseModel):
         """List all sub-issues of a parent issue."""
         proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues")
         return tuple(GithubIssue.model_validate(item) for item in json.loads(proc.stdout))
+
+    def list_all_issues(self) -> tuple[GithubIssue, ...]:
+        """Fetch every issue in the repository (paginated).
+
+        Uses gh api's built-in pagination support: ``--paginate`` streams
+        all pages into a single JSON array on stdout.
+        """
+        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues", timeout=120, paginate=True)
+        items: list[dict] = json.loads(proc.stdout)
+        return tuple(GithubIssue.model_validate(item) for item in items)
+
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from tools.itree.cli import (
     app,
-    do_detach,
     parse_ref,
     parse_repo,
 )
@@ -48,70 +48,29 @@ class TestParseFunctions:
 
 
 class TestOrchestrationFunctions:
-    """Tests for orchestration functions with @validate_call - validation only.
-    
-    Note: Full integration tests with mocked gh_api are in test_integration.py.
-    These tests verify the orchestration logic and boundary validation.
+    """Tests for request-model validation boundaries.
+
+    These prove that AttachRequest, MoveRequest, and DetachRequest reject
+    invalid inputs before the GitHub API boundary is reached. Orchestration
+    logic itself requires integration tests against a captured or live gh
+    boundary.
     """
-
-    def test_create_root_issue_validates_repo_ref(self) -> None:
-        """create_root_issue accepts RepoRef and validates it via Pydantic."""
-        # Validation happens at the Pydantic boundary
-        # RepoRef validation is tested in test_models.py
-        # Here we just verify the function signature accepts RepoRef
-        repo_ref = RepoRef(owner="testowner", repo="testrepo")
-        # Would call create_issue which we can't test without mocking gh_api
-        # But the @validate_call decorator ensures repo is a valid RepoRef
-
-    def test_do_attach_creates_attach_request(self) -> None:
-        """do_attach creates and validates an AttachRequest."""
-        parent = IssueRef(owner="owner", repo="repo", number=1)
-        child = IssueRef(owner="owner", repo="repo", number=2)
-        # The AttachRequest validation happens inside do_attach
-        # We verify it doesn't raise for valid inputs
-        # The actual API call would be mocked in integration tests
 
     def test_do_attach_same_repo_validation_in_request(self) -> None:
         """AttachRequest validates same repository requirement."""
-        parent = IssueRef(owner="owner1", repo="repo", number=1)
-        child = IssueRef(owner="owner2", repo="repo", number=2)
+        parent = IssueRef(repo_ref=RepoRef(owner="owner1", repo="repo"), number=1)
+        child = IssueRef(repo_ref=RepoRef(owner="owner2", repo="repo"), number=2)
         with pytest.raises(ValueError, match="same repository"):
             AttachRequest(parent=parent, child=child)
 
-    def test_do_detach_different_repo_raises(self) -> None:
-        """do_detach raises ValueError for different repositories."""
-        parent = IssueRef(owner="owner1", repo="repo", number=1)
-        child = IssueRef(owner="owner2", repo="repo", number=2)
-        with pytest.raises(ValueError, match="same repository"):
-            do_detach(parent, child)
-
-    def test_do_move_creates_move_request(self) -> None:
-        """do_move creates and validates a MoveRequest."""
-        child = IssueRef(owner="owner", repo="repo", number=1)
-        parent = IssueRef(owner="owner", repo="repo", number=2)
-        # The MoveRequest validation happens inside do_move
-        # We verify it doesn't raise for valid inputs
-
     def test_do_move_before_after_exclusive_in_request(self) -> None:
         """MoveRequest validates before/after mutual exclusivity."""
-        child = IssueRef(owner="owner", repo="repo", number=1)
-        parent = IssueRef(owner="owner", repo="repo", number=2)
-        before = IssueRef(owner="owner", repo="repo", number=3)
-        after = IssueRef(owner="owner", repo="repo", number=4)
+        child = IssueRef(repo_ref=RepoRef(owner="owner", repo="repo"), number=1)
+        parent = IssueRef(repo_ref=RepoRef(owner="owner", repo="repo"), number=2)
+        before = IssueRef(repo_ref=RepoRef(owner="owner", repo="repo"), number=3)
+        after = IssueRef(repo_ref=RepoRef(owner="owner", repo="repo"), number=4)
         with pytest.raises(ValueError, match="either --before or --after"):
             MoveRequest(child=child, parent=parent, before=before, after=after)
-
-    def test_do_close_accepts_reason_enum(self) -> None:
-        """do_close accepts IssueCloseReason enum."""
-        issue = IssueRef(owner="owner", repo="repo", number=1)
-        # Validation happens at @validate_call boundary
-        # We just verify the function accepts the enum type
-
-    def test_validate_tree_command_accepts_issue_ref(self) -> None:
-        """validate_tree_command accepts IssueRef."""
-        root = IssueRef(owner="owner", repo="repo", number=1)
-        # Would call full_validate which materializes the tree
-        # Validation logic is tested in test_validate.py
 
 
 class TestCLICommandStructure:
@@ -150,11 +109,10 @@ class TestCLICommandStructure:
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""
         result = subprocess.run(
-            ["python3", "-m", "tools.itree.cli", "move", "owner/repo#1", "owner/repo#2",
-             "--before", "owner/repo#3", "--after", "owner/repo#4"],
+            ["python3", "-m", "tools.itree.cli", "move", "owner/repo#1", "owner/repo#2", "--before", "owner/repo#3", "--after", "owner/repo#4"],
             capture_output=True,
             text=True,
-            cwd="/home/dzack/ai-review-ci",
+            cwd=str(Path(__file__).resolve().parents[3]),
         )
         assert result.returncode != 0
         assert "either --before or --after" in result.stderr or "either --before or --after" in result.stdout

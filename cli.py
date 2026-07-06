@@ -12,138 +12,42 @@ import json
 from typing import Annotated
 
 from cyclopts import App, Parameter
-from pydantic import validate_call
-
 from .github import GithubApi
-from .models import AttachRequest, DetachRequest, IssueCloseReason, IssueRef, MoveRequest, RepoRef
-from .traversal import get_descendants_preorder, get_direct_children, get_path, materialize, next_leaf
-from .validate import full_validate
+from .models import (
+    AttachRequest,
+    DetachRequest,
+    IssueCloseReason,
+    IssueRef,
+    MoveRequest,
+    RepoDag,
+    RepoRef,
+    TreeNode,
+)
+from .traversal import build_dag
+from .validate import validate_dag, validate_tree
 
 
-@validate_call
-def create_root_issue(repo: RepoRef, title: str, body: str = "") -> str:
-    """Create a new root issue and return its reference string."""
-    api = GithubApi.from_repo_ref(repo)
-    issue = api.create_issue(title, body)
-    return f"{repo.owner}/{repo.repo}#{issue.number}"
+def _build_tree(root_ref: IssueRef) -> tuple[RepoDag, TreeNode]:
+    """Build the full DAG and materialize the tree for a root issue."""
+    dag = build_dag(root_ref.to_repo_ref())
+    return dag, dag.materialize_root(root_ref.number)
 
 
-@validate_call
-def add_child_to_root(root: IssueRef, title: str, body: str = "") -> str:
-    """Create a child issue and attach it to root. Returns child reference string."""
-    api = GithubApi.from_issue_ref(root)
-    child = api.create_issue(title, body)
-    child_ref = IssueRef(owner=root.owner, repo=root.repo, number=child.number)
-    api.add_subissue(root.number, child.id, replace_parent=False)
-    return child_ref.slug
+# CLI definitions
 
+_WORKFLOW_PROLOGUE = """\
+Decompose-then-traverse workflow:
+  1. itree init OWNER/REPO "Title"          create a root issue
+  2. itree add OWNER/REPO#1 "Child"          decompose into children
+  3. itree next OWNER/REPO#1                 find the next open leaf
+  4. itree close OWNER/REPO#5 --reason completed  close when done
+  5. repeat 3-4 until the tree collapses
+"""
 
-@validate_call
-def do_attach(parent: IssueRef, child: IssueRef, replace_parent: bool = False) -> str:
-    """Attach child as sub-issue of parent. Returns child reference string."""
-    req = AttachRequest(parent=parent, child=child, replace_parent=replace_parent)
-    api = GithubApi.from_issue_ref(req.parent)
-    child_issue = api.get_issue(req.child.number)
-    api.add_subissue(req.parent.number, child_issue.id, replace_parent=req.replace_parent)
-    return req.child.slug
-
-
-@validate_call
-def do_detach(parent: IssueRef, child: IssueRef) -> str:
-    """Detach child from parent. Returns child reference string."""
-    req = DetachRequest(parent=parent, child=child)
-    api = GithubApi.from_issue_ref(req.parent)
-    child_issue = api.get_issue(req.child.number)
-    api.remove_subissue(req.parent.number, child_issue.id)
-    return req.child.slug
-
-
-@validate_call
-def do_move(
-    child: IssueRef,
-    parent: IssueRef,
-    before: IssueRef | None = None,
-    after: IssueRef | None = None,
-) -> str:
-    """Move child under parent, optionally positioned relative to siblings."""
-    req = MoveRequest(child=child, parent=parent, before=before, after=after)
-    api = GithubApi.from_issue_ref(req.parent)
-    child_issue = api.get_issue(req.child.number)
-    api.add_subissue(req.parent.number, child_issue.id, replace_parent=True)
-    if req.before is not None or req.after is not None:
-        before_id = api.get_issue(req.before.number).id if req.before is not None else None
-        after_id = api.get_issue(req.after.number).id if req.after is not None else None
-        api.reprioritize(req.parent.number, child_issue.id, before_id=before_id, after_id=after_id)
-    return req.child.slug
-
-
-@validate_call
-def get_children_json(root: IssueRef, recursive: bool = False) -> list[dict]:
-    """Get children as list of dicts for JSON output.
-
-    Args:
-        root: The root issue reference.
-        recursive: If True, returns all descendants; if False, direct children only.
-
-    Returns:
-        List of issue dictionaries.
-    """
-    if recursive:
-        nodes = get_descendants_preorder(root)
-    else:
-        nodes = get_direct_children(root)
-    return [node.issue.model_dump() for node in nodes]
-
-
-@validate_call
-def get_tree_json(root: IssueRef) -> dict:
-    """Get full tree as dict for JSON output."""
-    node = materialize(root)
-    return node.model_dump()
-
-
-@validate_call
-def get_next_leaf_json(root: IssueRef) -> dict | None:
-    """Get first open leaf as dict for JSON output."""
-    node = next_leaf(root)
-    if node is None:
-        return None
-    return node.issue.model_dump()
-
-
-@validate_call
-def get_path_json(issue: IssueRef, root: IssueRef | None = None) -> list[dict] | None:
-    """Get path from root to issue as list of dicts."""
-    if root is None:
-        root = issue
-    path_nodes = get_path(issue, root)
-    if path_nodes is None:
-        return None
-    return [node.issue.model_dump() for node in path_nodes]
-
-
-@validate_call
-def validate_tree_command(root: IssueRef) -> list[dict]:
-    """Validate tree and return violations as list of dicts."""
-    violations = full_validate(root)
-    return [v.model_dump() for v in violations]
-
-
-@validate_call
-def do_close(
-    issue: IssueRef,
-    comment: str | None = None,
-    reason: IssueCloseReason = IssueCloseReason.completed,
-) -> str:
-    """Close issue with optional comment and reason. Returns issue reference string."""
-    api = GithubApi.from_issue_ref(issue)
-    closed = api.close_issue(issue.number, comment=comment, reason=reason)
-    return f"{issue.owner}/{issue.repo}#{closed.number}"
-
-
-# CLI definitions - thin wrappers only
-
-app = App(help="Deterministic traversal for GitHub sub-issue trees.")
+app = App(
+    help="Deterministic traversal for GitHub sub-issue trees.",
+    help_prologue=_WORKFLOW_PROLOGUE,
+)
 
 
 def parse_ref(raw: str) -> IssueRef:
@@ -156,56 +60,84 @@ def parse_repo(raw: str) -> RepoRef:
     return RepoRef.parse(raw)
 
 
-@app.command
-@validate_call
+@app.command(group="Structural")
 def init(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     title: Annotated[str, Parameter(help="Title for the root issue")],
     *,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
 ) -> None:
-    """Create a new root issue for a traversal domain."""
+    """Create a new root issue for a traversal domain.
+
+    Example:
+        $ itree init owner/project-alpha "Project Alpha"
+        owner/project-alpha#1
+    """
     repo_ref = parse_repo(repo)
-    ref = create_root_issue(repo_ref, title, body)
-    print(ref)
+    api = GithubApi.from_repo_ref(repo_ref)
+    issue = api.create_issue(title, body)
+    print(f"{repo_ref.owner}/{repo_ref.repo}#{issue.number}")
 
 
-@app.command
+@app.command(group="Structural")
 def add(
     root: Annotated[str, Parameter(help="Root issue as OWNER/REPO#N")],
     title: Annotated[str, Parameter(help="Title for the new child issue")],
     *,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
 ) -> None:
-    """Create a new child issue and attach it to the root."""
+    """Create a new child issue and attach it to the root.
+
+    Example:
+        $ itree add owner/project-alpha#1 "Frontend"
+        owner/project-alpha#2
+    """
     root_ref = parse_ref(root)
-    child_ref = add_child_to_root(root_ref, title, body)
-    print(child_ref)
+    api = GithubApi.from_issue_ref(root_ref)
+    child = api.create_issue(title, body)
+    api.add_subissue(root_ref.number, child.id, replace_parent=False)
+    print(f"{root_ref.owner}/{root_ref.repo}#{child.number}")
 
 
-@app.command
+@app.command(group="Structural")
 def attach(
     parent: Annotated[str, Parameter(help="Parent issue as OWNER/REPO#N")],
     child: Annotated[str, Parameter(help="Child issue as OWNER/REPO#N")],
     *,
     replace_parent: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """Attach an existing issue as a sub-issue of a parent."""
-    child_ref = do_attach(parse_ref(parent), parse_ref(child), replace_parent)
-    print(child_ref)
+    """Attach an existing issue as a sub-issue of a parent.
+
+    Example:
+        $ itree attach owner/project-alpha#1 owner/project-alpha#5
+        owner/project-alpha#5
+    """
+    req = AttachRequest(parent=parse_ref(parent), child=parse_ref(child), replace_parent=replace_parent)
+    api = GithubApi.from_issue_ref(req.parent)
+    child_issue = api.get_issue(req.child.number)
+    api.add_subissue(req.parent.number, child_issue.id, replace_parent=req.replace_parent)
+    print(req.child.slug)
 
 
-@app.command
+@app.command(group="Structural")
 def detach(
     parent: Annotated[str, Parameter(help="Parent issue as OWNER/REPO#N")],
     child: Annotated[str, Parameter(help="Child issue as OWNER/REPO#N")],
 ) -> None:
-    """Detach a sub-issue from its parent."""
-    child_ref = do_detach(parse_ref(parent), parse_ref(child))
-    print(child_ref)
+    """Detach a sub-issue from its parent.
+
+    Example:
+        $ itree detach owner/project-alpha#1 owner/project-alpha#5
+        owner/project-alpha#5
+    """
+    req = DetachRequest(parent=parse_ref(parent), child=parse_ref(child))
+    api = GithubApi.from_issue_ref(req.parent)
+    child_issue = api.get_issue(req.child.number)
+    api.remove_subissue(req.parent.number, child_issue.id)
+    print(req.child.slug)
 
 
-@app.command
+@app.command(group="Structural")
 def move(
     child: Annotated[str, Parameter(help="Issue to move as OWNER/REPO#N")],
     under: Annotated[str, Parameter(help="New parent as OWNER/REPO#N")],
@@ -213,84 +145,119 @@ def move(
     before: Annotated[str | None, Parameter(help="Place before sibling OWNER/REPO#N")] = None,
     after: Annotated[str | None, Parameter(help="Place after sibling OWNER/REPO#N")] = None,
 ) -> None:
-    """Move issue under new parent, optionally positioned relative to siblings."""
-    child_ref = parse_ref(child)
-    parent_ref = parse_ref(under)
-    before_ref = parse_ref(before) if before else None
-    after_ref = parse_ref(after) if after else None
-    result = do_move(child_ref, parent_ref, before=before_ref, after=after_ref)
-    print(result)
+    """Move issue under new parent, optionally positioned relative to siblings.
+
+    Example:
+        $ itree move owner/project-alpha#5 --under owner/project-alpha#3
+        owner/project-alpha#5
+    """
+    req = MoveRequest(
+        child=parse_ref(child),
+        parent=parse_ref(under),
+        before=parse_ref(before) if before else None,
+        after=parse_ref(after) if after else None,
+    )
+    api = GithubApi.from_issue_ref(req.parent)
+    child_issue = api.get_issue(req.child.number)
+    api.add_subissue(req.parent.number, child_issue.id, replace_parent=True)
+    if req.before is not None or req.after is not None:
+        before_id = api.get_issue(req.before.number).id if req.before is not None else None
+        after_id = api.get_issue(req.after.number).id if req.after is not None else None
+        api.reprioritize(req.parent.number, child_issue.id, before_id=before_id, after_id=after_id)
+    print(req.child.slug)
 
 
-@app.command
+@app.command(group="Query")
 def children(
     root: Annotated[str, Parameter(help="Root issue as OWNER/REPO#N")],
     *,
     recursive: Annotated[bool, Parameter()] = False,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """List children of an issue."""
-    root_ref = parse_ref(root)
+    """List children of an issue.
+
+    Builds the full DAG, then extracts children from the materialized tree.
+
+    Example:
+        $ itree children owner/project-alpha#1
+        #2: Frontend
+        #3: Backend
+        #4: Docs
+    """
+    dag, tree = _build_tree(parse_ref(root))
     if recursive:
-        nodes = get_descendants_preorder(root_ref)
+        nodes = tree.descendants()
     else:
-        nodes = get_direct_children(root_ref)
+        nodes = tree.children
     if as_json:
-        result = [node.issue.model_dump() for node in nodes]
-        print(json.dumps(result, indent=2))
+        print(json.dumps([node.issue.model_dump() for node in nodes], indent=2))
     else:
         for node in nodes:
             print(f"#{node.issue.number}: {node.issue.title}")
 
 
-@app.command
+@app.command(group="Query")
 def tree(root: Annotated[str, Parameter(help="Root issue as OWNER/REPO#N")]) -> None:
-    """Print the materialized rooted ordered tree as JSON."""
-    root_ref = parse_ref(root)
-    result = get_tree_json(root_ref)
-    print(json.dumps(result, indent=2))
+    """Print the materialized rooted ordered tree as JSON.
+
+    Builds the full DAG, then materializes the tree rooted at the given issue.
+
+    Example:
+        $ itree tree owner/project-alpha#1
+        {"issue": {"number": 1, ...}, "children": [{...}, ...]}
+    """
+    _dag, tree_node = _build_tree(parse_ref(root))
+    print(json.dumps(tree_node.model_dump(), indent=2))
 
 
-@app.command
+@app.command(group="Query")
 def next(
     root: Annotated[str, Parameter(help="Root issue as OWNER/REPO#N")],
     *,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """Print the first open leaf under ROOT in preorder."""
-    root_ref = parse_ref(root)
+    """Find the first open leaf under ROOT in preorder.
+
+    An open leaf has no open children -- it is the smallest undecomposed
+    unit of work. Returns None if no open leaves remain.
+
+    Builds the full DAG, then finds the first open leaf.
+
+    Example:
+        $ itree next owner/project-alpha#1
+        #5: Login page
+    """
+    _dag, tree_node = _build_tree(parse_ref(root))
+    node = tree_node.first_open_leaf()
     if as_json:
-        result = get_next_leaf_json(root_ref)
-        if result is None:
-            print("{}")
-        else:
-            print(json.dumps(result, indent=2))
+        print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
     else:
-        node = next_leaf(root_ref)
-        if node is None:
-            print("No open leaves found")
-        else:
-            print(f"#{node.issue.number}: {node.issue.title}")
+        print("No open leaves found" if node is None else f"#{node.issue.number}: {node.issue.title}")
 
 
-@app.command
+@app.command(group="Query")
 def path(
     issue: Annotated[str, Parameter(help="Issue as OWNER/REPO#N")],
     *,
     root: Annotated[str | None, Parameter(help="Root issue as OWNER/REPO#N")] = None,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """Print the path from root to the given issue."""
+    """Print the path from root to the given issue.
+
+    Builds the full DAG, then finds the path.
+
+    Example:
+        $ itree path owner/project-alpha#5 --root owner/project-alpha#1
+        #1: Project Alpha
+        #2: Frontend
+        #5: Login page
+    """
     issue_ref = parse_ref(issue)
-    root_ref = parse_ref(root) if root else None
+    _dag, tree_node = _build_tree(parse_ref(root) if root else issue_ref)
+    path_nodes = tree_node.path_to(issue_ref.number)
     if as_json:
-        result = get_path_json(issue_ref, root_ref)
-        if result is None:
-            print("[]")
-        else:
-            print(json.dumps(result, indent=2))
+        print("[]" if path_nodes is None else json.dumps([n.issue.model_dump() for n in path_nodes], indent=2))
     else:
-        path_nodes = get_path(issue_ref, root_ref or issue_ref)
         if path_nodes is None:
             print(f"Issue #{issue_ref.number} not found")
         else:
@@ -298,16 +265,24 @@ def path(
                 print(f"#{node.issue.number}: {node.issue.title}")
 
 
-@app.command
+@app.command(group="Query")
 def validate(root: Annotated[str, Parameter(help="Root issue as OWNER/REPO#N")]) -> None:
-    """Validate the tree rooted at ROOT."""
-    root_ref = parse_ref(root)
-    result = validate_tree_command(root_ref)
-    print(json.dumps(result, indent=2))
+    """Validate the tree rooted at ROOT.
+
+    Builds the full DAG, materializes the tree, then checks for:
+    - Duplicate reachable issues
+    - Open internal nodes whose decomposition has stalled
+
+    Example:
+        $ itree validate owner/project-alpha#1
+        []
+    """
+    _dag, tree_node = _build_tree(parse_ref(root))
+    violations = validate_tree(tree_node)
+    print(json.dumps([v.model_dump() for v in violations], indent=2))
 
 
-@app.command
-@validate_call
+@app.command(group="Terminal")
 def close(
     issue: Annotated[str, Parameter(help="Issue to close as OWNER/REPO#N")],
     *,
@@ -317,10 +292,177 @@ def close(
         Parameter(help="Reason for closing: completed, not_planned, or reopened"),
     ] = IssueCloseReason.completed,
 ) -> None:
-    """Close an issue with optional comment and reason."""
+    """Close an issue with optional comment and reason.
+
+    Example:
+        $ itree close owner/project-alpha#5 --reason completed
+        owner/project-alpha#5
+    """
     issue_ref = parse_ref(issue)
-    result = do_close(issue_ref, comment, reason)
-    print(result)
+    api = GithubApi.from_issue_ref(issue_ref)
+    api.close_issue(issue_ref.number, comment=comment, reason=reason)
+    print(issue_ref.slug)
+
+
+@app.command(group="Diagnostic")
+def doctor(
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
+    *,
+    as_json: Annotated[bool, Parameter()] = False,
+) -> None:
+    """Scan the full repo issue DAG and report structure.
+
+    Builds the entire issue graph, identifies roots, orphans,
+    and validates every tree for invariant violations.
+
+    Example:
+        $ itree owner/project-alpha
+        Repository: owner/project-alpha
+        Issues: 12 total, 8 open
+
+        Roots: 1
+          #1 "Project Alpha" (open, 11 descendants)
+
+        Orphans: 0
+
+        Violations: 0
+    """
+    dag = build_dag(parse_repo(repo))
+
+    total = len(dag.issues)
+    open_count = sum(1 for i in dag.issues.values() if i.is_open)
+    roots = dag.roots
+    orphans = dag.orphans
+
+    # Collect violations: DAG-level structural failures + per-tree invariants.
+    all_violations: list = []
+    all_violations.extend(validate_dag(dag))
+    root_nodes: list[TreeNode] = []
+    for root in roots:
+        tree_node = dag.materialize_root(root.number)
+        root_nodes.append(tree_node)
+        all_violations.extend(validate_tree(tree_node))
+
+    if as_json:
+        result = {
+            "repository": dag.slug,
+            "total_issues": total,
+            "open_issues": open_count,
+            "roots": [
+                {
+                    "number": r.number,
+                    "title": r.title,
+                    "state": r.state,
+                    "descendants": len(root_node.descendants()),
+                }
+                for r, root_node in zip(roots, root_nodes)
+            ],
+            "orphans": [
+                {"number": o.number, "title": o.title, "state": o.state}
+                for o in orphans
+            ],
+            "violations": [v.model_dump() for v in all_violations],
+        }
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"Repository: {dag.slug}")
+        print(f"Issues: {total} total, {open_count} open")
+        print()
+
+        print(f"Roots: {len(roots)}")
+        for root_node, r in zip(root_nodes, roots):
+            print(f'  #{r.number} "{r.title}" ({r.state}, {len(root_node.descendants())} descendants)')
+        if not roots:
+            print("  (none)")
+        print()
+
+        print(f"Orphans: {len(orphans)}")
+        for o in orphans:
+            print(f'  #{o.number} "{o.title}" ({o.state})')
+        if not orphans:
+            print("  (none)")
+        print()
+
+        print(f"Violations: {len(all_violations)}")
+        for v in all_violations:
+            loc = f" (#{v.issue_number})" if v.issue_number else ""
+            print(f"  {v.code}: {v.message}{loc}")
+        if not all_violations:
+            print("  (none)")
+
+
+@app.command(group="Diagnostic")
+def forest(
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
+    *,
+    as_json: Annotated[bool, Parameter()] = False,
+) -> None:
+    """List every independent tree (root) in the repository.
+
+    Builds the full DAG and reports each root with its subtree size.
+
+    Example:
+        $ itree owner/project-alpha
+        #1 "Project Alpha" (12 issues, 8 open)
+        #15 "Sprint 2024-W3" (5 issues, 3 open)
+    """
+    dag = build_dag(parse_repo(repo))
+    roots = dag.roots
+
+    if as_json:
+        result = []
+        for r in roots:
+            tree = dag.materialize_root(r.number)
+            all_nodes = tree.preorder()
+            result.append({
+                "number": r.number,
+                "title": r.title,
+                "state": r.state,
+                "total_issues": len(all_nodes),
+                "open_issues": sum(1 for n in all_nodes if n.issue.is_open),
+            })
+        print(json.dumps(result, indent=2))
+    else:
+        if not roots:
+            print("No root issues found in this repository.")
+            return
+        for r in roots:
+            tree = dag.materialize_root(r.number)
+            all_nodes = tree.preorder()
+            total = len(all_nodes)
+            open_count = sum(1 for n in all_nodes if n.issue.is_open)
+            print(f'#{r.number} "{r.title}" ({total} issues, {open_count} open)')
+
+
+@app.command(group="Diagnostic")
+def orphans(
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
+    *,
+    as_json: Annotated[bool, Parameter()] = False,
+) -> None:
+    """List issues not reachable from any root.
+
+    These are issues that exist in the repo but aren't attached
+    to any sub-issue tree.
+
+    Example:
+        $ itree owner/project-alpha
+        #23 "Fix login redirect" (open)
+        #27 "Update README" (closed)
+    """
+    orphan_list = build_dag(parse_repo(repo)).orphans
+
+    if as_json:
+        print(json.dumps([
+            {"number": o.number, "title": o.title, "state": o.state}
+            for o in orphan_list
+        ], indent=2))
+    else:
+        if not orphan_list:
+            print("No orphaned issues.")
+            return
+        for o in orphan_list:
+            print(f'#{o.number} "{o.title}" ({o.state})')
 
 
 if __name__ == "__main__":
