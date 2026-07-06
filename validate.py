@@ -3,6 +3,7 @@ import re
 import os
 from typing import Literal
 
+from pydantic import BaseModel
 from .models import RepoDag, TreeNode, Finding, DoctorReport, IssueRef, RepoRef, GithubIssue
 
 DIAGNOSTIC_CATALOG = {
