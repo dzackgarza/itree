@@ -167,3 +167,12 @@ class GithubApi(BaseModel):
             return tuple(GithubIssue.model_validate(item) for item in items)
         except Exception:
             return ()
+
+    def update_issue_body(self, number: int, body: str) -> GithubIssue:
+        """Update the body of a GitHub issue."""
+        proc = self._exec(
+            "PATCH",
+            f"repos/{self.owner}/{self.repo}/issues/{number}",
+            fields={"body": body},
+        )
+        return GithubIssue.model_validate(json.loads(proc.stdout))
