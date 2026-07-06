@@ -29,15 +29,22 @@ def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:
     # sub-issues API returns ALL children (open and closed), but list_all_issues
     # only returns open issues, so closed children won't be in our dict.
     children_of: dict[int, tuple[int, ...]] = {}
+    dependencies: dict[int, tuple[int, ...]] = {}
     for issue in all_issues:
         children = api.list_subissues(issue.number)
         if children:
             present = tuple(c.number for c in children if c.number in issues_by_number)
             if present:
                 children_of[issue.number] = present
+        
+        # Check blocked_by dependencies
+        blocked_by = api.list_blocked_by(issue.number)
+        if blocked_by:
+            dependencies[issue.number] = tuple(b.number for b in blocked_by)
 
     return RepoDag(
         repo_ref=repo_ref,
         issues=issues_by_number,
         children_of=children_of,
+        dependencies=dependencies,
     )
