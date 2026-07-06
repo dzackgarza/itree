@@ -220,7 +220,7 @@ def validate_tree(root: TreeNode) -> list[TreeViolation]:
 
 
 def parse_milestone_ledger_name(title: str) -> str | None:
-    m = re.match(r"^(?i)milestone:\s*(?P<name>.+)$", title)
+    m = re.match(r"(?i)^milestone:\s*(?P<name>.+)$", title)
     if m:
         return m.group("name").strip()
     return None
