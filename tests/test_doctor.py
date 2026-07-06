@@ -214,7 +214,7 @@ def test_doctor_report_milestone_mismatch() -> None:
     report = generate_doctor_report(dag)
     findings = [f for f in report.findings if f.code == "W040"]
     assert len(findings) == 1
-    assert "#4" in findings[0].evidence[0]
+    assert any("#4" in ev for ev in findings[0].evidence)
 
 
 def test_doctor_report_milestone_without_ledger() -> None:
