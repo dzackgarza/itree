@@ -1,31 +1,169 @@
 from __future__ import annotations
+import re
+import os
+from typing import Literal
 
-from pydantic import BaseModel
+from .models import RepoDag, TreeNode, Finding, DoctorReport, IssueRef, RepoRef, GithubIssue
 
-from .models import RepoDag, TreeNode
+DIAGNOSTIC_CATALOG = {
+    "E001": {
+        "title": "no_root_ledger",
+        "severity": "error",
+        "meaning": "There is no unique traversal domain. Parentless issues form a forest, so `itree next` would require an arbitrary choice.",
+        "remediation": [
+            "1. Create one ledger issue:",
+            "     itree root create OWNER/REPO --title \"Ledger: OWNER/REPO\"",
+            "2. Attach every open planned issue under that ledger, either directly or",
+            "   through a milestone ledger / work unit:",
+            "     itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE",
+            "3. Declare the root in .github/itree.toml or in the issue body marker.",
+            "Do not create multiple ledger issues. A milestone, project, roadmap, or epic is not a root."
+        ],
+    },
+    "E002": {
+        "title": "multiple_root_ledgers",
+        "severity": "error",
+        "meaning": "This is a forest, not one ordered tree. The app cannot define a repository-wide next issue without choosing among roots.",
+        "remediation": [
+            "1. Choose exactly one ledger issue.",
+            "2. Remove the root marker from all others.",
+            "3. Attach the former roots as ordered children of the chosen root if they still represent planned work.",
+            "4. Put the active/current child first; preorder defines execution order."
+        ],
+    },
+    "E010": {
+        "title": "unreachable_open_issues",
+        "severity": "error",
+        "meaning": "These issues are not in the repository's deterministic traversal path. An agent following `itree next` will never reach them.",
+        "remediation": [
+            "A. If the issue belongs to existing work:",
+            "     itree attach OWNER/REPO#WORK_UNIT OWNER/REPO#ISSUE",
+            "B. If the issue is broad:",
+            "     create a work unit under the appropriate milestone ledger,",
+            "     then attach this issue beneath it.",
+            "C. If the issue is future work:",
+            "     attach it under the Backlog ledger, which must itself be a child of root.",
+            "D. If the issue is stale or not planned:",
+            "     close it as not planned.",
+            "Do not leave it parentless. Parentless open issues are accidental roots."
+        ],
+    },
+    "E011": {
+        "title": "parentless_non_root_issues",
+        "severity": "error",
+        "meaning": "These are accidental roots. Investigate intended parentage and attach them under the ledger.",
+        "remediation": [
+            "A. Attach this issue under the root ledger, a milestone ledger, or a work unit.",
+            "B. Close the issue if it is no longer planned."
+        ],
+    },
+    "E012": {
+        "title": "closed_parent_with_open_descendants",
+        "severity": "error",
+        "meaning": "Traversal may skip live work. Reopen the parent or move the descendants.",
+        "remediation": [
+            "A. Reopen the parent issue.",
+            "B. Move or detach the open children so they are attached under an open parent."
+        ],
+    },
+    "E013": {
+        "title": "duplicate_reachable_issue",
+        "severity": "error",
+        "meaning": "Tree invariant is violated. Remove the duplicate edge before continuing.",
+        "remediation": [
+            "A. Detach the issue from one of its multiple parents so it only appears once."
+        ],
+    },
+    "E014": {
+        "title": "dependency_edges_present",
+        "severity": "error",
+        "meaning": "This model does not use DAG scheduling. Move blockers earlier in preorder or decompose the blocked issue.",
+        "remediation": [
+            "A. Remove the blocked_by dependency using the GitHub UI or API.",
+            "B. Reorder the issues in the tree so the blocker appears earlier in preorder."
+        ],
+    },
+    "W020": {
+        "title": "depth_near_limit",
+        "severity": "warning",
+        "meaning": "GitHub supports at most eight nested sub-issue levels; split or flatten before the tree hits the limit.",
+        "remediation": [
+            "A. Flatten the tree by moving sub-issues to a higher parent.",
+            "B. Decompose the work into smaller separate trees or milestone ledgers."
+        ],
+    },
+    "W030": {
+        "title": "singleton_work_unit",
+        "severity": "warning",
+        "meaning": "This repository treats PRs as review units for constellations of work. A single leaf task normally does not justify a standalone PR.",
+        "remediation": [
+            "- Merge this issue into the neighboring work unit.",
+            "- Decompose the issue into several task leaves.",
+            "- Mark it as a singleton work unit only if it is a genuinely large change, such as an architecture change, migration, or major refactor."
+        ],
+    },
+    "W031": {
+        "title": "oversized_work_unit",
+        "severity": "warning",
+        "meaning": "Review scope is probably too large. Split into ordered child work units.",
+        "remediation": [
+            "A. Decompose this work unit into multiple smaller, ordered child work units."
+        ],
+    },
+    "W032": {
+        "title": "leaf_has_pr",
+        "severity": "warning",
+        "meaning": "The leaf is an execution step. The enclosing work unit is the review boundary.",
+        "remediation": [
+            "- Change the PR description to close/link the work unit issue.",
+            "- Mention leaf issues as context, not as the primary review target.",
+            "- If the leaf really is the full review unit, mark it as a justified singleton work unit."
+        ],
+    },
+    "W040": {
+        "title": "milestone_mismatch",
+        "severity": "warning",
+        "meaning": "The tree defines traversal. The GitHub milestone defines release/time grouping. They should normally agree so Projects and milestone progress views remain useful.",
+        "remediation": [
+            "- Move the issue to the correct milestone ledger, or",
+            "- Set its GitHub milestone to match the ledger, or",
+            "- Move it to Backlog if it is not release-scoped."
+        ],
+    },
+    "W041": {
+        "title": "milestone_without_ledger",
+        "severity": "warning",
+        "meaning": "Create a milestone ledger under the root, or deliberately keep milestones outside tree policy.",
+        "remediation": [
+            "A. Create a milestone ledger issue under the root ledger representing this milestone.",
+            "B. Clear the milestone from the issues if it is not meant to be tracked."
+        ],
+    },
+    "W050": {
+        "title": "missing_acceptance_criteria",
+        "severity": "warning",
+        "meaning": "Agents should not infer completion semantics. Add explicit done criteria.",
+        "remediation": [
+            "A. Edit the issue body to add a \"Done when\", \"Done Criteria\", or \"Acceptance Criteria\" section."
+        ],
+    },
+    "I001": {
+        "title": "valid_tree",
+        "severity": "info",
+        "meaning": "Traversal is deterministic. The reported next issue is safe for agents.",
+        "remediation": [],
+    }
+}
 
-
+# Keep original classes and functions so existing code and tests do not break.
 class TreeViolation(BaseModel):
-    """A single tree invariant violation."""
-
     code: str
     message: str
     issue_number: int | None = None
 
 
 def validate_dag(dag: RepoDag) -> list[TreeViolation]:
-    """Validate DAG-level structural invariants.
-
-    Checks for:
-    - Fragmented forest: more than one root means the graph is not a tree.
-    - Orphaned issues: issues not reachable from any root.
-
-    Args:
-        dag: The full repository DAG to validate.
-
-    Returns:
-        List of TreeViolation objects describing structural failures.
-    """
+    """Validate DAG-level structural invariants (stub for backward compatibility)."""
     violations: list[TreeViolation] = []
     roots = dag.roots
     orphans = dag.orphans
@@ -35,7 +173,7 @@ def validate_dag(dag: RepoDag) -> list[TreeViolation]:
         violations.append(
             TreeViolation(
                 code="fragmented_forest",
-                message=f"graph has {len(roots)} roots ({root_numbers}) \u2014 not a single tree",
+                message=f"graph has {len(roots)} roots ({root_numbers}) — not a single tree",
             )
         )
 
@@ -52,21 +190,7 @@ def validate_dag(dag: RepoDag) -> list[TreeViolation]:
 
 
 def validate_tree(root: TreeNode) -> list[TreeViolation]:
-    """Validate tree invariants.
-
-    Checks for:
-    - Duplicate reachable issues
-    - Open internal nodes whose decomposition has no open descendants
-
-    Uses TreeNode.preorder() for traversal.
-
-    Args:
-        root: The root TreeNode to validate.
-
-    Returns:
-        List of TreeViolation objects describing any issues found.
-        Empty list means the tree is valid.
-    """
+    """Validate tree invariants (stub for backward compatibility)."""
     violations: list[TreeViolation] = []
     seen: set[int] = set()
 
@@ -93,3 +217,494 @@ def validate_tree(root: TreeNode) -> list[TreeViolation]:
 
     return violations
 
+
+def parse_milestone_ledger_name(title: str) -> str | None:
+    m = re.match(r"^(?i)milestone:\s*(?P<name>.+)$", title)
+    if m:
+        return m.group("name").strip()
+    return None
+
+
+def is_backlog_ledger(title: str) -> bool:
+    return title.lower().startswith("backlog")
+
+
+def is_singleton_justified(issue: GithubIssue) -> bool:
+    if not issue.body:
+        return False
+    body_lower = issue.body.lower()
+    return (
+        "itree:role=singleton" in body_lower
+        or "itree:singleton" in body_lower
+        or "itree:role=singleton-work-unit" in body_lower
+        or "itree:singleton=true" in body_lower
+    )
+
+
+def lacks_acceptance_criteria(body: str | None) -> bool:
+    if not body:
+        return True
+    body_lower = body.lower()
+    return not (
+        "done when" in body_lower
+        or "done criteria" in body_lower
+        or "acceptance criteria" in body_lower
+        or "acceptance" in body_lower
+    )
+
+
+def find_enclosing_work_unit(path: tuple[TreeNode, ...]) -> TreeNode | None:
+    # Path goes from root (index 0) to target (index -1)
+    # The enclosing work unit is the first node after root that is not a milestone ledger.
+    for node in path[1:]:
+        title = node.issue.title
+        if parse_milestone_ledger_name(title) is None and not is_backlog_ledger(title):
+            return node
+    return None
+
+
+def get_linked_issue_numbers(body: str | None) -> set[int]:
+    if not body:
+        return set()
+    pattern = r"(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)\s*(?::\s*)?(?:[^\s#]+)?#(?P<number>\d+)\b"
+    return {int(m.group("number")) for m in re.finditer(pattern, body)}
+
+
+def find_root_ledger_candidates(dag: RepoDag, root_flag: str | None = None) -> list[int]:
+    # 1. CLI flag
+    if root_flag:
+        num_str = root_flag.split("#")[-1] if "#" in root_flag else root_flag
+        try:
+            num = int(num_str)
+            if num in dag.issues:
+                return [num]
+        except ValueError:
+            pass
+
+    # 2. Repo config: .github/itree.toml
+    import os
+    config_path = os.path.join(".github", "itree.toml")
+    if os.path.exists(config_path):
+        try:
+            import tomllib
+            with open(config_path, "rb") as f:
+                config = tomllib.load(f)
+                if "root" in config:
+                    val = config["root"]
+                    num_str = val.split("#")[-1] if (isinstance(val, str) and "#" in val) else str(val)
+                    num = int(num_str)
+                    if num in dag.issues:
+                        return [num]
+        except Exception:
+            pass
+
+    # 3. Root issue body marker
+    candidates = []
+    for number, issue in sorted(dag.issues.items()):
+        if issue.body and "<!-- itree:role=root-ledger schema=1 -->" in issue.body:
+            candidates.append(number)
+    return candidates
+
+
+def generate_doctor_report(dag: RepoDag, root_flag: str | None = None) -> DoctorReport:
+    findings_list: list[Finding] = []
+    
+    # 1. Root discovery and validation
+    candidates = find_root_ledger_candidates(dag, root_flag)
+    
+    root_ref = None
+    next_issue_ref = None
+    enclosing_wu_ref = None
+    
+    if len(candidates) == 0:
+        f_details = DIAGNOSTIC_CATALOG["E001"]
+        findings_list.append(Finding(
+            code="E001",
+            severity="error",
+            title=f_details["title"],
+            evidence=[],
+            meaning=f_details["meaning"],
+            remediation=f_details["remediation"],
+        ))
+    elif len(candidates) > 1:
+        f_details = DIAGNOSTIC_CATALOG["E002"]
+        evidence = [f"#{num}  {dag.issues[num].title}" for num in candidates]
+        findings_list.append(Finding(
+            code="E002",
+            severity="error",
+            title=f_details["title"],
+            evidence=evidence,
+            meaning=f_details["meaning"],
+            remediation=f_details["remediation"],
+        ))
+    else:
+        root_num = candidates[0]
+        root_ref = IssueRef(repo_ref=dag.repo_ref, number=root_num)
+        
+    # Metrics dictionary baseline
+    metrics = {
+        "errors": 0,
+        "warnings": 0,
+        "open issues reachable from root": 0,
+        "open issues outside root": 0,
+        "open leaves": 0,
+        "work units": 0,
+        "singleton work-unit warnings": 0,
+        "max depth": 0,
+    }
+
+    if root_ref is not None:
+        root_num = root_ref.number
+        tree_node = dag.materialize_root(root_num)
+        
+        # Traverse tree to collect reachable issues and duplicate violations
+        reachable = set()
+        seen_in_tree = set()
+        duplicated_in_tree = set()
+        
+        # We need to collect parent_of mappings in the materialized tree
+        # since cycles / multiple parents can exist.
+        def traverse_collect(node: TreeNode):
+            num = node.issue.number
+            if num in seen_in_tree:
+                duplicated_in_tree.add(num)
+                return
+            seen_in_tree.add(num)
+            reachable.add(num)
+            for child in node.children:
+                traverse_collect(child)
+                
+        traverse_collect(tree_node)
+        
+        # E013: duplicate reachable issue
+        if duplicated_in_tree:
+            f_details = DIAGNOSTIC_CATALOG["E013"]
+            evidence = [f"issue #{num} appears multiple times in tree" for num in sorted(duplicated_in_tree)]
+            findings_list.append(Finding(
+                code="E013",
+                severity="error",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+            
+        # Collect open issues outside root ledger
+        unreachable_open = []
+        for num, issue in sorted(dag.issues.items()):
+            if issue.is_open and num not in reachable and num != root_num:
+                unreachable_open.append(num)
+                
+        # E010: unreachable open issues
+        if unreachable_open:
+            f_details = DIAGNOSTIC_CATALOG["E010"]
+            evidence = [f"#{num} \"{dag.issues[num].title}\"" for num in unreachable_open]
+            findings_list.append(Finding(
+                code="E010",
+                severity="error",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+            
+        # E011: parentless non-root open issues
+        parentless_non_root = []
+        for num, issue in sorted(dag.issues.items()):
+            if issue.is_open and num != root_num and num not in dag.parent_of:
+                parentless_non_root.append(num)
+                
+        if parentless_non_root:
+            f_details = DIAGNOSTIC_CATALOG["E011"]
+            evidence = [f"#{num} \"{dag.issues[num].title}\"" for num in parentless_non_root]
+            findings_list.append(Finding(
+                code="E011",
+                severity="error",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # E012: closed parent with open descendants
+        closed_with_open_descendants = []
+        # DFS from each closed issue to find any open descendants in DAG
+        for num, issue in sorted(dag.issues.items()):
+            if not issue.is_open:
+                # find open descendants via adjacency children_of
+                visited = set()
+                open_desc = []
+                def find_open(n):
+                    if n in visited:
+                        return
+                    visited.add(n)
+                    for kid in dag.children_of.get(n, ()):
+                        k_issue = dag.issues.get(kid)
+                        if k_issue:
+                            if k_issue.is_open:
+                                open_desc.append(kid)
+                            find_open(kid)
+                find_open(num)
+                if open_desc:
+                    closed_with_open_descendants.append((num, open_desc))
+                    
+        if closed_with_open_descendants:
+            f_details = DIAGNOSTIC_CATALOG["E012"]
+            evidence = [f"closed #{p_num} hides open descendants: {', '.join(f'#{c}' for c in kids)}" for p_num, kids in closed_with_open_descendants]
+            findings_list.append(Finding(
+                code="E012",
+                severity="error",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # E014: dependency edges present
+        dependency_issues = []
+        for num, blockers in sorted(dag.dependencies.items()):
+            if blockers:
+                dependency_issues.append((num, blockers))
+                
+        if dependency_issues:
+            f_details = DIAGNOSTIC_CATALOG["E014"]
+            evidence = [f"issue #{num} blocked by: {', '.join(f'#{b}' for b in blockers)}" for num, blockers in dependency_issues]
+            findings_list.append(Finding(
+                code="E014",
+                severity="error",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # Tree metrics and level validation
+        tree_nodes = tree_node.preorder()
+        
+        # Max depth check
+        max_depth = 0
+        def calculate_depths(node: TreeNode, current_depth: int):
+            nonlocal max_depth
+            if current_depth > max_depth:
+                max_depth = current_depth
+            for child in node.children:
+                calculate_depths(child, current_depth + 1)
+        calculate_depths(tree_node, 0)
+        
+        # W020: depth near limit
+        if max_depth >= 6: # Depth >= 7 (0-indexed max_depth >= 6)
+            f_details = DIAGNOSTIC_CATALOG["W020"]
+            findings_list.append(Finding(
+                code="W020",
+                severity="warning",
+                title=f_details["title"],
+                evidence=[f"materialized tree depth is {max_depth + 1}"],
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # Find enclosing work units and milestones
+        work_units_set = set()
+        milestone_ledgers_in_tree = set()
+        milestone_ledger_names = set()
+        backlog_ledgers_in_tree = set()
+        
+        for node in tree_nodes:
+            title = node.issue.title
+            m_name = parse_milestone_ledger_name(title)
+            if m_name is not None:
+                milestone_ledgers_in_tree.add(node)
+                milestone_ledger_names.add(m_name)
+            elif is_backlog_ledger(title):
+                backlog_ledgers_in_tree.add(node)
+                
+            path = tree_node.path_to(node.issue.number)
+            if path:
+                wu = find_enclosing_work_unit(path)
+                if wu:
+                    work_units_set.add(wu)
+
+        # W041: active milestone without milestone ledger
+        active_milestones = set()
+        for issue in dag.issues.values():
+            if issue.is_open and issue.milestone is not None:
+                active_milestones.add(issue.milestone.title)
+                
+        missing_milestones = sorted(active_milestones - milestone_ledger_names)
+        if missing_milestones:
+            f_details = DIAGNOSTIC_CATALOG["W041"]
+            evidence = [f"milestone \"{m}\" is active but has no ledger child" for m in missing_milestones]
+            findings_list.append(Finding(
+                code="W041",
+                severity="warning",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # W040: milestone mismatch check
+        mismatch_issues = []
+        # Check milestone ledgers
+        for ml_node in milestone_ledgers_in_tree:
+            m_name = parse_milestone_ledger_name(ml_node.issue.title)
+            for desc in ml_node.descendants():
+                if desc.issue.milestone is None or desc.issue.milestone.title != m_name:
+                    mismatch_issues.append((desc.issue.number, desc.issue.title, m_name, desc.issue.milestone.title if desc.issue.milestone else "None"))
+                    
+        # Check backlog ledgers (should have no milestone)
+        for bl_node in backlog_ledgers_in_tree:
+            for desc in bl_node.descendants():
+                if desc.issue.milestone is not None:
+                    mismatch_issues.append((desc.issue.number, desc.issue.title, "None", desc.issue.milestone.title))
+                    
+        if mismatch_issues:
+            f_details = DIAGNOSTIC_CATALOG["W040"]
+            evidence = [f"#{num} \"{title}\" expected milestone {expected}, got {actual}" for num, title, expected, actual in mismatch_issues]
+            findings_list.append(Finding(
+                code="W040",
+                severity="warning",
+                title=f_details["title"],
+                evidence=evidence,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # W030 & W031: work unit size check
+        singleton_wu_count = 0
+        singleton_wu_findings = []
+        oversized_wu_findings = []
+        for wu in sorted(work_units_set, key=lambda w: w.issue.number):
+            desc_tasks = wu.descendants()
+            # A leaf descendant is one with no open descendants
+            # The prompt refers to "leaves" or "descendants"
+            open_desc_count = len([d for d in desc_tasks if d.issue.is_open])
+            
+            # W030: singleton work unit
+            if open_desc_count <= 1 and not is_singleton_justified(wu.issue):
+                singleton_wu_count += 1
+                singleton_wu_findings.append(f"work unit #{wu.issue.number} has {open_desc_count} open tasks and no justification")
+                
+            # W031: oversized work unit (> 10 leaves)
+            # Count leaves (nodes with no children in the subtree)
+            leaves = [d for d in desc_tasks if not d.children]
+            if len(leaves) > 10:
+                oversized_wu_findings.append(f"work unit #{wu.issue.number} has {len(leaves)} task leaves")
+
+        if singleton_wu_findings:
+            f_details = DIAGNOSTIC_CATALOG["W030"]
+            findings_list.append(Finding(
+                code="W030",
+                severity="warning",
+                title=f_details["title"],
+                evidence=singleton_wu_findings,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        if oversized_wu_findings:
+            f_details = DIAGNOSTIC_CATALOG["W031"]
+            findings_list.append(Finding(
+                code="W031",
+                severity="warning",
+                title=f_details["title"],
+                evidence=oversized_wu_findings,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # Collect PR references from PR issues
+        linked_by_prs = set()
+        prs = [issue for issue in dag.issues.values() if issue.pull_request is not None]
+        for pr in prs:
+            linked_by_prs.update(get_linked_issue_numbers(pr.body))
+
+        # W032 & W050: leaf task validations
+        leaf_pr_findings = []
+        missing_ac_findings = []
+        
+        # An open leaf task in the tree
+        open_leaves = [n for n in tree_nodes if n.issue.is_open and all(not child.first_open_leaf() for child in n.children)]
+        
+        for leaf in sorted(open_leaves, key=lambda l: l.issue.number):
+            # We don't flag if it is a justified singleton work unit itself
+            if not is_singleton_justified(leaf.issue):
+                if leaf.issue.number in linked_by_prs:
+                    leaf_pr_findings.append(f"leaf task #{leaf.issue.number} has linked PR")
+                if lacks_acceptance_criteria(leaf.issue.body):
+                    missing_ac_findings.append(f"leaf task #{leaf.issue.number} lacks acceptance criteria")
+                    
+        if leaf_pr_findings:
+            f_details = DIAGNOSTIC_CATALOG["W032"]
+            findings_list.append(Finding(
+                code="W032",
+                severity="warning",
+                title=f_details["title"],
+                evidence=leaf_pr_findings,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        if missing_ac_findings:
+            f_details = DIAGNOSTIC_CATALOG["W050"]
+            findings_list.append(Finding(
+                code="W050",
+                severity="warning",
+                title=f_details["title"],
+                evidence=missing_ac_findings,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            ))
+
+        # Populate metrics
+        metrics["open issues reachable from root"] = len([n for n in tree_nodes if n.issue.is_open])
+        metrics["open issues outside root"] = len(unreachable_open)
+        metrics["open leaves"] = len(open_leaves)
+        metrics["work units"] = len(work_units_set)
+        metrics["singleton work-unit warnings"] = singleton_wu_count
+        metrics["max depth"] = max_depth + 1
+
+        # Locate next issue and enclosing work unit
+        next_node = tree_node.first_open_leaf()
+        if next_node:
+            next_issue_ref = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
+            path_to_next = tree_node.path_to(next_node.issue.number)
+            if path_to_next:
+                wu_node = find_enclosing_work_unit(path_to_next)
+                if wu_node:
+                    enclosing_wu_ref = IssueRef(repo_ref=dag.repo_ref, number=wu_node.issue.number)
+
+    # Determine status
+    errors_count = sum(1 for f in findings_list if f.severity == "error")
+    warnings_count = sum(1 for f in findings_list if f.severity == "warning")
+    
+    metrics["errors"] = errors_count
+    metrics["warnings"] = warnings_count
+    
+    if errors_count > 0:
+        status = "error"
+    elif warnings_count > 0:
+        status = "warning"
+    else:
+        status = "ok"
+        # If perfect, append Info finding I001
+        f_details = DIAGNOSTIC_CATALOG["I001"]
+        findings_list.append(Finding(
+            code="I001",
+            severity="info",
+            title=f_details["title"],
+            evidence=[],
+            meaning=f_details["meaning"],
+            remediation=f_details["remediation"],
+        ))
+
+    # Compile the final report
+    return DoctorReport(
+        repo=dag.slug,
+        status=status,
+        root=root_ref,
+        next_issue=next_issue_ref,
+        enclosing_work_unit=enclosing_wu_ref,
+        metrics=metrics,
+        findings=findings_list
+    )
