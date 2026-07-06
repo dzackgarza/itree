@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Self, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -259,6 +259,9 @@ class RepoDag(BaseModel):
     # Pre-computed inverse: child_number -> parent_number.
     parent_of: dict[int, int] = Field(default_factory=dict, repr=False)
 
+    # Dependency relationships: child_number -> tuple of blocker issue numbers.
+    dependencies: dict[int, tuple[int, ...]] = Field(default_factory=dict)
+
     @model_validator(mode="after")
     def _compute_derived(self) -> Self:
         """Build derived views once at construction time."""
@@ -312,6 +315,27 @@ class RepoDag(BaseModel):
         kids = self.children_of.get(root_number, ())
         children = tuple(self.materialize_root(k) for k in kids)
         return TreeNode(issue=issue, children=children)
+
+
+class Finding(BaseModel):
+    code: str
+    severity: Literal["error", "warning", "info"]
+    title: str
+    evidence: list[str]
+    meaning: str
+    agent_instruction: str | None = None
+    remediation: list[str]
+    suggested_commands: list[str] = []
+
+
+class DoctorReport(BaseModel):
+    repo: str
+    status: Literal["ok", "warning", "error"]
+    root: IssueRef | None
+    next_issue: IssueRef | None
+    enclosing_work_unit: IssueRef | None
+    metrics: dict[str, int]
+    findings: list[Finding]
 
 
 
