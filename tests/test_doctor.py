@@ -48,13 +48,12 @@ def test_doctor_report_no_root_ledger() -> None:
 
 
 def test_doctor_report_multiple_root_ledgers() -> None:
-    """ERROR E002 is triggered when multiple issues have the root body marker."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
+    """ERROR E002 is triggered when multiple issues have the Ledger: prefix."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root 1", body=body_marker),
-            2: _issue(2, "Root 2", body=body_marker),
+            1: _issue(1, "Ledger: Root 1"),
+            2: _issue(2, "Ledger: Root 2"),
         },
         children_of={},
     )
@@ -67,11 +66,10 @@ def test_doctor_report_multiple_root_ledgers() -> None:
 
 def test_doctor_report_unreachable_open_issues() -> None:
     """ERROR E010 is triggered when open issues are unreachable from the root ledger."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Unreachable Task"),
         },
         children_of={1: ()},
@@ -85,11 +83,10 @@ def test_doctor_report_unreachable_open_issues() -> None:
 
 def test_doctor_report_parentless_non_root_issues() -> None:
     """ERROR E011 is triggered when open parentless issues exist beside the root ledger."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             3: _issue(3, "Accidental Root"),
         },
         children_of={1: ()},
@@ -103,11 +100,10 @@ def test_doctor_report_parentless_non_root_issues() -> None:
 
 def test_doctor_report_closed_parent_with_open_descendants() -> None:
     """ERROR E012 is triggered when a closed parent issue has open descendants."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Closed Parent", state=IssueState.closed),
             3: _issue(3, "Open Child"),
         },
@@ -122,11 +118,10 @@ def test_doctor_report_closed_parent_with_open_descendants() -> None:
 
 def test_doctor_report_dependency_edges_present() -> None:
     """ERROR E014 is triggered when GitHub blocked/blocking relations exist."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Blocked Issue"),
             3: _issue(3, "Blocker"),
         },
@@ -142,9 +137,8 @@ def test_doctor_report_dependency_edges_present() -> None:
 
 def test_doctor_report_depth_near_limit() -> None:
     """WARNING W020 is triggered when depth >= 7."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     # Create chain of 8 issues: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 (depth 7)
-    issues = {1: _issue(1, "Root", body=body_marker)}
+    issues = {1: _issue(1, "Ledger: Root")}
     children_of = {}
     for i in range(2, 9):
         issues[i] = _issue(i, f"Task {i}")
@@ -163,11 +157,10 @@ def test_doctor_report_depth_near_limit() -> None:
 
 def test_doctor_report_singleton_work_unit() -> None:
     """WARNING W030 is triggered when a work unit has only one task and no justification."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Milestone: v1"),
             3: _issue(3, "Singleton Work Unit"),
             4: _issue(4, "Single task", body="No justification here"),
@@ -182,11 +175,10 @@ def test_doctor_report_singleton_work_unit() -> None:
 
 def test_doctor_report_singleton_work_unit_justified() -> None:
     """WARNING W030 is NOT triggered when a singleton work unit has a valid marker."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Milestone: v1"),
             3: _issue(3, "Singleton Work Unit", body="itree:role=singleton"),
             4: _issue(4, "Single task"),
@@ -200,11 +192,10 @@ def test_doctor_report_singleton_work_unit_justified() -> None:
 
 def test_doctor_report_milestone_mismatch() -> None:
     """WARNING W040 is triggered when issues under milestone ledger disagree with GitHub milestone."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Milestone: v1.0"),
             3: _issue(3, "Work unit"),
             4: _issue(4, "Mismatched Task", milestone="v2.0"),
@@ -219,11 +210,10 @@ def test_doctor_report_milestone_mismatch() -> None:
 
 def test_doctor_report_milestone_without_ledger() -> None:
     """WARNING W041 is triggered when active milestone has issues but no milestone ledger child."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Task with Milestone", milestone="v1.0"),
         },
         children_of={1: ()},
@@ -236,11 +226,10 @@ def test_doctor_report_milestone_without_ledger() -> None:
 
 def test_doctor_report_leaf_has_pr() -> None:
     """WARNING W032 is triggered when a leaf task has a linked PR."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Work Unit"),
             3: _issue(3, "Leaf Task"),
             4: _issue(4, "Pull Request", is_pr=True, body="Closes #3"),
@@ -255,11 +244,10 @@ def test_doctor_report_leaf_has_pr() -> None:
 
 def test_doctor_report_missing_acceptance_criteria() -> None:
     """WARNING W050 is triggered when a leaf task lacks acceptance criteria."""
-    body_marker = "<!-- itree:role=root-ledger schema=1 -->"
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            1: _issue(1, "Root", body=body_marker),
+            1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Work Unit"),
             3: _issue(3, "Leaf Task", body="Just some comments, no requirements here"),
         },

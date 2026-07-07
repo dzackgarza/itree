@@ -293,35 +293,10 @@ class RepoDag(BaseModel):
 
         Walks the adjacency list directly — no TreeNode materialization needed.
         """
-        candidates = []
-        for number, issue in sorted(self.issues.items()):
-            if issue.body and "<!-- itree:role=root-ledger schema=1 -->" in issue.body:
-                candidates.append(number)
-        
-        if not candidates:
-            import os
-            config_path = os.path.join(".github", "itree.toml")
-            if os.path.exists(config_path):
-                try:
-                    import tomllib
-                    with open(config_path, "rb") as f:
-                        config = tomllib.load(f)
-                        if "root" in config:
-                            val = config["root"]
-                            num_str = val.split("#")[-1] if (isinstance(val, str) and "#" in val) else str(val)
-                            num = int(num_str)
-                            if num in self.issues:
-                                candidates.append(num)
-                except Exception:
-                    pass
-
-        if not candidates:
-            roots = self.roots
-            if not roots:
-                return ()
-            primary_root_num = roots[0].number
-        else:
-            primary_root_num = candidates[0]
+        roots = self.roots
+        if not roots:
+            return ()
+        primary_root_num = roots[0].number
 
         reachable: set[int] = set()
         self._collect_reachable(primary_root_num, reachable)

@@ -189,39 +189,11 @@ def root_create(
     repo_ref = parse_repo(repo)
     api = GithubApi.from_repo_ref(repo_ref)
     
-    # Append the root marker if not already present
-    marker = "<!-- itree:role=root-ledger schema=1 -->"
-    if marker not in body:
-        body = f"{body}\n\n{marker}" if body else marker
-
     try:
-        issue = api.create_issue(title, body)
+        issue = api.create_issue(title, body or "")
         print(f"{repo_ref.slug}#{issue.number}")
     except Exception as e:
         print(f"Error creating issue: {e}")
-        sys.exit(3)
-
-
-@root_app.command(name="declare")
-def root_declare(
-    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
-    issue: Annotated[str, Parameter(help="Issue to declare as root ledger (e.g. OWNER/REPO#N or N)")],
-) -> None:
-    """Declare an existing issue as the root ledger by adding the body marker."""
-    repo_ref = parse_repo(repo)
-    api = GithubApi.from_repo_ref(repo_ref)
-    issue_num = int(issue.split("#")[-1]) if "#" in issue else int(issue)
-
-    try:
-        issue_obj = api.get_issue(issue_num)
-        marker = "<!-- itree:role=root-ledger schema=1 -->"
-        body = issue_obj.body or ""
-        if marker not in body:
-            new_body = f"{body}\n\n{marker}" if body else marker
-            api.update_issue_body(issue_num, new_body)
-        print(f"Successfully declared {repo_ref.slug}#{issue_num} as root ledger.")
-    except Exception as e:
-        print(f"Error declaring root ledger: {e}")
         sys.exit(3)
 
 

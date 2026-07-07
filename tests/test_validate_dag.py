@@ -113,3 +113,16 @@ def test_three_roots_one_violation() -> None:
     frag = [v for v in violations if v.code == "fragmented_forest"]
     assert len(frag) == 1
     assert "3 roots" in frag[0].message
+
+
+def test_cycle_detected() -> None:
+    """A cycle in issue relations is detected and reported."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={1: _open(1), 2: _open(2)},
+        children_of={1: (2,), 2: (1,)},
+    )
+    violations = validate_dag(dag)
+    codes = [v.code for v in violations]
+    assert "cycle_detected" in codes
+

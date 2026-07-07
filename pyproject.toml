@@ -9,7 +9,7 @@ description = "Deterministic traversal layer over GitHub sub-issue trees"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [{name = "Agent", email = "agent@localhost"}]
-dependencies = ["cyclopts>=2.0", "pydantic>=2.0"]
+dependencies = ["cyclopts>=2.0", "pydantic>=2.0", "networkx>=3.0"]
 
 [project.scripts]
 itree = "itree.cli:app"
