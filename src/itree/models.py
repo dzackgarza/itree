@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
+FindingSeverity = Literal["error", "warning", "info"]
+ReportStatus = Literal["ok", "warning", "error"]
+MissingReportRefReason = Literal["no_root_ledger", "multiple_root_ledgers", "no_open_work_unit", "not_applicable"]
 
 
 class IssueState(StrEnum):
@@ -198,7 +201,6 @@ class AttachRequest(BaseModel):
 
     parent: IssueRef
     child: IssueRef
-    replace_parent: bool = False
 
     @model_validator(mode="after")
     def same_repository(self) -> Self:
@@ -270,9 +272,23 @@ class RepoDag(BaseModel):
 
     @model_validator(mode="after")
     def _compute_derived(self) -> Self:
-        """Build derived views once at construction time."""
+        """Build total adjacency and derived views once at construction time."""
+        issue_numbers = set(self.issues)
+        unknown_parents = sorted(set(self.children_of) - issue_numbers)
+        if unknown_parents:
+            raise ValueError(f"children_of has parents absent from issues: {unknown_parents}")
+
+        full_children_of: dict[int, tuple[int, ...]] = {}
+        for number in sorted(issue_numbers):
+            children = self.children_of[number] if number in self.children_of else ()
+            unknown_children = [child for child in children if child not in issue_numbers]
+            if unknown_children:
+                raise ValueError(f"children_of[{number}] has children absent from issues: {unknown_children}")
+            full_children_of[number] = tuple(children)
+        object.__setattr__(self, "children_of", full_children_of)
+
         parent_of: dict[int, int] = {}
-        for parent, kids in self.children_of.items():
+        for parent, kids in full_children_of.items():
             for kid in kids:
                 parent_of[kid] = parent
         object.__setattr__(self, "parent_of", parent_of)
@@ -308,20 +324,20 @@ class RepoDag(BaseModel):
         if number in out:
             return
         out.add(number)
-        for kid in self.children_of.get(number, ()):
+        for kid in self.children_of[number]:
             self._collect_reachable(kid, out)
 
     def materialize_root(self, root_number: int) -> TreeNode:
         """Build a TreeNode tree from the DAG rooted at the given issue."""
         issue = self.issues[root_number]
-        kids = self.children_of.get(root_number, ())
+        kids = self.children_of[root_number]
         children = tuple(self.materialize_root(k) for k in kids)
         return TreeNode(issue=issue, children=children)
 
 
 class Finding(BaseModel):
     code: str
-    severity: Literal["error", "warning", "info"]
+    severity: FindingSeverity
     title: str
     evidence: list[str]
     meaning: str
@@ -330,11 +346,24 @@ class Finding(BaseModel):
     suggested_commands: list[str] = []
 
 
+class PresentReportRef(BaseModel):
+    kind: Literal["present"] = "present"
+    ref: IssueRef
+
+
+class AbsentReportRef(BaseModel):
+    kind: Literal["absent"] = "absent"
+    reason: MissingReportRefReason
+
+
+ReportRef = PresentReportRef | AbsentReportRef
+
+
 class DoctorReport(BaseModel):
     repo: str
-    status: Literal["ok", "warning", "error"]
-    root: IssueRef | None
-    next_issue: IssueRef | None
-    enclosing_work_unit: IssueRef | None
+    status: ReportStatus
+    root: ReportRef
+    next_issue: ReportRef
+    enclosing_work_unit: ReportRef
     metrics: dict[str, int]
     findings: list[Finding]

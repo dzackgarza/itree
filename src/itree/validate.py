@@ -1,13 +1,33 @@
 from __future__ import annotations
 
 import re
+from typing import TypedDict
 
 import networkx as nx
 from pydantic import BaseModel
 
-from .models import DoctorReport, Finding, IssueRef, RepoDag, TreeNode
+from .models import (
+    AbsentReportRef,
+    DoctorReport,
+    Finding,
+    FindingSeverity,
+    IssueRef,
+    PresentReportRef,
+    RepoDag,
+    ReportRef,
+    ReportStatus,
+    TreeNode,
+)
 
-DIAGNOSTIC_CATALOG = {
+
+class DiagnosticDetails(TypedDict):
+    title: str
+    severity: FindingSeverity
+    meaning: str
+    remediation: list[str]
+
+
+DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "E001": {
         "title": "no_root_ledger",
         "severity": "error",
@@ -159,7 +179,7 @@ def validate_dag(dag: RepoDag) -> list[TreeViolation]:
     violations: list[TreeViolation] = []
 
     # 1. Build directed graph
-    G = nx.DiGraph()
+    G: nx.DiGraph[int] = nx.DiGraph()
     G.add_nodes_from(dag.issues.keys())
     for parent, children in dag.children_of.items():
         for child in children:
@@ -291,7 +311,7 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
     dag = issue_only_dag(dag)
     import networkx as nx
 
-    G = nx.DiGraph()
+    G: nx.DiGraph[int] = nx.DiGraph()
     G.add_nodes_from(dag.issues.keys())
     for parent, children in dag.children_of.items():
         for child in children:
@@ -306,7 +326,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
     findings_list: list[Finding] = []
 
     # 1. Build networkx directed graph
-    G = nx.DiGraph()
+    G: nx.DiGraph[int] = nx.DiGraph()
     G.add_nodes_from(dag.issues.keys())
     for parent, children in dag.children_of.items():
         for child in children:
@@ -332,9 +352,9 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
     # 3. Discover candidates (parentless nodes in the DAG)
     candidates = find_root_ledger_candidates(dag)
 
-    root_ref = None
-    next_issue_ref = None
-    enclosing_wu_ref = None
+    root_ref: IssueRef | None = None
+    next_issue_ref: ReportRef = AbsentReportRef(reason="no_open_work_unit")
+    enclosing_wu_ref: ReportRef = AbsentReportRef(reason="not_applicable")
 
     # Metrics dictionary baseline
     metrics = {
@@ -469,19 +489,18 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         closed_with_open_descendants = []
         for num, issue in sorted(dag.issues.items()):
             if not issue.is_open:
-                visited = set()
-                open_desc = []
+                visited: set[int] = set()
+                open_desc: list[int] = []
 
-                def find_open(n):
+                def find_open(n: int) -> None:
                     if n in visited:
                         return
                     visited.add(n)
-                    for kid in dag.children_of.get(n, ()):
-                        k_issue = dag.issues.get(kid)
-                        if k_issue:
-                            if k_issue.is_open:
-                                open_desc.append(kid)
-                            find_open(kid)
+                    for kid in dag.children_of[n]:
+                        k_issue = dag.issues[kid]
+                        if k_issue.is_open:
+                            open_desc.append(kid)
+                        find_open(kid)
 
                 find_open(num)
                 if open_desc:
@@ -524,7 +543,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         # Max depth check
         max_depth = 0
 
-        def calculate_depths(node: TreeNode, current_depth: int):
+        def calculate_depths(node: TreeNode, current_depth: int) -> None:
             nonlocal max_depth
             if current_depth > max_depth:
                 max_depth = current_depth
@@ -663,8 +682,9 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
 
         next_node = first_open_work_unit(tree_node)
         if next_node:
-            next_issue_ref = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
-            enclosing_wu_ref = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
+            next_issue = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
+            next_issue_ref = PresentReportRef(ref=next_issue)
+            enclosing_wu_ref = PresentReportRef(ref=next_issue)
 
     # Determine status
     errors_count = sum(1 for f in findings_list if f.severity == "error")
@@ -673,6 +693,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
     metrics["errors"] = errors_count
     metrics["warnings"] = warnings_count
 
+    status: ReportStatus
     if errors_count > 0:
         status = "error"
     elif warnings_count > 0:
@@ -691,4 +712,13 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
             )
         )
 
-    return DoctorReport(repo=dag.slug, status=status, root=root_ref, next_issue=next_issue_ref, enclosing_work_unit=enclosing_wu_ref, metrics=metrics, findings=findings_list)
+    report_root = PresentReportRef(ref=root_ref) if root_ref is not None else AbsentReportRef(reason="no_root_ledger")
+    return DoctorReport(
+        repo=dag.slug,
+        status=status,
+        root=report_root,
+        next_issue=next_issue_ref,
+        enclosing_work_unit=enclosing_wu_ref,
+        metrics=metrics,
+        findings=findings_list,
+    )

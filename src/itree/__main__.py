@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.14"
 # dependencies = [
 #   "cyclopts>=2.0",
+#   "networkx>=3.0",
 #   "pydantic>=2.0",
 # ]
 # ///

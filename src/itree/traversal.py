@@ -28,7 +28,7 @@ def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:
     # Filter children to only those present in issues_by_number: the GitHub
     # sub-issues API returns ALL children (open and closed), but list_all_issues
     # only returns open issues, so closed children won't be in our dict.
-    children_of: dict[int, tuple[int, ...]] = {}
+    children_of: dict[int, tuple[int, ...]] = {issue.number: () for issue in all_issues}
     dependencies: dict[int, tuple[int, ...]] = {}
     for issue in all_issues:
         children = api.list_subissues(issue.number)

@@ -6,10 +6,14 @@ build-backend = "hatchling.build"
 name = "itree"
 version = "0.1.0"
 description = "Deterministic traversal layer over GitHub sub-issue trees"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = {text = "MIT"}
 authors = [{name = "Agent", email = "agent@localhost"}]
 dependencies = ["cyclopts>=2.0", "pydantic>=2.0", "networkx>=3.0"]
+
+[dependency-groups]
+test = ["pytest>=9.0"]
+typing = ["types-networkx>=3.6.0"]
 
 [project.scripts]
 itree = "itree.cli:app"

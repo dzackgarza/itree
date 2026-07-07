@@ -1,8 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.14"
 # dependencies = [
 #   "cyclopts>=2.0",
+#   "networkx>=3.0",
 #   "pydantic>=2.0",
 # ]
 # ///
@@ -264,7 +265,7 @@ def add(
     api = GithubApi.from_repo_ref(repo_ref)
     try:
         child = api.create_issue(title, body)
-        api.add_subissue(parent_number, child.id, replace_parent=False)
+        api.add_subissue(parent_number, child.id)
         print(f"{repo_ref.slug}#{child.number}")
     except Exception as e:
         print(f"Error: {e}")
@@ -275,8 +276,6 @@ def add(
 def attach(
     parent: Annotated[str, Parameter(help="Parent issue as OWNER/REPO#N")],
     child: Annotated[str, Parameter(help="Child issue as OWNER/REPO#N")],
-    *,
-    replace_parent: Annotated[bool, Parameter()] = False,
 ) -> None:
     """Attach an existing issue as a sub-issue of a parent.
 
@@ -284,11 +283,11 @@ def attach(
         $ itree attach owner/project-alpha#1 owner/project-alpha#5
         owner/project-alpha#5
     """
-    req = AttachRequest(parent=parse_ref(parent), child=parse_ref(child), replace_parent=replace_parent)
+    req = AttachRequest(parent=parse_ref(parent), child=parse_ref(child))
     api = GithubApi.from_issue_ref(req.parent)
     try:
         child_issue = api.get_issue(req.child.number)
-        api.add_subissue(req.parent.number, child_issue.id, replace_parent=req.replace_parent)
+        api.add_subissue(req.parent.number, child_issue.id)
         print(req.child.slug)
     except Exception as e:
         print(f"Error: {e}")
@@ -340,7 +339,7 @@ def move(
     api = GithubApi.from_issue_ref(req.parent)
     try:
         child_issue = api.get_issue(req.child.number)
-        api.add_subissue(req.parent.number, child_issue.id, replace_parent=True)
+        api.replace_parent_subissue(req.parent.number, child_issue.id)
         if req.before is not None or req.after is not None:
             before_id = api.get_issue(req.before.number).id if req.before is not None else None
             after_id = api.get_issue(req.after.number).id if req.after is not None else None
@@ -555,28 +554,31 @@ def doctor(
         status_str = "OK" if report.status == "ok" else "NOT OK"
         print(f"{repo_ref.slug} issue tree: {status_str}\n")
 
-        if report.root:
-            issue_title = dag.issues[report.root.number].title
+        if report.root.kind == "present":
+            root_ref = report.root.ref
+            issue_title = dag.issues[root_ref.number].title
             print("Root ledger:")
-            print(f"  #{report.root.number} {issue_title}\n")
+            print(f"  #{root_ref.number} {issue_title}\n")
         else:
             print("Root ledger:")
             print("  None\n")
 
         print("Traversal:")
-        if report.next_issue:
-            next_title = dag.issues[report.next_issue.number].title
-            print(f"  Next work unit: #{report.next_issue.number} {next_title}")
+        if report.next_issue.kind == "present":
+            next_ref = report.next_issue.ref
+            next_title = dag.issues[next_ref.number].title
+            print(f"  Next work unit: #{next_ref.number} {next_title}")
 
-            if report.enclosing_work_unit:
-                wu_title = dag.issues[report.enclosing_work_unit.number].title
-                print(f"  Work-unit issue: #{report.enclosing_work_unit.number} {wu_title}")
-                print(f"  Agent instruction: work from issue #{report.enclosing_work_unit.number}; keep planning state on that issue.")
+            if report.enclosing_work_unit.kind == "present":
+                work_unit_ref = report.enclosing_work_unit.ref
+                wu_title = dag.issues[work_unit_ref.number].title
+                print(f"  Work-unit issue: #{work_unit_ref.number} {wu_title}")
+                print(f"  Agent instruction: work from issue #{work_unit_ref.number}; keep planning state on that issue.")
                 print("  Open the PR when implementation starts; synthesize its body from the issue.")
                 print("  Keep implementation tasks in the issue body or issue comments.")
             else:
                 print("  Work-unit issue: None")
-                print(f"  Agent instruction: work on #{report.next_issue.number}.")
+                print(f"  Agent instruction: work on #{next_ref.number}.")
         else:
             print("  Next work unit: None")
             print("  Work-unit issue: None")

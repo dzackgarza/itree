@@ -45,17 +45,33 @@ class GithubApi(BaseModel):
         *,
         fields: dict[str, str] | None = None,
         timeout: int = 30,
-        paginate: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a GitHub CLI API command. Returns the raw subprocess result."""
         cmd = ["gh", "api", "-X", method]
-        if paginate:
-            cmd.append("--paginate")
         if path:
             cmd.append(path)
         for key, value in (fields or {}).items():
             cmd += ["-F", f"{key}={value}"]
 
+        return self._run_api_command(cmd, path, timeout)
+
+    def _exec_paginated(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: int = 120,
+    ) -> subprocess.CompletedProcess[str]:
+        """Execute a paginated GitHub CLI API command."""
+        cmd = ["gh", "api", "-X", method, "--paginate", path]
+        return self._run_api_command(cmd, path, timeout)
+
+    def _run_api_command(
+        self,
+        cmd: list[str],
+        path: str,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
         try:
             proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
         except subprocess.TimeoutExpired as e:
@@ -83,10 +99,9 @@ class GithubApi(BaseModel):
         Uses gh api's built-in pagination support: ``--paginate`` streams
         all pages into a single JSON array on stdout.
         """
-        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues", timeout=120, paginate=True)
+        proc = self._exec_paginated("GET", f"repos/{self.owner}/{self.repo}/issues")
         items: list[dict] = json.loads(proc.stdout)
         return tuple(GithubIssue.model_validate(item) for item in items)
-
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""
@@ -97,14 +112,23 @@ class GithubApi(BaseModel):
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
-    def add_subissue(self, parent_number: int, child_id: int, *, replace_parent: bool = False) -> GithubIssue:
+    def add_subissue(self, parent_number: int, child_id: int) -> GithubIssue:
         """Attach a child issue as a sub-issue of a parent issue."""
+        proc = self._exec(
+            "POST",
+            f"repos/{self.owner}/{self.repo}/issues/{parent_number}/sub_issues",
+            fields={"sub_issue_id": str(child_id)},
+        )
+        return GithubIssue.model_validate(json.loads(proc.stdout))
+
+    def replace_parent_subissue(self, parent_number: int, child_id: int) -> GithubIssue:
+        """Attach a child issue and replace its previous parent."""
         proc = self._exec(
             "POST",
             f"repos/{self.owner}/{self.repo}/issues/{parent_number}/sub_issues",
             fields={
                 "sub_issue_id": str(child_id),
-                "replace_parent": str(replace_parent).lower(),
+                "replace_parent": "true",
             },
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))

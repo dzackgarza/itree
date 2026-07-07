@@ -183,22 +183,18 @@ Example output:
 
 ## Installation
 
-### As a standalone script
+### Run from GitHub
 
 ```bash
-# Run directly with uv (no install needed)
-uv run tools/itree --help
-
-# Or as a module
-python -m tools.itree --help
+uvx --from git+https://github.com/dzackgarza/itree itree --help
 ```
 
-### As a package
+### Run from a local checkout
 
 ```bash
-cd tools/itree
-pip install -e .
-itree --help
+git clone git@github.com:dzackgarza/itree.git
+cd itree
+uv run --with-editable . itree --help
 ```
 
 ## Development
@@ -212,6 +208,5 @@ The project uses:
 ### Running Tests
 
 ```bash
-cd tools/itree
-uv run pytest tests/ -v
+just test
 ```

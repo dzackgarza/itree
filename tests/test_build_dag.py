@@ -7,6 +7,8 @@ excludes them rather than crashing with a KeyError.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import cast
 from unittest.mock import MagicMock
 
 from itree.github import GithubApi
@@ -47,12 +49,13 @@ def _pull_request(number: int, title: str = "") -> GithubIssue:
 
 def _make_api(
     all_issues: tuple[GithubIssue, ...],
-    subissues: dict[int, tuple[GithubIssue, ...]] | None = None,
-) -> GithubApi:
+    subissues: Mapping[int, tuple[GithubIssue, ...]] | None = None,
+) -> MagicMock:
     """Build a GithubApi whose methods return the given fixtures."""
     api = MagicMock(spec=GithubApi)
+    subissue_map = subissues if subissues is not None else {}
     api.list_all_issues.return_value = all_issues
-    api.list_subissues.side_effect = lambda n: (subissues or {}).get(n, ())
+    api.list_subissues.side_effect = lambda n: subissue_map[n] if n in subissue_map else ()
     api.list_blocked_by.return_value = ()
     return api
 
@@ -73,10 +76,10 @@ def test_pull_requests_filtered_out_of_issue_dag() -> None:
 
     api = _make_api(all_items, subissues)
     repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
     assert set(dag.issues) == {43, 54}
-    assert dag.children_of == {43: (54,)}
+    assert dag.children_of == {43: (54,), 54: ()}
     queried_subissues = {call.args[0] for call in api.list_subissues.call_args_list}
     assert queried_subissues == {43, 54}
 
@@ -91,7 +94,7 @@ def test_closed_child_filtered_out() -> None:
 
     api = _make_api(open_only, subissues)
     repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
     # #3 must not appear in the adjacency list.
     assert 3 not in dag.issues
@@ -113,9 +116,9 @@ def test_all_children_closed_parent_becomes_leaf() -> None:
 
     api = _make_api(open_only, subissues)
     repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
-    assert dag.children_of.get(1, ()) == ()
+    assert dag.children_of[1] == ()
     tree = dag.materialize_root(1)
     assert tree.children == ()
     assert tree.issue.number == 1
@@ -130,7 +133,7 @@ def test_mixed_open_and_closed_children() -> None:
 
     api = _make_api(open_only, subissues)
     repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
     assert dag.children_of[1] == (2, 4)
     assert 3 not in dag.issues
@@ -152,7 +155,7 @@ def test_no_crash_when_child_number_not_in_issues() -> None:
 
     api = _make_api(open_only, subissues)
     repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
     assert 152 not in dag.issues
     assert dag.children_of[100] == (151,)

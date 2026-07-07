@@ -125,4 +125,3 @@ def test_cycle_detected() -> None:
     violations = validate_dag(dag)
     codes = [v.code for v in violations]
     assert "cycle_detected" in codes
-

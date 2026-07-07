@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from itree.models import GithubIssue, IssueState, Milestone, RepoDag, RepoRef
+from itree.models import GithubIssue, IssueState, Milestone, RepoDag, RepoRef, ReportRef
 from itree.validate import generate_doctor_report
 
 
 def _repo_ref() -> RepoRef:
     return RepoRef(owner="testowner", repo="testrepo")
+
+
+def _present_number(ref: ReportRef) -> int:
+    assert ref.kind == "present"
+    return ref.ref.number
 
 
 def _issue(
@@ -16,10 +21,8 @@ def _issue(
     state: IssueState = IssueState.open,
     body: str | None = None,
     milestone: str | None = None,
-    is_pr: bool = False,
 ) -> GithubIssue:
     m = Milestone(title=milestone) if milestone else None
-    pr = {"url": "pr_url"} if is_pr else None
     return GithubIssue(
         id=number,
         number=number,
@@ -28,7 +31,17 @@ def _issue(
         html_url=f"https://github.com/t/t/issues/{number}",
         body=body,
         milestone=m,
-        pull_request=pr,
+    )
+
+
+def _pull_request(number: int, title: str = "") -> GithubIssue:
+    return GithubIssue(
+        id=number,
+        number=number,
+        title=title or f"Pull Request #{number}",
+        state=IssueState.open,
+        html_url=f"https://github.com/t/t/pull/{number}",
+        pull_request={"url": "pr_url"},
     )
 
 
@@ -137,8 +150,8 @@ def test_doctor_report_dependency_edges_present() -> None:
 def test_doctor_report_depth_near_limit() -> None:
     """WARNING W020 is triggered when depth >= 7."""
     # Create chain of 8 issues: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 (depth 7)
-    issues = {1: _issue(1, "Ledger: Root")}
-    children_of = {}
+    issues: dict[int, GithubIssue] = {1: _issue(1, "Ledger: Root")}
+    children_of: dict[int, tuple[int, ...]] = {}
     for i in range(2, 9):
         issues[i] = _issue(i, f"Task {i}")
         children_of[i - 1] = (i,)
@@ -170,10 +183,8 @@ def test_doctor_accepts_single_issue_work_unit() -> None:
         children_of={1: (2,), 2: (3,)},
     )
     report = generate_doctor_report(dag)
-    assert report.next_issue is not None
-    assert report.next_issue.number == 3
-    assert report.enclosing_work_unit is not None
-    assert report.enclosing_work_unit.number == 3
+    assert _present_number(report.next_issue) == 3
+    assert _present_number(report.enclosing_work_unit) == 3
     assert all(f.code != "W030" for f in report.findings)
 
 
@@ -200,8 +211,7 @@ def test_doctor_rejects_work_unit_decomposed_into_child_issues() -> None:
     findings = [f for f in report.findings if f.code == "E015"]
     assert len(findings) == 1
     assert "work unit #2 has child issues: #3" in findings[0].evidence
-    assert report.next_issue is not None
-    assert report.next_issue.number == 2
+    assert _present_number(report.next_issue) == 2
 
 
 def test_doctor_does_not_require_singleton_marker() -> None:
@@ -268,13 +278,12 @@ def test_doctor_accepts_pr_linked_to_work_unit_issue() -> None:
                 "Preview sync work unit",
                 body="## Acceptance Criteria\n- Preview updates after source edits.",
             ),
-            3: _issue(3, "Pull Request", is_pr=True, body="Closes #2"),
+            3: _pull_request(3, "Pull Request"),
         },
         children_of={1: (2,)},
     )
     report = generate_doctor_report(dag)
-    assert report.next_issue is not None
-    assert report.next_issue.number == 2
+    assert _present_number(report.next_issue) == 2
     assert all(f.code != "W032" for f in report.findings)
 
 
@@ -283,24 +292,22 @@ def test_doctor_ignores_pull_requests_when_finding_repository_root() -> None:
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
-            36: _issue(36, "Open PR: unrelated branch", is_pr=True),
+            36: _pull_request(36, "Open PR: unrelated branch"),
             43: _issue(43, "Ledger: Project roadmap"),
             54: _issue(
                 54,
                 "Standard editor semantics",
                 body="## Acceptance Criteria\n- The editor follows standard desktop behavior.",
             ),
-            103: _issue(103, "Open PR: proof cleanup", is_pr=True),
+            103: _pull_request(103, "Open PR: proof cleanup"),
         },
         children_of={43: (54,)},
     )
 
     report = generate_doctor_report(dag)
 
-    assert report.root is not None
-    assert report.root.number == 43
-    assert report.next_issue is not None
-    assert report.next_issue.number == 54
+    assert _present_number(report.root) == 43
+    assert _present_number(report.next_issue) == 54
     assert all(f.code != "E002" for f in report.findings)
     assert all(f.code != "E010" for f in report.findings)
     assert all(f.code != "E011" for f in report.findings)
