@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import subprocess
+from inspect import signature
 from pathlib import Path
 
 import pytest
-
 from itree.cli import (
     app,
+    doctor,
     parse_ref,
     parse_repo,
+    path,
 )
 from itree.models import AttachRequest, IssueRef, MoveRequest, RepoRef
 
@@ -105,6 +107,11 @@ class TestCLICommandStructure:
             if not cmd_name.startswith("_"):
                 assert cmd.help is not None
                 assert len(cmd.help) > 0
+
+    def test_repo_diagnostics_do_not_accept_explicit_root_selection(self) -> None:
+        """Repository-level diagnostics discover the root from the issue tree."""
+        assert "root" not in signature(doctor).parameters
+        assert "root" not in signature(path).parameters
 
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""

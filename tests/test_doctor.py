@@ -143,7 +143,7 @@ def test_doctor_report_depth_near_limit() -> None:
         issues[i] = _issue(i, f"Task {i}")
         children_of[i - 1] = (i,)
     children_of[8] = ()
-    
+
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues=issues,
@@ -249,6 +249,34 @@ def test_doctor_accepts_pr_linked_to_work_unit_issue() -> None:
     assert report.next_issue is not None
     assert report.next_issue.number == 2
     assert all(f.code != "W032" for f in report.findings)
+
+
+def test_doctor_ignores_pull_requests_when_finding_repository_root() -> None:
+    """Parentless PRs are not issue-tree roots or unreachable work."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            36: _issue(36, "Open PR: unrelated branch", is_pr=True),
+            43: _issue(43, "Ledger: Project roadmap"),
+            54: _issue(
+                54,
+                "Standard editor semantics",
+                body="## Acceptance Criteria\n- The editor follows standard desktop behavior.",
+            ),
+            103: _issue(103, "Open PR: proof cleanup", is_pr=True),
+        },
+        children_of={43: (54,)},
+    )
+
+    report = generate_doctor_report(dag)
+
+    assert report.root is not None
+    assert report.root.number == 43
+    assert report.next_issue is not None
+    assert report.next_issue.number == 54
+    assert all(f.code != "E002" for f in report.findings)
+    assert all(f.code != "E010" for f in report.findings)
+    assert all(f.code != "E011" for f in report.findings)
 
 
 def test_doctor_report_missing_acceptance_criteria() -> None:

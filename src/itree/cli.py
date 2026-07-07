@@ -64,7 +64,7 @@ Issue roles:
 app = App(
     help=CORE_HELP_TEXT,
     help_epilogue="""Use `itree help model` for the full organization guide.
-Use `itree doctor --explain CODE` for detailed remediation of a diagnostic."""
+Use `itree doctor --explain CODE` for detailed remediation of a diagnostic.""",
 )
 
 # Subapps for progressive disclosure help
@@ -78,7 +78,7 @@ milestone_app = App(
 
 Milestone ledgers are grouping issues under the root ledger.
 Use them to mirror GitHub milestones or backlog areas.
-They are release/time groupings, not traversal roots, and they never replace the single root ledger."""
+They are release/time groupings, not traversal roots, and they never replace the single root ledger.""",
 )
 app.command(milestone_app)
 
@@ -91,11 +91,11 @@ A work unit is a GitHub issue that owns a coherent review/proof boundary.
 It may stand alone. Its implementation checklist belongs in the issue body,
 or issue comments. Create child issues only when those children are
 separate work units with their own acceptance/proof boundary.
-When complete, synthesize the PR body from the work-unit issue."""
+When complete, synthesize the PR body from the work-unit issue.""",
 )
 app.command(work_unit_app)
 
-root_app = App(name="root", help="Create, declare, or inspect the repository root ledger.")
+root_app = App(name="root", help="Create or inspect the repository root ledger.")
 app.command(root_app)
 
 
@@ -109,48 +109,49 @@ def parse_repo(raw: str) -> RepoRef:
     return RepoRef.parse(raw)
 
 
-def get_repo_and_root(target: str, root_flag: str | None = None) -> tuple[RepoRef, int]:
-    """Helper to resolve a target repo and its root issue number."""
+def get_repo_root(repo: str) -> tuple[RepoRef, int]:
+    """Resolve a repository to its structurally unique root issue."""
+    repo_ref = RepoRef.parse(repo)
+    try:
+        dag = build_dag(repo_ref)
+    except Exception as e:
+        print(f"Error fetching issues from GitHub: {e}")
+        sys.exit(3)
+
+    candidates = find_root_ledger_candidates(dag)
+    if not candidates:
+        print("ERROR E001: no root ledger exists.\n")
+        print("This repository has no traversal domain because it has no parentless issue.")
+        print("Repair:")
+        print("  1. Create one ledger issue:")
+        print('       itree root create OWNER/REPO --title "Ledger: OWNER/REPO"\n')
+        print("  2. Attach every open planned issue under that ledger, either directly or")
+        print("     through a milestone/backlog ledger or parent work-unit branch:")
+        print("       itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE\n")
+        print("Do not create multiple ledger issues. A milestone, project, roadmap, or epic is")
+        print("not a second root.")
+        sys.exit(2)
+    if len(candidates) > 1:
+        print("ERROR E002: multiple parentless issues found.\n")
+        print("Found:")
+        for c in candidates:
+            print(f"  #{c}  {dag.issues[c].title}")
+        print("\nThis is a forest, not one ordered tree. A repository-wide traversal requires")
+        print("one root by construction, not an explicit root selection.\n")
+        print("Repair:")
+        print("  1. Choose the single repository ledger issue.")
+        print("  2. Attach every other parentless planned issue under that ledger.")
+        print("  3. Put the active/current child first; preorder defines execution order.")
+        sys.exit(2)
+    return repo_ref, candidates[0]
+
+
+def get_repo_and_issue_or_root(target: str) -> tuple[RepoRef, int]:
+    """Resolve an explicit issue target, or the repository's unique root."""
     if "#" in target:
         ref = IssueRef.parse(target)
         return ref.repo_ref, ref.number
-    else:
-        repo_ref = RepoRef.parse(target)
-        try:
-            dag = build_dag(repo_ref)
-        except Exception as e:
-            print(f"Error fetching issues from GitHub: {e}")
-            sys.exit(3)
-        candidates = find_root_ledger_candidates(dag, root_flag)
-        if not candidates:
-            print("ERROR E001: no root ledger is declared.\n")
-            print("This repository has no unique traversal domain. Parentless issues form a forest,")
-            print("so `itree next OWNER/REPO` would require an arbitrary choice.\n")
-            print("Repair:")
-            print("  1. Create one ledger issue:")
-            print("       itree root create OWNER/REPO --title \"Ledger: OWNER/REPO\"\n")
-            print("  2. Attach every open planned issue under that ledger, either directly or")
-            print("     through a milestone/backlog ledger or parent work-unit branch:")
-            print("       itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE\n")
-            print("  3. Declare the root in .github/itree.toml or in the issue body marker.\n")
-            print("Do not create multiple ledger issues. A milestone, project, roadmap, or epic is")
-            print("not a root.")
-            sys.exit(2)
-        if len(candidates) > 1:
-            print("ERROR E002: multiple root ledger candidates found.\n")
-            print("Found:")
-            for c in candidates:
-                print(f"  #{c}  {dag.issues[c].title}")
-            print("\nThis is a forest, not one ordered tree. The app cannot define a repository-wide")
-            print("next issue without choosing among roots.\n")
-            print("Repair:")
-            print("  1. Choose exactly one ledger issue.")
-            print("  2. Remove the root marker from all others.")
-            print("  3. Attach the former roots as ordered children of the chosen root if they")
-            print("     still represent planned work.")
-            print("  4. Put the active/current child first; preorder defines execution order.")
-            sys.exit(2)
-        return repo_ref, candidates[0]
+    return get_repo_root(target)
 
 
 @help_app.command(name="model")
@@ -196,7 +197,7 @@ def root_create(
     """Create a new root ledger issue for a traversal domain."""
     repo_ref = parse_repo(repo)
     api = GithubApi.from_repo_ref(repo_ref)
-    
+
     try:
         issue = api.create_issue(title, body or "")
         print(f"{repo_ref.slug}#{issue.number}")
@@ -225,7 +226,7 @@ def root_inspect(
         sys.exit(2)
     else:
         issue = dag.issues[candidates[0]]
-        print(f"Root ledger: #{issue.number} \"{issue.title}\"")
+        print(f'Root ledger: #{issue.number} "{issue.title}"')
         print(f"State: {issue.state}")
         print(f"URL: {issue.html_url}")
 
@@ -248,18 +249,18 @@ def init(
 
 @app.command(group="Structural")
 def add(
-    root: Annotated[str, Parameter(help="Root issue or repository as OWNER/REPO#N or OWNER/REPO")],
+    parent: Annotated[str, Parameter(help="Parent issue or repository root as OWNER/REPO#N or OWNER/REPO")],
     title: Annotated[str, Parameter(help="Title for the new child issue")],
     *,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
 ) -> None:
-    """Create a new child issue and attach it to the root/parent.
+    """Create a new child issue and attach it to the parent issue.
 
     Example:
         $ itree add owner/project-alpha#1 "Frontend"
         owner/project-alpha#2
     """
-    repo_ref, parent_number = get_repo_and_root(root)
+    repo_ref, parent_number = get_repo_and_issue_or_root(parent)
     api = GithubApi.from_repo_ref(repo_ref)
     try:
         child = api.create_issue(title, body)
@@ -352,7 +353,7 @@ def move(
 
 @app.command(group="Query")
 def children(
-    root: Annotated[str, Parameter(help="Root issue or repository as OWNER/REPO#N or OWNER/REPO")],
+    target: Annotated[str, Parameter(help="Issue or repository root as OWNER/REPO#N or OWNER/REPO")],
     *,
     recursive: Annotated[bool, Parameter()] = False,
     as_json: Annotated[bool, Parameter()] = False,
@@ -363,19 +364,19 @@ def children(
         $ itree children owner/project-alpha#1
         #2: Frontend
     """
-    repo_ref, root_num = get_repo_and_root(root)
+    repo_ref, root_num = get_repo_and_issue_or_root(target)
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
-        
+
     if recursive:
         nodes = tree_node.descendants()
     else:
         nodes = tree_node.children
-        
+
     if as_json:
         print(json.dumps([node.issue.model_dump() for node in nodes], indent=2))
     else:
@@ -385,14 +386,14 @@ def children(
 
 @app.command(group="Query")
 def tree(
-    root: Annotated[str, Parameter(help="Root issue or repository as OWNER/REPO#N or OWNER/REPO")],
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
 ) -> None:
-    """Print the materialized rooted ordered tree as JSON.
+    """Print the repository's materialized ordered issue tree as JSON.
 
     Example:
-        $ itree tree owner/project-alpha#1
+        $ itree tree owner/project-alpha
     """
-    repo_ref, root_num = get_repo_and_root(root)
+    repo_ref, root_num = get_repo_root(repo)
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
@@ -404,16 +405,16 @@ def tree(
 
 @app.command(group="Query")
 def next(
-    root: Annotated[str, Parameter(help="Root issue or repository as OWNER/REPO#N or OWNER/REPO")],
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """Find the next open work-unit issue under ROOT in preorder.
+    """Find the next open work-unit issue in repository preorder.
 
     Example:
         $ itree next owner/project-alpha
     """
-    repo_ref, root_num = get_repo_and_root(root)
+    repo_ref, root_num = get_repo_root(repo)
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
@@ -422,7 +423,7 @@ def next(
         sys.exit(3)
 
     node = first_open_work_unit(tree_node)
-    
+
     if as_json:
         print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
     else:
@@ -442,7 +443,6 @@ def next(
 def path(
     issue: Annotated[str, Parameter(help="Issue as OWNER/REPO#N")],
     *,
-    root: Annotated[str | None, Parameter(help="Root issue as OWNER/REPO#N")] = None,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
     """Print the path from root to the given issue.
@@ -451,15 +451,14 @@ def path(
         $ itree path owner/project-alpha#5
     """
     issue_ref = parse_ref(issue)
-    actual_root = root if root else f"{issue_ref.repo_ref.slug}#{issue_ref.number}"
-    repo_ref, root_num = get_repo_and_root(actual_root)
+    repo_ref, root_num = get_repo_root(issue_ref.repo_ref.slug)
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
-        
+
     path_nodes = tree_node.path_to(issue_ref.number)
     if as_json:
         print("[]" if path_nodes is None else json.dumps([n.issue.model_dump() for n in path_nodes], indent=2))
@@ -473,21 +472,21 @@ def path(
 
 @app.command(group="Query")
 def validate(
-    root: Annotated[str, Parameter(help="Root issue or repository as OWNER/REPO#N or OWNER/REPO")],
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
 ) -> None:
-    """Validate the tree rooted at ROOT.
+    """Validate the repository issue tree.
 
     Example:
-        $ itree validate owner/project-alpha#1
+        $ itree validate owner/project-alpha
     """
-    repo_ref, root_num = get_repo_and_root(root)
+    repo_ref, root_num = get_repo_root(repo)
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
-        
+
     violations = validate_tree(tree_node)
     print(json.dumps([v.model_dump() for v in violations], indent=2))
 
@@ -521,7 +520,6 @@ def close(
 def doctor(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
-    root: Annotated[str | None, Parameter(help="Explicit root issue number or reference")] = None,
     as_json: Annotated[bool, Parameter()] = False,
     explain: Annotated[str | None, Parameter(help="Explain the remediation of a diagnostic code")] = None,
     strict: Annotated[bool, Parameter(help="Treat warnings as errors")] = False,
@@ -535,7 +533,7 @@ def doctor(
             print("Meaning:")
             print(f"  {details['meaning']}\n")
             print("Repair routes:")
-            for route in details['remediation']:
+            for route in details["remediation"]:
                 print(f"  {route}")
             sys.exit(0)
         else:
@@ -549,14 +547,14 @@ def doctor(
         print(f"GitHub/auth/API failure: {e}")
         sys.exit(3)
 
-    report = generate_doctor_report(dag, root_flag=root)
+    report = generate_doctor_report(dag)
 
     if as_json:
         print(report.model_dump_json(indent=2))
     else:
         status_str = "OK" if report.status == "ok" else "NOT OK"
         print(f"{repo_ref.slug} issue tree: {status_str}\n")
-        
+
         if report.root:
             issue_title = dag.issues[report.root.number].title
             print("Root ledger:")
@@ -569,7 +567,7 @@ def doctor(
         if report.next_issue:
             next_title = dag.issues[report.next_issue.number].title
             print(f"  Next work unit: #{report.next_issue.number} {next_title}")
-            
+
             if report.enclosing_work_unit:
                 wu_title = dag.issues[report.enclosing_work_unit.number].title
                 print(f"  Work-unit issue: #{report.enclosing_work_unit.number} {wu_title}")

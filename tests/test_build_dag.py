@@ -34,6 +34,17 @@ def _closed_issue(number: int, title: str = "") -> GithubIssue:
     )
 
 
+def _pull_request(number: int, title: str = "") -> GithubIssue:
+    return GithubIssue(
+        id=number + 2000,
+        number=number,
+        title=title or f"Pull request #{number}",
+        state=IssueState.open,
+        html_url=f"https://github.com/testowner/testrepo/pull/{number}",
+        pull_request={"url": f"https://api.github.com/repos/testowner/testrepo/pulls/{number}"},
+    )
+
+
 def _make_api(
     all_issues: tuple[GithubIssue, ...],
     subissues: dict[int, tuple[GithubIssue, ...]] | None = None,
@@ -42,7 +53,32 @@ def _make_api(
     api = MagicMock(spec=GithubApi)
     api.list_all_issues.return_value = all_issues
     api.list_subissues.side_effect = lambda n: (subissues or {}).get(n, ())
+    api.list_blocked_by.return_value = ()
     return api
+
+
+def test_pull_requests_filtered_out_of_issue_dag() -> None:
+    """GitHub PR records from the issues API are not issue-tree nodes."""
+    all_items = (
+        _pull_request(36),
+        _open_issue(43, "Ledger: Roadmap"),
+        _open_issue(54, "Standard editor semantics"),
+        _pull_request(103),
+    )
+    subissues = {
+        43: (_open_issue(54),),
+        36: (_open_issue(999, "Should never be queried"),),
+        103: (_open_issue(998, "Should never be queried"),),
+    }
+
+    api = _make_api(all_items, subissues)
+    repo_ref = RepoRef(owner="testowner", repo="testrepo")
+    dag = build_dag(repo_ref, api=api)  # type: ignore[arg-type]
+
+    assert set(dag.issues) == {43, 54}
+    assert dag.children_of == {43: (54,)}
+    queried_subissues = {call.args[0] for call in api.list_subissues.call_args_list}
+    assert queried_subissues == {43, 54}
 
 
 def test_closed_child_filtered_out() -> None:

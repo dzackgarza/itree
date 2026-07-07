@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Self, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -127,6 +127,11 @@ class GithubIssue(BaseModel):
     def is_open(self) -> bool:
         """Check if the issue is in the open state."""
         return self.state == IssueState.open
+
+    @property
+    def is_pull_request(self) -> bool:
+        """Whether this GitHub issues API record is actually a pull request."""
+        return self.pull_request is not None
 
 
 class TreeNode(BaseModel):
@@ -281,11 +286,7 @@ class RepoDag(BaseModel):
     def roots(self) -> tuple[GithubIssue, ...]:
         """Issues that are not sub-issues of any other issue."""
         parents = self.parent_of
-        return tuple(
-            issue
-            for num, issue in sorted(self.issues.items())
-            if num not in parents
-        )
+        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in parents)
 
     @property
     def orphans(self) -> tuple[GithubIssue, ...]:
@@ -300,11 +301,7 @@ class RepoDag(BaseModel):
 
         reachable: set[int] = set()
         self._collect_reachable(primary_root_num, reachable)
-        return tuple(
-            issue
-            for num, issue in sorted(self.issues.items())
-            if num not in reachable
-        )
+        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in reachable)
 
     def _collect_reachable(self, number: int, out: set[int]) -> None:
         """DFS from ``number`` marking all reachable nodes via the adjacency list."""
@@ -314,7 +311,7 @@ class RepoDag(BaseModel):
         for kid in self.children_of.get(number, ()):
             self._collect_reachable(kid, out)
 
-    def materialize_root(self, root_number: int) -> "TreeNode":
+    def materialize_root(self, root_number: int) -> TreeNode:
         """Build a TreeNode tree from the DAG rooted at the given issue."""
         issue = self.issues[root_number]
         kids = self.children_of.get(root_number, ())
@@ -341,6 +338,3 @@ class DoctorReport(BaseModel):
     enclosing_work_unit: IssueRef | None
     metrics: dict[str, int]
     findings: list[Finding]
-
-
-

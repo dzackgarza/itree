@@ -17,18 +17,18 @@ itree add owner/repo#2 "Implement editor preview sync"
 itree add owner/repo#2 "Add export command proof"
 
 # Find the next work-unit issue
-itree next owner/repo#1
+itree next owner/repo
 # => #3: Implement editor preview sync
 
 # Close the work-unit issue when its acceptance criteria are satisfied
 itree close owner/repo#3 --reason completed
 
 # Find the next work-unit issue
-itree next owner/repo#1
+itree next owner/repo
 # => #4: Add export command proof
 
 # Validate the tree structure
-itree validate owner/repo#1
+itree validate owner/repo
 ```
 
 ## Conceptual Model
@@ -66,7 +66,7 @@ They are not separate GitHub issues, and the PR is not the planning surface.
 
 ### Key Terms
 
-- **Root issue**: The top-level issue that defines the boundary of a problem domain.
+- **Root issue**: The single parentless issue that anchors the repository's work tree.
 - **Grouping issue**: A ledger, milestone, backlog, roadmap, or phase issue used to order work units.
 - **Work-unit issue**: A coherent review/proof boundary that can be implemented and reviewed through a PR.
 - **Sub-issue**: An issue attached as a child of another issue.
@@ -77,7 +77,7 @@ They are not separate GitHub issues, and the PR is not the planning surface.
 
 ### Reference Format
 
-All commands accept issue references in the format `OWNER/REPO#NUMBER`:
+Commands that act on a specific issue accept issue references in the format `OWNER/REPO#NUMBER`:
 
 ```
 owner/project-alpha#42
@@ -110,10 +110,10 @@ Read the tree structure:
 | Command | Description | Example |
 | --- | --- | --- |
 | `children` | List children | `itree children owner/repo#1` |
-| `tree` | Dump full tree as JSON | `itree tree owner/repo#1` |
-| `next` | Find next open work-unit issue | `itree next owner/repo#1` |
-| `path` | Find path to an issue | `itree path owner/repo#5 --root owner/repo#1` |
-| `validate` | Check tree invariants | `itree validate owner/repo#1` |
+| `tree` | Dump full tree as JSON | `itree tree owner/repo` |
+| `next` | Find next open work-unit issue | `itree next owner/repo` |
+| `path` | Find path to an issue | `itree path owner/repo#5` |
+| `validate` | Check tree invariants | `itree validate owner/repo` |
 
 ### Terminal Operations
 
@@ -156,8 +156,8 @@ Most query commands support `--as-json` for machine-readable output:
 
 ```bash
 itree children owner/repo#1 --as-json
-itree next owner/repo#1 --as-json
-itree tree owner/repo#1  # always JSON
+itree next owner/repo --as-json
+itree tree owner/repo  # always JSON
 ```
 
 ## Validation
