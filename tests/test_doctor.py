@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-from itree.models import GithubIssue, IssueState, RepoDag, RepoRef, Milestone
-from itree.validate import generate_doctor_report, lacks_acceptance_criteria, is_singleton_justified
+from itree.models import GithubIssue, IssueState, Milestone, RepoDag, RepoRef
+from itree.validate import generate_doctor_report
 
 
 def _repo_ref() -> RepoRef:
@@ -155,39 +154,46 @@ def test_doctor_report_depth_near_limit() -> None:
     assert len(findings) == 1
 
 
-def test_doctor_report_singleton_work_unit() -> None:
-    """WARNING W030 is triggered when a work unit has only one task and no justification."""
+def test_doctor_accepts_single_issue_work_unit() -> None:
+    """A work-unit issue does not need child task issues or a singleton marker."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Milestone: v1"),
-            3: _issue(3, "Singleton Work Unit"),
-            4: _issue(4, "Single task", body="No justification here"),
+            3: _issue(
+                3,
+                "Preview sync work unit",
+                body="## Acceptance Criteria\n- Preview updates after source edits.",
+            ),
         },
-        children_of={1: (2,), 2: (3,), 3: (4,)},
+        children_of={1: (2,), 2: (3,)},
     )
     report = generate_doctor_report(dag)
-    findings = [f for f in report.findings if f.code == "W030"]
-    assert len(findings) == 1
-    assert "#3" in findings[0].evidence[0]
+    assert report.next_issue is not None
+    assert report.next_issue.number == 3
+    assert report.enclosing_work_unit is not None
+    assert report.enclosing_work_unit.number == 3
+    assert all(f.code != "W030" for f in report.findings)
 
 
-def test_doctor_report_singleton_work_unit_justified() -> None:
-    """WARNING W030 is NOT triggered when a singleton work unit has a valid marker."""
+def test_doctor_does_not_require_singleton_marker() -> None:
+    """Legacy singleton markers are not part of the work-unit model."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
             2: _issue(2, "Milestone: v1"),
-            3: _issue(3, "Singleton Work Unit", body="itree:role=singleton"),
-            4: _issue(4, "Single task"),
+            3: _issue(
+                3,
+                "Standalone migration work unit",
+                body="## Acceptance Criteria\n- Migration proof passes at the repository boundary.",
+            ),
         },
-        children_of={1: (2,), 2: (3,), 3: (4,)},
+        children_of={1: (2,), 2: (3,)},
     )
     report = generate_doctor_report(dag)
-    findings = [f for f in report.findings if f.code == "W030"]
-    assert len(findings) == 0
+    assert all(f.code != "W030" for f in report.findings)
 
 
 def test_doctor_report_milestone_mismatch() -> None:
@@ -224,36 +230,38 @@ def test_doctor_report_milestone_without_ledger() -> None:
     assert "v1.0" in findings[0].evidence[0]
 
 
-def test_doctor_report_leaf_has_pr() -> None:
-    """WARNING W032 is triggered when a leaf task has a linked PR."""
+def test_doctor_accepts_pr_linked_to_work_unit_issue() -> None:
+    """A PR may close the work-unit issue returned by traversal."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(2, "Work Unit"),
-            3: _issue(3, "Leaf Task"),
-            4: _issue(4, "Pull Request", is_pr=True, body="Closes #3"),
+            2: _issue(
+                2,
+                "Preview sync work unit",
+                body="## Acceptance Criteria\n- Preview updates after source edits.",
+            ),
+            3: _issue(3, "Pull Request", is_pr=True, body="Closes #2"),
         },
-        children_of={1: (2,), 2: (3,)},
+        children_of={1: (2,)},
     )
     report = generate_doctor_report(dag)
-    findings = [f for f in report.findings if f.code == "W032"]
-    assert len(findings) == 1
-    assert "#3" in findings[0].evidence[0]
+    assert report.next_issue is not None
+    assert report.next_issue.number == 2
+    assert all(f.code != "W032" for f in report.findings)
 
 
 def test_doctor_report_missing_acceptance_criteria() -> None:
-    """WARNING W050 is triggered when a leaf task lacks acceptance criteria."""
+    """WARNING W050 is triggered when a work-unit issue lacks acceptance criteria."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(2, "Work Unit"),
-            3: _issue(3, "Leaf Task", body="Just some comments, no requirements here"),
+            2: _issue(2, "Work Unit", body="Just some comments, no requirements here"),
         },
-        children_of={1: (2,), 2: (3,)},
+        children_of={1: (2,)},
     )
     report = generate_doctor_report(dag)
     findings = [f for f in report.findings if f.code == "W050"]
     assert len(findings) == 1
-    assert "#3" in findings[0].evidence[0]
+    assert "#2" in findings[0].evidence[0]

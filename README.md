@@ -3,7 +3,7 @@
 Deterministic traversal layer over GitHub sub-issue trees.
 
 `itree` treats GitHub issues as nodes in a rooted, ordered tree and gives you a CLI to build, query, and validate that structure.
-It is designed around a **decomposition-then-traversal** pattern: break work into a tree, work on leaves, close them, and the tree progressively collapses.
+It is designed around **work-unit traversal**: keep a single ordered issue tree, ask for the next coherent work-unit issue, and track implementation checklists inside that issue or its PR.
 
 ## Quick Start
 
@@ -11,25 +11,21 @@ It is designed around a **decomposition-then-traversal** pattern: break work int
 # Create a root issue that defines the boundary of a problem domain
 itree init owner/repo "Project Alpha"
 
-# Decompose into child issues
-itree add owner/repo#1 "Frontend"
-itree add owner/repo#1 "Backend"
-itree add owner/repo#1 "Docs"
+# Add grouping or work-unit issues
+itree add owner/repo#1 "Milestone: v1"
+itree add owner/repo#2 "Implement editor preview sync"
+itree add owner/repo#2 "Add export command proof"
 
-# Further decompose a child
-itree add owner/repo#2 "Login page"
-itree add owner/repo#2 "Dashboard"
-
-# Find the next piece of work (first open leaf in preorder)
+# Find the next work-unit issue
 itree next owner/repo#1
-# => #3: Login page
+# => #3: Implement editor preview sync
 
-# Close a leaf when done
+# Close the work-unit issue when its acceptance criteria are satisfied
 itree close owner/repo#3 --reason completed
 
-# Find the next piece of work
+# Find the next work-unit issue
 itree next owner/repo#1
-# => #4: Dashboard
+# => #4: Add export command proof
 
 # Validate the tree structure
 itree validate owner/repo#1
@@ -43,22 +39,38 @@ GitHub has a native feature called **sub-issues** — you can attach an issue as
 `itree` takes this flat parent-child relationship and builds a full **rooted ordered tree** on top of it:
 
 ```
-#1 Project Alpha (open)          ← root of the traversal domain
-├── #2 Frontend (open)           ← child
-│   ├── #3 Login page (open)     ← leaf (no open children)
-│   └── #4 Dashboard (open)      ← leaf
-├── #5 Backend (open)
-│   └── #6 API endpoint (open)
-└── #7 Docs (closed)             ← leaf, closed
+#1 Ledger: Project Alpha (open)          ← root of the traversal domain
+├── #2 Milestone: v1 (open)              ← grouping issue
+│   ├── #3 Editor preview sync (open)    ← work-unit issue
+│   └── #4 Export command proof (open)   ← work-unit issue
+├── #5 Backlog (open)                    ← grouping issue
+│   └── #6 PDF import workflow (open)    ← work-unit issue
+└── #7 Old experiment (closed)
 ```
+
+Issue #3 can contain its own implementation checklist:
+
+```markdown
+## Acceptance Criteria
+- Preview updates after document edits.
+- The proof exercises the real preview boundary.
+
+## Implementation Tasks
+- [ ] Wire document change events.
+- [ ] Add integration proof.
+- [ ] Update PR claim map.
+```
+
+Those task atoms stay inside the work-unit issue, issue comments, or PR body. They are not separate GitHub issues.
 
 ### Key Terms
 
 - **Root issue**: The top-level issue that defines the boundary of a problem domain.
-- **Sub-issue**: An issue attached as a child of another issue.
-- **Open leaf**: An issue with no open children — the smallest undecomposed unit of work.
+- **Grouping issue**: A ledger, milestone, backlog, roadmap, or phase issue used to order work units.
+- **Work-unit issue**: A coherent review/proof boundary that can be claimed by a PR.
+- **Sub-issue**: An issue attached as a child of another issue. Use this only for grouping issues or separate work-unit issues, not for ordinary implementation tasks.
 - **Preorder traversal**: Depth-first, left-to-right traversal of the tree.
-  `next` uses this to find the next piece of work.
+  `next` uses this to find the next work-unit issue.
 - **Tree violation**: A structural problem in the tree (e.g., duplicate reachable issues, open internal nodes with no open descendants).
 
 ### Reference Format
@@ -97,7 +109,7 @@ Read the tree structure:
 | --- | --- | --- |
 | `children` | List children | `itree children owner/repo#1` |
 | `tree` | Dump full tree as JSON | `itree tree owner/repo#1` |
-| `next` | Find first open leaf | `itree next owner/repo#1` |
+| `next` | Find next open work-unit issue | `itree next owner/repo#1` |
 | `path` | Find path to an issue | `itree path owner/repo#5 --root owner/repo#1` |
 | `validate` | Check tree invariants | `itree validate owner/repo#1` |
 
@@ -111,15 +123,17 @@ Close issues:
 
 ## Workflow
 
-The typical workflow follows a **decomposition-then-traversal** pattern:
+The typical workflow follows a **work-unit traversal** pattern:
 
-1. **Decompose**: Break a large problem into a tree of smaller issues using `init` and `add`.
-2. **Traverse**: Use `next` to find the next open leaf (smallest undecomposed unit of work).
-3. **Work**: Implement the solution for that leaf.
-4. **Close**: Mark the leaf as completed with `close`.
-5. **Repeat**: Run `next` again to find the next leaf.
-   The tree progressively collapses as leaves are closed.
-6. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
+1. **Organize**: Create one root ledger and attach grouping or work-unit issues beneath it.
+1. **Scope**: Put acceptance criteria, proof obligations, and implementation checklists inside each work-unit issue.
+1. **Traverse**: Use `next` to find the next open work-unit issue in preorder.
+1. **Work**: Implement and prove the work-unit issue through its PR.
+1. **Close**: Mark the work-unit issue as completed with `close`.
+1. **Repeat**: Run `next` again to find the next work unit.
+1. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
+
+Create child issues only when the child is itself a separate work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary. Ordinary implementation steps belong in the issue body, comments, or PR claim map.
 
 ### Ordering Siblings
 
@@ -149,7 +163,7 @@ itree tree owner/repo#1  # always JSON
 
 - **Duplicate reachable issues**: The same issue appearing more than once under the root.
 - **Dead open internal nodes**: An open issue with children, but none of its descendants are open.
-  This indicates stalled decomposition.
+  This indicates a parent that should likely be closed or have its live work moved.
 
 Example output:
 

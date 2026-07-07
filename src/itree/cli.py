@@ -13,6 +13,7 @@ import sys
 from typing import Annotated
 
 from cyclopts import App, Parameter
+
 from .github import GithubApi
 from .models import (
     AttachRequest,
@@ -20,16 +21,14 @@ from .models import (
     IssueCloseReason,
     IssueRef,
     MoveRequest,
-    RepoDag,
     RepoRef,
-    TreeNode,
 )
 from .traversal import build_dag
 from .validate import (
-    generate_doctor_report,
-    find_root_ledger_candidates,
     DIAGNOSTIC_CATALOG,
-    validate_dag,
+    find_root_ledger_candidates,
+    first_open_work_unit,
+    generate_doctor_report,
     validate_tree,
 )
 
@@ -41,7 +40,8 @@ Desired structure:
   One repository has exactly one root ledger issue.
   Every open issue that represents planned work must be reachable from that root.
   The order of GitHub sub-issues is the traversal order.
-  The next task is the first open issue in preorder with no open descendants.
+  The next work unit is the first open non-ledger issue in preorder whose
+  open child work units are complete.
 
 Issue roles:
 
@@ -55,13 +55,10 @@ Issue roles:
     It is not a traversal root.
 
   work unit
-    The smallest unit that normally deserves a PR.
-    A work unit should contain several task issues, or be explicitly justified
-    as a large singleton change.
-
-  task
-    An atomic implementation or investigation step.
-    Agents may complete tasks one by one, but should not open one PR per task.
+    A coherent review/proof boundary that normally deserves a PR.
+    Put implementation checklists, status notes, and proof details in the
+    issue body, comments, or PR claim map.
+    Create child issues only for separate work units, not for individual tasks.
 """
 
 app = App(
@@ -87,12 +84,14 @@ app.command(milestone_app)
 
 work_unit_app = App(
     name="work-unit",
-    help="PR review-unit policy and singleton exceptions.",
-    help_prologue="""PR review-unit policy and singleton exceptions.
+    help="PR review-unit policy.",
+    help_prologue="""PR review-unit policy.
 
-A work unit is the smallest unit that normally deserves a PR.
-It should contain several task issues, or be explicitly justified as a large singleton change.
-PRs should target the enclosing work unit, not the leaf tasks."""
+A work unit is a GitHub issue that owns a coherent review/proof boundary.
+It may stand alone. Its implementation checklist belongs in the issue body,
+comments, or PR claim map. Create child issues only when those children are
+separate work units with their own acceptance/proof boundary.
+PRs should target work-unit issues."""
 )
 app.command(work_unit_app)
 
@@ -131,7 +130,7 @@ def get_repo_and_root(target: str, root_flag: str | None = None) -> tuple[RepoRe
             print("  1. Create one ledger issue:")
             print("       itree root create OWNER/REPO --title \"Ledger: OWNER/REPO\"\n")
             print("  2. Attach every open planned issue under that ledger, either directly or")
-            print("     through a milestone ledger / work unit:")
+            print("     through a milestone/backlog ledger or parent work-unit branch:")
             print("       itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE\n")
             print("  3. Declare the root in .github/itree.toml or in the issue body marker.\n")
             print("Do not create multiple ledger issues. A milestone, project, roadmap, or epic is")
@@ -156,25 +155,34 @@ def get_repo_and_root(target: str, root_flag: str | None = None) -> tuple[RepoRe
 
 @help_app.command(name="model")
 def help_model() -> None:
-    """Full explanation of root ledger, milestone ledger, work unit, task,
-    preorder traversal, and PR policy.
+    """Full explanation of root ledger, grouping issues, work units, preorder
+    traversal, and PR policy.
     """
     print("""Mental model:
   Repository issue structure = one rooted ordered tree.
 
   Root ledger issue
     Milestone ledger or backlog ledger
-      Work unit
-        Task
-        Task group
-          Task
+      Work-unit issue
+      Work-unit branch
+        Work-unit issue
+
+  Inside a work-unit issue:
+    Acceptance criteria
+    Proof obligations
+    Implementation checklist
+    Status comments
+
+  Individual implementation tasks stay inside the work-unit issue body,
+  comments, or PR claim map. Do not create GitHub issues for task atoms.
 
 Traversal:
-  next(root) = first open issue in preorder with no open descendants.
+  next(root) = first open work-unit issue in preorder whose open child
+  work units are complete.
 
 Review policy:
-  PRs correspond to work units, not individual task leaves,
-  except explicitly marked large singleton work units.
+  PRs correspond to work-unit issues. Child issues are justified only when
+  they are separate work units with independent acceptance/proof boundaries.
 """)
 
 
@@ -400,7 +408,7 @@ def next(
     *,
     as_json: Annotated[bool, Parameter()] = False,
 ) -> None:
-    """Find the first open leaf under ROOT in preorder.
+    """Find the next open work-unit issue under ROOT in preorder.
 
     Example:
         $ itree next owner/project-alpha
@@ -413,36 +421,21 @@ def next(
         print(f"Error: {e}")
         sys.exit(3)
 
-    node = tree_node.first_open_leaf()
+    node = first_open_work_unit(tree_node)
     
     if as_json:
         print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
     else:
         if node is None:
-            print("No open leaves found")
+            print("No open work units found")
             return
-            
-        path_to_node = tree_node.path_to(node.issue.number)
-        from .validate import find_enclosing_work_unit
-        wu_node = find_enclosing_work_unit(path_to_node) if path_to_node else None
 
-        if wu_node and wu_node.issue.number != node.issue.number:
-            print("Next task:")
-            print(f"  #{node.issue.number} {node.issue.title}\n")
-            print("Work unit:")
-            print(f"  #{wu_node.issue.number} {wu_node.issue.title}\n")
-            print("Instruction:")
-            print(f"  Work on #{node.issue.number} as part of work unit #{wu_node.issue.number}.")
-            print(f"  Continue or create the branch for #{wu_node.issue.number}.")
-            print(f"  Do not open a standalone PR for #{node.issue.number}.")
-        else:
-            # The next issue is itself a work unit or there is no enclosing work unit
-            print("Next work unit:")
-            print(f"  #{node.issue.number} {node.issue.title}\n")
-            print("Instruction:")
-            print("  All open descendants are complete.")
-            print(f"  Create or update the PR for work unit #{node.issue.number}.")
-            print(f"  The PR should close #{node.issue.number}.")
+        print("Next work unit:")
+        print(f"  #{node.issue.number} {node.issue.title}\n")
+        print("Instruction:")
+        print(f"  Create or update the branch and PR for work unit #{node.issue.number}.")
+        print(f"  The PR should close or explicitly claim #{node.issue.number}.")
+        print("  Keep implementation tasks in the issue body, comments, or PR claim map.")
 
 
 @app.command(group="Query")
@@ -575,26 +568,20 @@ def doctor(
         print("Traversal:")
         if report.next_issue:
             next_title = dag.issues[report.next_issue.number].title
-            print(f"  Next issue: #{report.next_issue.number} {next_title}")
+            print(f"  Next work unit: #{report.next_issue.number} {next_title}")
             
             if report.enclosing_work_unit:
                 wu_title = dag.issues[report.enclosing_work_unit.number].title
-                print(f"  Enclosing work unit: #{report.enclosing_work_unit.number} {wu_title}")
-                
-                if report.enclosing_work_unit.number != report.next_issue.number:
-                    print(f"  Agent instruction: work on #{report.next_issue.number} inside the #{report.enclosing_work_unit.number} work-unit branch.")
-                    print(f"  Do not open a standalone PR for #{report.next_issue.number}.")
-                else:
-                    print("  Agent instruction: All open descendants are complete.")
-                    print(f"  Create or update the PR for work unit #{report.enclosing_work_unit.number}.")
-                    print(f"  The PR should close #{report.enclosing_work_unit.number}.")
+                print(f"  PR target: #{report.enclosing_work_unit.number} {wu_title}")
+                print(f"  Agent instruction: create or update the PR for work unit #{report.enclosing_work_unit.number}.")
+                print("  Keep implementation tasks in the issue body, comments, or PR claim map.")
             else:
-                print("  Enclosing work unit: None")
+                print("  PR target: None")
                 print(f"  Agent instruction: work on #{report.next_issue.number}.")
         else:
-            print("  Next issue: None")
-            print("  Enclosing work unit: None")
-            print("  Agent instruction: No open leaves found.")
+            print("  Next work unit: None")
+            print("  PR target: None")
+            print("  Agent instruction: No open work units found.")
         print()
 
         print("Summary:")
