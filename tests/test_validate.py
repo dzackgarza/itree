@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from tools.itree.models import GithubIssue, IssueState, TreeNode
-from tools.itree.validate import validate_tree
+from itree.models import GithubIssue, IssueState, TreeNode
+from itree.validate import validate_tree
 
 
 class TestValidateTree:

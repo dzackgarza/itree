@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from tools.itree.models import GithubIssue, IssueState, RepoDag, RepoRef, Milestone
-from tools.itree.validate import generate_doctor_report, lacks_acceptance_criteria, is_singleton_justified
+from itree.models import GithubIssue, IssueState, RepoDag, RepoRef, Milestone
+from itree.validate import generate_doctor_report, lacks_acceptance_criteria, is_singleton_justified
 
 
 def _repo_ref() -> RepoRef:

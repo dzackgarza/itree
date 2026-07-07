@@ -15,4 +15,4 @@ dependencies = ["cyclopts>=2.0", "pydantic>=2.0"]
 itree = "itree.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["src/itree"]

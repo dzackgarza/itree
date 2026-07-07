@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from tools.itree.cli import (
+from itree.cli import (
     app,
     parse_ref,
     parse_repo,
 )
-from tools.itree.models import AttachRequest, IssueRef, MoveRequest, RepoRef
+from itree.models import AttachRequest, IssueRef, MoveRequest, RepoRef
 
 
 class TestParseFunctions:
@@ -109,7 +109,7 @@ class TestCLICommandStructure:
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""
         result = subprocess.run(
-            ["python3", "-m", "tools.itree.cli", "move", "owner/repo#1", "owner/repo#2", "--before", "owner/repo#3", "--after", "owner/repo#4"],
+            ["python3", "-m", "itree.cli", "move", "owner/repo#1", "owner/repo#2", "--before", "owner/repo#3", "--after", "owner/repo#4"],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).resolve().parents[3]),

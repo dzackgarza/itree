@@ -8,7 +8,7 @@ its constituent pieces.
 
 from __future__ import annotations
 
-from tools.itree.models import GithubIssue, IssueState, TreeNode
+from itree.models import GithubIssue, IssueState, TreeNode
 
 # ---------------------------------------------------------------------------
 # Fixture builders

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from tools.itree.github import GithubApi
-from tools.itree.models import GithubIssue, IssueState, RepoRef
-from tools.itree.traversal import build_dag
+from itree.github import GithubApi
+from itree.models import GithubIssue, IssueState, RepoRef
+from itree.traversal import build_dag
 
 
 def _open_issue(number: int, title: str = "") -> GithubIssue:

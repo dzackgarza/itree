@@ -7,8 +7,8 @@ Proves that validate_dag correctly flags:
 
 from __future__ import annotations
 
-from tools.itree.models import GithubIssue, IssueState, RepoDag, RepoRef
-from tools.itree.validate import validate_dag
+from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
+from itree.validate import validate_dag
 
 
 def _open(number: int, title: str = "") -> GithubIssue:

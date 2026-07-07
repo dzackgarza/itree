@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools.itree.models import (
+from itree.models import (
     AttachRequest,
     GithubIssue,
     IssueRef,

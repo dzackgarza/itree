@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tools.itree.models import GithubIssue, IssueRef, IssueState, RepoRef
+from itree.models import GithubIssue, IssueRef, IssueState, RepoRef
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 
