@@ -177,6 +177,33 @@ def test_doctor_accepts_single_issue_work_unit() -> None:
     assert all(f.code != "W030" for f in report.findings)
 
 
+def test_doctor_rejects_work_unit_decomposed_into_child_issues() -> None:
+    """A non-organizational issue is the PR-sized work unit, not a parent for task issues."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Preview sync work unit",
+                body="## Acceptance Criteria\n- Preview updates after source edits.",
+            ),
+            3: _issue(
+                3,
+                "Add event wiring",
+                body="## Acceptance Criteria\n- Event wiring is proven through the preview boundary.",
+            ),
+        },
+        children_of={1: (2,), 2: (3,)},
+    )
+    report = generate_doctor_report(dag)
+    findings = [f for f in report.findings if f.code == "E015"]
+    assert len(findings) == 1
+    assert "work unit #2 has child issues: #3" in findings[0].evidence
+    assert report.next_issue is not None
+    assert report.next_issue.number == 2
+
+
 def test_doctor_does_not_require_singleton_marker() -> None:
     """Legacy singleton markers are not part of the work-unit model."""
     dag = RepoDag(

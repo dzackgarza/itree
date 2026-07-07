@@ -40,8 +40,7 @@ Desired structure:
   One repository has exactly one root ledger issue.
   Every open issue that represents planned work must be reachable from that root.
   The order of GitHub sub-issues is the traversal order.
-  The next work unit is the first open non-ledger issue in preorder whose
-  open child work units are complete.
+  The next work unit is the first open non-ledger issue in preorder.
 
 Issue roles:
 
@@ -58,7 +57,8 @@ Issue roles:
     A coherent review/proof boundary that normally deserves a PR.
     Put implementation checklists, status notes, and proof details in the
     issue body or issue comments.
-    Create child issues only for separate work units, not for individual tasks.
+    Do not create child issues under a work unit. Use child issues only under
+    organizational grouping issues, and only for separate PR-sized work units.
 """
 
 app = App(
@@ -89,9 +89,10 @@ work_unit_app = App(
 
 A work unit is a GitHub issue that owns a coherent review/proof boundary.
 It may stand alone. Its implementation checklist belongs in the issue body,
-or issue comments. Create child issues only when those children are
-separate work units with their own acceptance/proof boundary.
-When complete, synthesize the PR body from the work-unit issue.""",
+or issue comments. Do not create child issues for its sub-tasks, sub-stories,
+proof burdens, or checklist items.
+Open the PR when implementation starts, and synthesize the PR body from the
+work-unit issue.""",
 )
 app.command(work_unit_app)
 
@@ -126,7 +127,7 @@ def get_repo_root(repo: str) -> tuple[RepoRef, int]:
         print("  1. Create one ledger issue:")
         print('       itree root create OWNER/REPO --title "Ledger: OWNER/REPO"\n')
         print("  2. Attach every open planned issue under that ledger, either directly or")
-        print("     through a milestone/backlog ledger or parent work-unit branch:")
+        print("     through a milestone/backlog ledger:")
         print("       itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE\n")
         print("Do not create multiple ledger issues. A milestone, project, roadmap, or epic is")
         print("not a second root.")
@@ -165,8 +166,7 @@ def help_model() -> None:
   Root ledger issue
     Milestone ledger or backlog ledger
       Work-unit issue
-      Work-unit branch
-        Work-unit issue
+      Work-unit issue
 
   Inside a work-unit issue:
     Acceptance criteria
@@ -178,12 +178,12 @@ def help_model() -> None:
   or issue comments. Do not create GitHub issues for ordinary implementation tasks.
 
 Traversal:
-  next(root) = first open work-unit issue in preorder whose open child
-  work units are complete.
+  next(root) = first open work-unit issue in preorder.
 
 Review policy:
-  PRs correspond to work-unit issues. Child issues are justified only when
-  they are separate work units with independent acceptance/proof boundaries.
+  PRs correspond to work-unit issues. Child issues are justified only under
+  organizational grouping issues, and only when they are separate PR-sized work
+  units with independent acceptance/proof boundaries.
 """)
 
 
@@ -435,7 +435,7 @@ def next(
         print(f"  #{node.issue.number} {node.issue.title}\n")
         print("Instruction:")
         print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")
-        print("  When complete, synthesize the PR body from the issue for review.")
+        print("  Open the PR when implementation starts; synthesize its body from the issue.")
         print("  Keep implementation tasks in the issue body or issue comments.")
 
 
@@ -572,7 +572,7 @@ def doctor(
                 wu_title = dag.issues[report.enclosing_work_unit.number].title
                 print(f"  Work-unit issue: #{report.enclosing_work_unit.number} {wu_title}")
                 print(f"  Agent instruction: work from issue #{report.enclosing_work_unit.number}; keep planning state on that issue.")
-                print("  When complete, synthesize the PR body from the issue for review.")
+                print("  Open the PR when implementation starts; synthesize its body from the issue.")
                 print("  Keep implementation tasks in the issue body or issue comments.")
             else:
                 print("  Work-unit issue: None")

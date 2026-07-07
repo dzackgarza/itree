@@ -32,10 +32,9 @@ DIAGNOSTIC_CATALOG = {
         "meaning": "These issues are not in the repository's deterministic traversal path. An agent following `itree next` will never reach them.",
         "remediation": [
             "A. If the issue belongs to existing work:",
-            "     attach it under the root ledger, a milestone/backlog ledger, or its parent work-unit branch.",
+            "     attach it under the root ledger or a milestone/backlog ledger.",
             "B. If the issue is broad:",
-            "     keep it as the work-unit issue and put implementation tasks in its body/comments,",
-            "     or split it only into child work-unit issues that are independently reviewable.",
+            "     keep it as the work-unit issue and put stories, proof burdens, and implementation tasks in its body/comments.",
             "C. If the issue is future work:",
             "     attach it under the Backlog ledger, which must itself be a child of root.",
             "D. If the issue is stale or not planned:",
@@ -48,7 +47,7 @@ DIAGNOSTIC_CATALOG = {
         "severity": "error",
         "meaning": "These are accidental roots. Investigate intended parentage and attach them under the ledger.",
         "remediation": [
-            "A. Attach this issue under the root ledger, a milestone/backlog ledger, or its parent work-unit branch.",
+            "A. Attach this issue under the root ledger or a milestone/backlog ledger.",
             "B. Close the issue if it is no longer planned.",
         ],
     },
@@ -79,13 +78,16 @@ DIAGNOSTIC_CATALOG = {
             "B. Keep implementation task lists inside the relevant work-unit issue instead of nesting issues for checklist items.",
         ],
     },
-    "W031": {
-        "title": "large_work_unit_branch",
-        "severity": "warning",
-        "meaning": "A parent issue contains many child work-unit issues. This is only useful when those children are independently reviewable coordination boundaries.",
+    "E015": {
+        "title": "work_unit_decomposed_into_child_issues",
+        "severity": "error",
+        "meaning": (
+            "A non-organizational issue is a PR-sized work unit. Its stories, proof burdens, "
+            "and implementation checklist belong in the issue body/comments, not in child issues."
+        ),
         "remediation": [
-            "A. Keep only child issues that are separate work units with their own acceptance/proof boundary.",
-            "B. Move ordinary implementation steps back into the parent issue body or issue comments.",
+            "A. Move child issue content into the parent issue body or comments, then close or detach the child issues.",
+            "B. If the children are truly separate PR-sized work units, convert the parent into an organizational ledger such as 'Milestone: ...' or 'Backlog: ...'.",
         ],
     },
     "W040": {
@@ -279,8 +281,6 @@ def first_open_work_unit(root: TreeNode) -> TreeNode | None:
         if not node.issue.is_open:
             continue
         if is_grouping_issue(node.issue.title):
-            continue
-        if any(desc.issue.is_open for desc in node.descendants()):
             continue
         return node
     return None
@@ -612,21 +612,22 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
                 )
             )
 
-        # W031: large branches should contain child work units, not implementation tasks.
-        oversized_wu_findings = []
+        # E015: a work-unit issue must not be decomposed into child issues.
+        decomposed_work_units = []
         for wu in sorted(work_unit_nodes, key=lambda w: w.issue.number):
-            child_work_units = [d for d in wu.descendants() if d.issue.is_open and not is_grouping_issue(d.issue.title)]
-            if len(child_work_units) > 10:
-                oversized_wu_findings.append(f"work-unit branch #{wu.issue.number} contains {len(child_work_units)} child work-unit issues")
+            child_issues = [child for child in wu.children if child.issue.is_open]
+            if child_issues:
+                child_refs = ", ".join(f"#{child.issue.number}" for child in child_issues)
+                decomposed_work_units.append(f"work unit #{wu.issue.number} has child issues: {child_refs}")
 
-        if oversized_wu_findings:
-            f_details = DIAGNOSTIC_CATALOG["W031"]
+        if decomposed_work_units:
+            f_details = DIAGNOSTIC_CATALOG["E015"]
             findings_list.append(
                 Finding(
-                    code="W031",
-                    severity="warning",
+                    code="E015",
+                    severity="error",
                     title=f_details["title"],
-                    evidence=oversized_wu_findings,
+                    evidence=decomposed_work_units,
                     meaning=f_details["meaning"],
                     remediation=f_details["remediation"],
                 )
@@ -634,7 +635,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
 
         # W050: work-unit issues own their acceptance/proof boundary.
         missing_ac_findings = []
-        open_work_units = [n for n in work_unit_nodes if not any(desc.issue.is_open for desc in n.descendants())]
+        open_work_units = work_unit_nodes
 
         for work_unit in sorted(work_unit_nodes, key=lambda w: w.issue.number):
             if lacks_acceptance_criteria(work_unit.issue.body):

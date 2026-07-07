@@ -68,9 +68,9 @@ They are not separate GitHub issues, and the PR is not the planning surface.
 
 - **Root issue**: The single parentless issue that anchors the repository's work tree.
 - **Grouping issue**: A ledger, milestone, backlog, roadmap, or phase issue used to order work units.
-- **Work-unit issue**: A coherent review/proof boundary that can be implemented and reviewed through a PR.
+- **Work-unit issue**: A coherent review/proof boundary that can be implemented and reviewed through one PR.
 - **Sub-issue**: An issue attached as a child of another issue.
-  Use this only for grouping issues or separate work-unit issues, not for ordinary implementation tasks.
+  Use this only under grouping issues, and only for separate PR-sized work units, not for ordinary implementation tasks.
 - **Preorder traversal**: Depth-first, left-to-right traversal of the tree.
   `next` uses this to find the next work-unit issue.
 - **Tree violation**: A structural problem in the tree (e.g., duplicate reachable issues, open internal nodes with no open descendants).
@@ -135,8 +135,9 @@ The typical workflow follows a **work-unit traversal** pattern:
 6. **Repeat**: Run `next` again to find the next work unit.
 7. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
 
-Create child issues only when the child is itself a separate work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary.
-Ordinary implementation steps belong in the issue body or comments.
+Create child issues only under organizational grouping issues, and only when the child is itself a separate PR-sized work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary.
+Do not break a work-unit issue into child issues for sub-tasks, sub-stories, proof burdens, or implementation checklists.
+Those details belong in the issue body or comments.
 
 ### Ordering Siblings
 
