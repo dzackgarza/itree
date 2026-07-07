@@ -3,7 +3,7 @@
 Deterministic traversal layer over GitHub sub-issue trees.
 
 `itree` treats GitHub issues as nodes in a rooted, ordered tree and gives you a CLI to build, query, and validate that structure.
-It is designed around **work-unit traversal**: keep a single ordered issue tree, ask for the next coherent work-unit issue, and track implementation checklists inside that issue or its PR.
+It is designed around **work-unit traversal**: keep a single ordered issue tree, ask for the next coherent work-unit issue, and track stories, plans, proof obligations, and implementation checklists inside that issue.
 
 ## Quick Start
 
@@ -58,17 +58,19 @@ Issue #3 can contain its own implementation checklist:
 ## Implementation Tasks
 - [ ] Wire document change events.
 - [ ] Add integration proof.
-- [ ] Update PR claim map.
+- [ ] Post the proof result as an issue comment.
 ```
 
-Those task atoms stay inside the work-unit issue, issue comments, or PR body. They are not separate GitHub issues.
+Ordinary implementation tasks stay inside the work-unit issue body or issue comments.
+They are not separate GitHub issues, and the PR is not the planning surface.
 
 ### Key Terms
 
 - **Root issue**: The top-level issue that defines the boundary of a problem domain.
 - **Grouping issue**: A ledger, milestone, backlog, roadmap, or phase issue used to order work units.
-- **Work-unit issue**: A coherent review/proof boundary that can be claimed by a PR.
-- **Sub-issue**: An issue attached as a child of another issue. Use this only for grouping issues or separate work-unit issues, not for ordinary implementation tasks.
+- **Work-unit issue**: A coherent review/proof boundary that can be implemented and reviewed through a PR.
+- **Sub-issue**: An issue attached as a child of another issue.
+  Use this only for grouping issues or separate work-unit issues, not for ordinary implementation tasks.
 - **Preorder traversal**: Depth-first, left-to-right traversal of the tree.
   `next` uses this to find the next work-unit issue.
 - **Tree violation**: A structural problem in the tree (e.g., duplicate reachable issues, open internal nodes with no open descendants).
@@ -126,14 +128,15 @@ Close issues:
 The typical workflow follows a **work-unit traversal** pattern:
 
 1. **Organize**: Create one root ledger and attach grouping or work-unit issues beneath it.
-1. **Scope**: Put acceptance criteria, proof obligations, and implementation checklists inside each work-unit issue.
-1. **Traverse**: Use `next` to find the next open work-unit issue in preorder.
-1. **Work**: Implement and prove the work-unit issue through its PR.
-1. **Close**: Mark the work-unit issue as completed with `close`.
-1. **Repeat**: Run `next` again to find the next work unit.
-1. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
+2. **Scope**: Put acceptance criteria, proof obligations, and implementation checklists inside each work-unit issue.
+3. **Traverse**: Use `next` to find the next open work-unit issue in preorder.
+4. **Work**: Implement and prove the work-unit issue through its PR.
+5. **Close**: Mark the work-unit issue as completed with `close`.
+6. **Repeat**: Run `next` again to find the next work unit.
+7. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
 
-Create child issues only when the child is itself a separate work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary. Ordinary implementation steps belong in the issue body, comments, or PR claim map.
+Create child issues only when the child is itself a separate work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary.
+Ordinary implementation steps belong in the issue body or comments.
 
 ### Ordering Siblings
 

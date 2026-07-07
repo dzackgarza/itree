@@ -47,7 +47,7 @@ Issue roles:
 
   root ledger
     The single issue anchoring the repository's work tree.
-    It is not a task and is not a PR target.
+    It is a grouping issue, not a work-unit issue.
 
   milestone ledger
     Optional grouping issue under the root.
@@ -57,7 +57,7 @@ Issue roles:
   work unit
     A coherent review/proof boundary that normally deserves a PR.
     Put implementation checklists, status notes, and proof details in the
-    issue body, comments, or PR claim map.
+    issue body or issue comments.
     Create child issues only for separate work units, not for individual tasks.
 """
 
@@ -84,14 +84,14 @@ app.command(milestone_app)
 
 work_unit_app = App(
     name="work-unit",
-    help="PR review-unit policy.",
-    help_prologue="""PR review-unit policy.
+    help="Work-unit issue policy.",
+    help_prologue="""Work-unit issue policy.
 
 A work unit is a GitHub issue that owns a coherent review/proof boundary.
 It may stand alone. Its implementation checklist belongs in the issue body,
-comments, or PR claim map. Create child issues only when those children are
+or issue comments. Create child issues only when those children are
 separate work units with their own acceptance/proof boundary.
-PRs should target work-unit issues."""
+When complete, synthesize the PR body from the work-unit issue."""
 )
 app.command(work_unit_app)
 
@@ -174,7 +174,7 @@ def help_model() -> None:
     Status comments
 
   Individual implementation tasks stay inside the work-unit issue body,
-  comments, or PR claim map. Do not create GitHub issues for task atoms.
+  or issue comments. Do not create GitHub issues for ordinary implementation tasks.
 
 Traversal:
   next(root) = first open work-unit issue in preorder whose open child
@@ -433,9 +433,9 @@ def next(
         print("Next work unit:")
         print(f"  #{node.issue.number} {node.issue.title}\n")
         print("Instruction:")
-        print(f"  Create or update the branch and PR for work unit #{node.issue.number}.")
-        print(f"  The PR should close or explicitly claim #{node.issue.number}.")
-        print("  Keep implementation tasks in the issue body, comments, or PR claim map.")
+        print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")
+        print("  When complete, synthesize the PR body from the issue for review.")
+        print("  Keep implementation tasks in the issue body or issue comments.")
 
 
 @app.command(group="Query")
@@ -572,15 +572,16 @@ def doctor(
             
             if report.enclosing_work_unit:
                 wu_title = dag.issues[report.enclosing_work_unit.number].title
-                print(f"  PR target: #{report.enclosing_work_unit.number} {wu_title}")
-                print(f"  Agent instruction: create or update the PR for work unit #{report.enclosing_work_unit.number}.")
-                print("  Keep implementation tasks in the issue body, comments, or PR claim map.")
+                print(f"  Work-unit issue: #{report.enclosing_work_unit.number} {wu_title}")
+                print(f"  Agent instruction: work from issue #{report.enclosing_work_unit.number}; keep planning state on that issue.")
+                print("  When complete, synthesize the PR body from the issue for review.")
+                print("  Keep implementation tasks in the issue body or issue comments.")
             else:
-                print("  PR target: None")
+                print("  Work-unit issue: None")
                 print(f"  Agent instruction: work on #{report.next_issue.number}.")
         else:
             print("  Next work unit: None")
-            print("  PR target: None")
+            print("  Work-unit issue: None")
             print("  Agent instruction: No open work units found.")
         print()
 

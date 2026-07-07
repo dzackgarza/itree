@@ -100,7 +100,7 @@ DIAGNOSTIC_CATALOG = {
         "meaning": "A parent issue contains many child work-unit issues. This is only useful when those children are independently reviewable coordination boundaries.",
         "remediation": [
             "A. Keep only child issues that are separate work units with their own acceptance/proof boundary.",
-            "B. Move ordinary implementation steps back into the parent issue body, issue comments, or PR claim map."
+            "B. Move ordinary implementation steps back into the parent issue body or issue comments."
         ],
     },
     "W040": {
