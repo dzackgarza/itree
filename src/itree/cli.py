@@ -25,6 +25,7 @@ from .models import (
     MoveRequest,
     RepoRef,
 )
+from .render import render_tree, shape_summary
 from .traversal import build_dag
 from .validate import (
     DIAGNOSTIC_CATALOG,
@@ -318,8 +319,13 @@ def children(
 @app.command(group="Query")
 def tree(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
+    *,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
+    show_all: Annotated[bool, Parameter(name="--all", help="Also show closed issues")] = False,
 ) -> None:
-    """Print the repository's materialized ordered issue tree as JSON.
+    """Render the repository's ordered issue tree with role annotations.
+
+    Human ASCII by default; --json for the machine-readable tree.
 
     Example:
         $ itree tree owner/project-alpha
@@ -328,10 +334,16 @@ def tree(
     try:
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
-        print(json.dumps(tree_node.model_dump(), indent=2))
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
+
+    if as_json:
+        print(json.dumps(tree_node.model_dump(), indent=2))
+        return
+
+    next_node = first_open_work_unit(tree_node)
+    print(render_tree(tree_node, next_number=next_node.issue.number if next_node else None, show_closed=show_all))
 
 
 @app.command(group="Query")
@@ -493,6 +505,10 @@ def doctor(
                 print(f"  {k}: {v} / 8")
             else:
                 print(f"  {k}: {v}")
+        if report.root.kind == "present":
+            tree_node = dag.materialize_root(report.root.ref.number)
+            next_node = first_open_work_unit(tree_node)
+            print(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
         print()
 
         print("Findings:")
@@ -511,6 +527,7 @@ def doctor(
         if non_info_findings:
             example_code = non_info_findings[0].code
         print(f"  itree doctor {repo_ref.slug} --explain {example_code}")
+        print(f"  itree tree {repo_ref.slug}")
         print(f"  itree doctor {repo_ref.slug} --json")
 
     # Handle exit code based on report status
