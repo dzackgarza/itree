@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Sequence
 from typing import Annotated
 
 from cyclopts import App, Parameter
@@ -82,7 +83,7 @@ def parse_repo(raw: str) -> RepoRef:
     return RepoRef.parse(raw)
 
 
-def print_diagnostic(code: str, evidence: list[str] = []) -> None:
+def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
     """Print one catalog diagnostic: code, meaning, evidence, remediation."""
     details = DIAGNOSTIC_CATALOG[code]
     print(f"ERROR {code}: {details['title']}.\n")
