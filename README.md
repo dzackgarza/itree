@@ -164,15 +164,10 @@ itree tree owner/repo  # always JSON
 
 ## Validation
 
-`itree doctor` is the single validator. It reports findings against a diagnostic
-catalog (`E…` errors, `W…` warnings) covering: missing/multiple roots, a root not
-titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents
-hiding open descendants, duplicate reachable issues, dependency edges, depth near
-GitHub's 8-level cap, work units decomposed into child issues, dead open grouping
-issues, milestone mismatches, and missing acceptance criteria.
+`itree doctor` is the single validator.
+It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, and missing acceptance criteria.
 
-Use `itree doctor OWNER/REPO --explain CODE` for the meaning and repair routes of
-any finding code.
+Use `itree doctor OWNER/REPO --explain CODE` for the meaning and repair routes of any finding code.
 
 ## Installation
 
