@@ -7,6 +7,37 @@ from pydantic import BaseModel, ConfigDict
 
 from .models import GithubIssue, IssueCloseReason, IssueRef, RepoRef
 
+# One paginated query returns the entire issue DAG: every issue (open and
+# closed) with its ordered sub-issue edges and blocked-by edges. Sub-issue
+# order IS sibling priority order. PRs never appear: repository.issues is
+# issues-only in GraphQL, unlike the REST issues endpoint.
+REPO_GRAPH_QUERY = """
+query($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(states: [OPEN, CLOSED], first: 100, after: $endCursor) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        databaseId
+        title
+        state
+        stateReason
+        body
+        url
+        milestone { title }
+        subIssues(first: 100) {
+          totalCount
+          nodes { number }
+        }
+        blockedBy(first: 50) {
+          nodes { number }
+        }
+      }
+    }
+  }
+}
+"""
+
 
 class GithubApi(BaseModel):
     """Typed boundary owning all GitHub API communication.
@@ -55,17 +86,6 @@ class GithubApi(BaseModel):
 
         return self._run_api_command(cmd, path, timeout)
 
-    def _exec_paginated(
-        self,
-        method: str,
-        path: str,
-        *,
-        timeout: int = 120,
-    ) -> subprocess.CompletedProcess[str]:
-        """Execute a paginated GitHub CLI API command."""
-        cmd = ["gh", "api", "-X", method, "--paginate", path]
-        return self._run_api_command(cmd, path, timeout)
-
     def _run_api_command(
         self,
         cmd: list[str],
@@ -93,15 +113,32 @@ class GithubApi(BaseModel):
         proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues")
         return tuple(GithubIssue.model_validate(item) for item in json.loads(proc.stdout))
 
-    def list_all_issues(self) -> tuple[GithubIssue, ...]:
-        """Fetch every issue in the repository (paginated).
+    def fetch_repo_graph(self) -> tuple[dict, ...]:
+        """Fetch the full issue DAG in one paginated GraphQL query.
 
-        Uses gh api's built-in pagination support: ``--paginate`` streams
-        all pages into a single JSON array on stdout.
+        Returns the raw issue nodes (open and closed) with sub-issue and
+        blocked-by edges. ``--slurp`` wraps the per-page JSON documents in
+        a single array.
         """
-        proc = self._exec_paginated("GET", f"repos/{self.owner}/{self.repo}/issues")
-        items: list[dict] = json.loads(proc.stdout)
-        return tuple(GithubIssue.model_validate(item) for item in items)
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "-f",
+            f"query={REPO_GRAPH_QUERY}",
+            "-F",
+            f"owner={self.owner}",
+            "-F",
+            f"name={self.repo}",
+        ]
+        proc = self._run_api_command(cmd, "graphql", timeout=120)
+        pages: list[dict] = json.loads(proc.stdout)
+        nodes: list[dict] = []
+        for page in pages:
+            nodes.extend(page["data"]["repository"]["issues"]["nodes"])
+        return tuple(nodes)
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""
@@ -162,6 +199,14 @@ class GithubApi(BaseModel):
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
+    def add_comment(self, number: int, body: str) -> None:
+        """Post a comment on an issue."""
+        self._exec(
+            "POST",
+            f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
+            fields={"body": body},
+        )
+
     def close_issue(
         self,
         number: int,
@@ -171,26 +216,13 @@ class GithubApi(BaseModel):
     ) -> GithubIssue:
         """Close a GitHub issue with an optional comment and reason."""
         if comment:
-            self._exec(
-                "POST",
-                f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
-                fields={"body": comment},
-            )
+            self.add_comment(number, comment)
         proc = self._exec(
             "PATCH",
             f"repos/{self.owner}/{self.repo}/issues/{number}",
             fields={"state": "closed", "state_reason": reason.value},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
-
-    def list_blocked_by(self, number: int) -> tuple[GithubIssue, ...]:
-        """List all issues blocking this issue."""
-        try:
-            proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/blocked_by")
-            items: list[dict] = json.loads(proc.stdout)
-            return tuple(GithubIssue.model_validate(item) for item in items)
-        except Exception:
-            return ()
 
     def update_issue_body(self, number: int, body: str) -> GithubIssue:
         """Update the body of a GitHub issue."""

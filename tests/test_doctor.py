@@ -59,6 +59,21 @@ def test_doctor_report_no_root() -> None:
     assert findings[0].title == "no_root"
 
 
+def test_doctor_closed_parentless_issue_is_not_a_root_candidate() -> None:
+    """Closed parentless issues are finished work, not traversal roots (no E002)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Old finished thing", state=IssueState.closed),
+        },
+        children_of={},
+    )
+    report = generate_doctor_report(dag)
+    assert _present_number(report.root) == 1
+    assert all(f.code != "E002" for f in report.findings)
+
+
 def test_doctor_report_root_not_ledger() -> None:
     """ERROR E004 is triggered when the unique root is not titled 'Ledger:'."""
     dag = RepoDag(

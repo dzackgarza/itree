@@ -23,6 +23,7 @@ class IssueCloseReason(StrEnum):
 
     completed = "completed"
     not_planned = "not_planned"
+    duplicate = "duplicate"
     reopened = "reopened"
 
 
@@ -125,6 +126,27 @@ class GithubIssue(BaseModel):
     state_reason: str | None = None
     milestone: Milestone | None = None
     pull_request: dict | None = None
+
+    @classmethod
+    def from_graphql(cls, node: dict) -> GithubIssue:
+        """Build an issue from a GraphQL ``repository.issues`` node.
+
+        GraphQL field names differ from REST: url vs html_url, databaseId
+        vs id, upper-case state/stateReason enums. GraphQL issue nodes are
+        never pull requests.
+        """
+        milestone = node.get("milestone")
+        state_reason = node.get("stateReason")
+        return cls(
+            id=node["databaseId"],
+            number=node["number"],
+            title=node["title"],
+            state=IssueState(node["state"].lower()),
+            html_url=node["url"],
+            body=node.get("body") or None,
+            state_reason=state_reason.lower() if state_reason else None,
+            milestone=Milestone(title=milestone["title"]) if milestone else None,
+        )
 
     @property
     def is_open(self) -> bool:

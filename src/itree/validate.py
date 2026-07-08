@@ -47,7 +47,10 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "multiple_root_ledgers",
         "severity": "error",
         "meaning": "This is a forest, not a tree. Multiple parentless issues exist in the repository.",
-        "remediation": ["1. Choose exactly one issue as the root ledger.", "2. Attach all other parentless issues as descendants of that root ledger."],
+        "remediation": [
+            "Run: itree triage OWNER/REPO",
+            "It anchors on the 'Ledger:'-titled root and walks every stray through absorb / attach / close, one at a time.",
+        ],
     },
     "E003": {
         "title": "cycle_detected",
@@ -60,24 +63,18 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "meaning": "These issues are not in the repository's deterministic traversal path. An agent following `itree next` will never reach them.",
         "remediation": [
-            "A. If the issue belongs to existing work:",
-            "     attach it under the root ledger or a milestone/backlog ledger.",
-            "B. If the issue is broad:",
-            "     keep it as the work-unit issue and put stories, proof burdens, and implementation tasks in its body/comments.",
-            "C. If the issue is future work:",
-            "     attach it under the Backlog ledger, which must itself be a child of root.",
-            "D. If the issue is stale or not planned:",
-            "     close it as not planned.",
-            "Do not leave it parentless. Parentless open issues are accidental roots.",
+            "Run: itree triage OWNER/REPO",
+            "It walks each orphan through absorb / attach / close, one at a time.",
+            "Absorb FIRST: an orphan smaller than one PR of work belongs inside an existing work unit, not attached as a new leaf.",
         ],
     },
     "E011": {
         "title": "parentless_non_root_issues",
         "severity": "error",
-        "meaning": "These are accidental roots. Investigate intended parentage and attach them under the ledger.",
+        "meaning": "These are accidental roots. They need a parent, a merge, or a close.",
         "remediation": [
-            "A. Attach this issue under the root ledger or a milestone/backlog ledger.",
-            "B. Close the issue if it is no longer planned.",
+            "Run: itree triage OWNER/REPO",
+            "It walks each orphan through absorb / attach / close, one at a time.",
         ],
     },
     "E012": {
@@ -222,18 +219,20 @@ def first_open_work_unit(root: TreeNode) -> TreeNode | None:
 
 
 def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
-    # The root is discovered structurally by finding parentless nodes in the issue DAG
-    dag = issue_only_dag(dag)
-    import networkx as nx
+    """Discover root candidates structurally: parentless OPEN issues.
 
+    Closed issues are part of the DAG (their subtrees matter for E012 and
+    history rendering) but a closed parentless issue is finished work, not
+    a traversal root.
+    """
+    dag = issue_only_dag(dag)
     G: nx.DiGraph[int] = nx.DiGraph()
     G.add_nodes_from(dag.issues.keys())
     for parent, children in dag.children_of.items():
         for child in children:
             G.add_edge(parent, child)
 
-    roots = [n for n in G.nodes if G.in_degree(n) == 0]
-    return roots
+    return [n for n in G.nodes if G.in_degree(n) == 0 and dag.issues[n].is_open]
 
 
 def generate_doctor_report(dag: RepoDag) -> DoctorReport:
