@@ -10,7 +10,7 @@ IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
 FindingSeverity = Literal["error", "warning", "info"]
 ReportStatus = Literal["ok", "warning", "error"]
-MissingReportRefReason = Literal["no_root_ledger", "multiple_root_ledgers", "no_open_work_unit", "not_applicable"]
+MissingReportRefReason = Literal["no_root_ledger", "no_open_work_unit"]
 
 
 class IssueState(StrEnum):
@@ -364,6 +364,5 @@ class DoctorReport(BaseModel):
     status: ReportStatus
     root: ReportRef
     next_issue: ReportRef
-    enclosing_work_unit: ReportRef
     metrics: dict[str, int]
     findings: list[Finding]

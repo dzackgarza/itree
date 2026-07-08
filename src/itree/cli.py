@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Sequence
 from typing import Annotated
 
 from cyclopts import App, Parameter
@@ -30,7 +31,6 @@ from .validate import (
     find_root_ledger_candidates,
     first_open_work_unit,
     generate_doctor_report,
-    validate_tree,
 )
 
 # Core ontology and help text
@@ -68,37 +68,9 @@ app = App(
 Use `itree doctor --explain CODE` for detailed remediation of a diagnostic.""",
 )
 
-# Subapps for progressive disclosure help
+# Subapp for progressive disclosure help
 help_app = App(name="help", help="Organization guide and model explanation.")
 app.command(help_app)
-
-milestone_app = App(
-    name="milestone",
-    help="How milestone ledgers mirror GitHub milestones.",
-    help_prologue="""How milestone ledgers mirror GitHub milestones.
-
-Milestone ledgers are grouping issues under the root ledger.
-Use them to mirror GitHub milestones or backlog areas.
-They are release/time groupings, not traversal roots, and they never replace the single root ledger.""",
-)
-app.command(milestone_app)
-
-work_unit_app = App(
-    name="work-unit",
-    help="Work-unit issue policy.",
-    help_prologue="""Work-unit issue policy.
-
-A work unit is a GitHub issue that owns a coherent review/proof boundary.
-It may stand alone. Its implementation checklist belongs in the issue body,
-or issue comments. Do not create child issues for its sub-tasks, sub-stories,
-proof burdens, or checklist items.
-Open the PR when implementation starts, and synthesize the PR body from the
-work-unit issue.""",
-)
-app.command(work_unit_app)
-
-root_app = App(name="root", help="Create or inspect the repository root ledger.")
-app.command(root_app)
 
 
 def parse_ref(raw: str) -> IssueRef:
@@ -109,6 +81,21 @@ def parse_ref(raw: str) -> IssueRef:
 def parse_repo(raw: str) -> RepoRef:
     """Parse a repository reference string into a RepoRef."""
     return RepoRef.parse(raw)
+
+
+def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
+    """Print one catalog diagnostic: code, meaning, evidence, remediation."""
+    details = DIAGNOSTIC_CATALOG[code]
+    print(f"ERROR {code}: {details['title']}.\n")
+    print("Meaning:")
+    print(f"  {details['meaning']}")
+    if evidence:
+        print("\nFound:")
+        for line in evidence:
+            print(f"  {line}")
+    print("\nRepair routes:")
+    for route in details["remediation"]:
+        print(f"  {route}")
 
 
 def get_repo_root(repo: str) -> tuple[RepoRef, int]:
@@ -122,28 +109,10 @@ def get_repo_root(repo: str) -> tuple[RepoRef, int]:
 
     candidates = find_root_ledger_candidates(dag)
     if not candidates:
-        print("ERROR E001: no root ledger exists.\n")
-        print("This repository has no traversal domain because it has no parentless issue.")
-        print("Repair:")
-        print("  1. Create one ledger issue:")
-        print('       itree root create OWNER/REPO --title "Ledger: OWNER/REPO"\n')
-        print("  2. Attach every open planned issue under that ledger, either directly or")
-        print("     through a milestone/backlog ledger:")
-        print("       itree attach OWNER/REPO#ROOT OWNER/REPO#ISSUE\n")
-        print("Do not create multiple ledger issues. A milestone, project, roadmap, or epic is")
-        print("not a second root.")
+        print_diagnostic("E001")
         sys.exit(2)
     if len(candidates) > 1:
-        print("ERROR E002: multiple parentless issues found.\n")
-        print("Found:")
-        for c in candidates:
-            print(f"  #{c}  {dag.issues[c].title}")
-        print("\nThis is a forest, not one ordered tree. A repository-wide traversal requires")
-        print("one root by construction, not an explicit root selection.\n")
-        print("Repair:")
-        print("  1. Choose the single repository ledger issue.")
-        print("  2. Attach every other parentless planned issue under that ledger.")
-        print("  3. Put the active/current child first; preorder defines execution order.")
+        print_diagnostic("E002", evidence=[f"#{c}  {dag.issues[c].title}" for c in candidates])
         sys.exit(2)
     return repo_ref, candidates[0]
 
@@ -188,64 +157,27 @@ Review policy:
 """)
 
 
-@root_app.command(name="create")
-def root_create(
+@app.command(group="Structural")
+def init(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
-    *,
     title: Annotated[str, Parameter(help="Title for the root ledger issue")],
+    *,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
 ) -> None:
-    """Create a new root ledger issue for a traversal domain."""
+    """Create a new root ledger issue for a traversal domain.
+
+    Example:
+        $ itree init owner/project-alpha "Ledger: owner/project-alpha"
+        owner/project-alpha#1
+    """
     repo_ref = parse_repo(repo)
     api = GithubApi.from_repo_ref(repo_ref)
-
     try:
         issue = api.create_issue(title, body or "")
         print(f"{repo_ref.slug}#{issue.number}")
     except Exception as e:
         print(f"Error creating issue: {e}")
         sys.exit(3)
-
-
-@root_app.command(name="inspect")
-def root_inspect(
-    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
-) -> None:
-    """Inspect the repository's root ledger details."""
-    repo_ref = parse_repo(repo)
-    try:
-        dag = build_dag(repo_ref)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(3)
-    candidates = find_root_ledger_candidates(dag)
-    if not candidates:
-        print("No root ledger found.")
-        sys.exit(2)
-    elif len(candidates) > 1:
-        print(f"Multiple root ledger candidates found: {candidates}")
-        sys.exit(2)
-    else:
-        issue = dag.issues[candidates[0]]
-        print(f'Root ledger: #{issue.number} "{issue.title}"')
-        print(f"State: {issue.state}")
-        print(f"URL: {issue.html_url}")
-
-
-@app.command(group="Structural")
-def init(
-    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
-    title: Annotated[str, Parameter(help="Title for the root issue")],
-    *,
-    body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
-) -> None:
-    """Create a new root issue for a traversal domain.
-
-    Example:
-        $ itree init owner/project-alpha "Project Alpha"
-        owner/project-alpha#1
-    """
-    root_create(repo, title=title, body=body)
 
 
 @app.command(group="Structural")
@@ -355,7 +287,7 @@ def children(
     target: Annotated[str, Parameter(help="Issue or repository root as OWNER/REPO#N or OWNER/REPO")],
     *,
     recursive: Annotated[bool, Parameter()] = False,
-    as_json: Annotated[bool, Parameter()] = False,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
 ) -> None:
     """List children of an issue.
 
@@ -406,7 +338,7 @@ def tree(
 def next(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
-    as_json: Annotated[bool, Parameter()] = False,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
 ) -> None:
     """Find the next open work-unit issue in repository preorder.
 
@@ -442,7 +374,7 @@ def next(
 def path(
     issue: Annotated[str, Parameter(help="Issue as OWNER/REPO#N")],
     *,
-    as_json: Annotated[bool, Parameter()] = False,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
 ) -> None:
     """Print the path from root to the given issue.
 
@@ -467,27 +399,6 @@ def path(
         else:
             for node in path_nodes:
                 print(f"#{node.issue.number}: {node.issue.title}")
-
-
-@app.command(group="Query")
-def validate(
-    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
-) -> None:
-    """Validate the repository issue tree.
-
-    Example:
-        $ itree validate owner/project-alpha
-    """
-    repo_ref, root_num = get_repo_root(repo)
-    try:
-        dag = build_dag(repo_ref)
-        tree_node = dag.materialize_root(root_num)
-    except Exception as e:
-        print(f"Error: {e}")
-        sys.exit(3)
-
-    violations = validate_tree(tree_node)
-    print(json.dumps([v.model_dump() for v in violations], indent=2))
 
 
 @app.command(group="Terminal")
@@ -519,7 +430,7 @@ def close(
 def doctor(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
-    as_json: Annotated[bool, Parameter()] = False,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
     explain: Annotated[str | None, Parameter(help="Explain the remediation of a diagnostic code")] = None,
     strict: Annotated[bool, Parameter(help="Treat warnings as errors")] = False,
 ) -> None:
@@ -568,20 +479,11 @@ def doctor(
             next_ref = report.next_issue.ref
             next_title = dag.issues[next_ref.number].title
             print(f"  Next work unit: #{next_ref.number} {next_title}")
-
-            if report.enclosing_work_unit.kind == "present":
-                work_unit_ref = report.enclosing_work_unit.ref
-                wu_title = dag.issues[work_unit_ref.number].title
-                print(f"  Work-unit issue: #{work_unit_ref.number} {wu_title}")
-                print(f"  Agent instruction: work from issue #{work_unit_ref.number}; keep planning state on that issue.")
-                print("  Open the PR when implementation starts; synthesize its body from the issue.")
-                print("  Keep implementation tasks in the issue body or issue comments.")
-            else:
-                print("  Work-unit issue: None")
-                print(f"  Agent instruction: work on #{next_ref.number}.")
+            print(f"  Agent instruction: work from issue #{next_ref.number}; keep planning state on that issue.")
+            print("  Open the PR when implementation starts; synthesize its body from the issue.")
+            print("  Keep implementation tasks in the issue body or issue comments.")
         else:
             print("  Next work unit: None")
-            print("  Work-unit issue: None")
             print("  Agent instruction: No open work units found.")
         print()
 
