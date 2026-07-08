@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Sequence
+from datetime import date
+from pathlib import Path
 from typing import Annotated
 
 from cyclopts import App, Parameter
@@ -23,7 +25,9 @@ from .models import (
     IssueCloseReason,
     IssueRef,
     MoveRequest,
+    RepoDag,
     RepoRef,
+    TreeNode,
 )
 from .render import prune_closed, render_tree, shape_summary
 from .traversal import build_dag
@@ -32,6 +36,8 @@ from .validate import (
     find_root_ledger_candidates,
     first_open_work_unit,
     generate_doctor_report,
+    is_grouping_issue,
+    is_root_ledger,
 )
 
 # Core ontology and help text
@@ -181,28 +187,202 @@ def init(
         sys.exit(3)
 
 
+def read_body(body: str, body_file: str | None) -> str:
+    """Resolve the issue body from --body or --body-file (mutually exclusive)."""
+    if body_file is not None:
+        if body:
+            print("Error: use either --body or --body-file, not both")
+            sys.exit(1)
+        return Path(body_file).read_text()
+    return body
+
+
+def candidate_sections(tree_node: TreeNode) -> tuple[list[TreeNode], list[TreeNode]]:
+    """Open work-unit and grouping-issue nodes, in preorder."""
+    work_units: list[TreeNode] = []
+    groupings: list[TreeNode] = []
+    for node in tree_node.preorder():
+        if not node.issue.is_open:
+            continue
+        if is_grouping_issue(node.issue.title):
+            groupings.append(node)
+        else:
+            work_units.append(node)
+    return work_units, groupings
+
+
+def candidate_lines(nodes: list[TreeNode]) -> str:
+    return "\n".join(f"  #{node.issue.number} {node.issue.title}" for node in nodes) if nodes else "  (none)"
+
+
+def example_grouping_number(groupings: list[TreeNode], root: TreeNode) -> str:
+    """Prefer a non-root grouping for example commands; fall back to the root."""
+    for node in groupings:
+        if node is not root:
+            return str(node.issue.number)
+    return str(root.issue.number)
+
+
+def print_placement_menu(slug: str, title: str, tree_node: TreeNode) -> None:
+    """The anti-invention rail: existing work units first, then grouping targets."""
+    work_units, groupings = candidate_sections(tree_node)
+    print("Nothing was created. Fit the new item into existing work FIRST.\n")
+    if work_units:
+        print(f"Open work units ({len(work_units)} = {len(work_units)} pending PRs):")
+    else:
+        print("Open work units:")
+    print(candidate_lines(work_units))
+    print("\nGrouping issues:")
+    print(candidate_lines(groupings))
+    print()
+    if work_units:
+        print("Less than one PR of work -> absorb it into a work unit:")
+        print(f'  itree absorb --into {slug}#{work_units[0].issue.number} --title "{title}" --body "..."')
+    grouping_number = example_grouping_number(groupings, tree_node)
+    print("A full PR-sized unit (independently valuable, reviewable, own")
+    print("acceptance criteria) -> create it under a grouping issue:")
+    print(f'  itree new {slug} "{title}" --under {slug}#{grouping_number} --body "..."')
+
+
 @app.command(group="Structural")
-def add(
-    parent: Annotated[str, Parameter(help="Parent issue or repository root as OWNER/REPO#N or OWNER/REPO")],
-    title: Annotated[str, Parameter(help="Title for the new child issue")],
+def new(
+    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N")],
+    title: Annotated[str, Parameter(help="Title for the new issue")],
     *,
+    under: Annotated[str | None, Parameter(help="Grouping issue to attach under, as OWNER/REPO#N")] = None,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
+    body_file: Annotated[str | None, Parameter(help="Read the issue body from a file")] = None,
 ) -> None:
-    """Create a new child issue and attach it to the parent issue.
+    """File a new issue into the tree, with guided placement.
+
+    Without --under this creates NOTHING: it lists the existing work
+    units and grouping issues and prints the exact next commands, so the
+    item is absorbed into existing work unless it truly is a new
+    PR-sized work unit.
 
     Example:
-        $ itree add owner/project-alpha#1 "Frontend"
-        owner/project-alpha#2
+        $ itree new owner/project-alpha "Export command proof" --under owner/project-alpha#2
+        owner/project-alpha#7
     """
-    repo_ref, parent_number = get_repo_and_issue_or_root(parent)
-    api = GithubApi.from_repo_ref(repo_ref)
+    resolved_body = read_body(body, body_file)
+    parent_raw = target if "#" in target else under
+
+    if parent_raw is None:
+        repo_ref, root_num = get_repo_root(target)
+        try:
+            dag = build_dag(repo_ref)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(3)
+        print_placement_menu(repo_ref.slug, title, dag.materialize_root(root_num))
+        sys.exit(1)
+
+    parent_ref = parse_ref(parent_raw)
+    api = GithubApi.from_issue_ref(parent_ref)
     try:
-        child = api.create_issue(title, body)
-        api.add_subissue(parent_number, child.id)
-        print(f"{repo_ref.slug}#{child.number}")
+        parent_issue = api.get_issue(parent_ref.number)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
+
+    if not parent_issue.is_open:
+        print(f"Refusing: #{parent_ref.number} is closed. Attach new work under an open grouping issue.")
+        sys.exit(2)
+    if not is_grouping_issue(parent_issue.title):
+        print(f'Refusing: #{parent_ref.number} "{parent_issue.title}" is a work unit, and work units are leaves.')
+        print("Implementation tasks belong in the work-unit issue body or comments.")
+        print("If this item is part of that work unit, absorb it instead:")
+        print(f'  itree absorb --into {parent_ref.slug} --title "{title}" --body "..."')
+        sys.exit(2)
+
+    try:
+        child = api.create_issue(title, resolved_body)
+        api.add_subissue(parent_ref.number, child.id)
+        print(f"{parent_ref.repo_ref.slug}#{child.number}")
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(3)
+
+
+@app.command(group="Structural")
+def absorb(
+    source: Annotated[str | None, Parameter(help="Existing issue to absorb, as OWNER/REPO#N")] = None,
+    *,
+    into: Annotated[str, Parameter(help="Target work-unit issue as OWNER/REPO#N")],
+    title: Annotated[str | None, Parameter(help="Title for not-yet-filed content (no source issue)")] = None,
+    body: Annotated[str, Parameter(help="Body for not-yet-filed content")] = "",
+    body_file: Annotated[str | None, Parameter(help="Read the content body from a file")] = None,
+) -> None:
+    """Merge an issue (or not-yet-filed content) into a work unit, verbatim.
+
+    The source body is appended byte-for-byte to the target work unit
+    under an '## Absorbed:' heading with provenance; the source issue is
+    cross-linked, detached, and closed as duplicate. Nothing is
+    summarized and nothing is lost.
+
+    Examples:
+        $ itree absorb owner/repo#31 --into owner/repo#14
+        $ itree absorb --into owner/repo#14 --title "Small fix" --body "..."
+    """
+    target_ref = parse_ref(into)
+    api = GithubApi.from_issue_ref(target_ref)
+    try:
+        target_issue = api.get_issue(target_ref.number)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(3)
+
+    if is_grouping_issue(target_issue.title):
+        print(f'Refusing: #{target_ref.number} "{target_issue.title}" is a grouping issue.')
+        print("Absorb into a work unit, not a ledger.")
+        sys.exit(2)
+    if not target_issue.is_open:
+        print(f"Refusing: target #{target_ref.number} is closed.")
+        sys.exit(2)
+
+    today = date.today().isoformat()
+    if source is not None:
+        source_ref = parse_ref(source)
+        if source_ref.repo_ref != target_ref.repo_ref:
+            print("Error: source and target must be in the same repository")
+            sys.exit(1)
+        if source_ref.number == target_ref.number:
+            print("Error: an issue cannot absorb itself")
+            sys.exit(1)
+        try:
+            dag = build_dag(target_ref.repo_ref)
+            source_issue = dag.issues.get(source_ref.number) or api.get_issue(source_ref.number)
+            section = (
+                f"\n\n## Absorbed: {source_issue.title} (#{source_issue.number})\n\n"
+                f"_Absorbed verbatim from #{source_issue.number} on {today}. Original: {source_issue.html_url}_\n\n"
+                f"{source_issue.body or '(no body)'}"
+            )
+            api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
+            api.add_comment(
+                source_ref.number,
+                f"Absorbed into #{target_ref.number}; content preserved verbatim there.",
+            )
+            parent_number = dag.parent_of.get(source_ref.number)
+            if parent_number is not None:
+                api.remove_subissue(parent_number, source_issue.id)
+            api.close_issue(source_ref.number, reason=IssueCloseReason.duplicate)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(3)
+        print(f"Absorbed {source_ref.slug} -> {target_ref.slug}")
+    else:
+        if title is None:
+            print("Error: provide SOURCE, or --title for not-yet-filed content")
+            sys.exit(1)
+        content = read_body(body, body_file)
+        section = f"\n\n## Absorbed: {title}\n\n_Recorded {today}; absorbed at filing time, no separate issue created._\n\n{content or '(no body)'}"
+        try:
+            api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(3)
+        print(f"Absorbed new content -> {target_ref.slug}")
+    print(f"Next: itree doctor {target_ref.repo_ref.slug}")
 
 
 @app.command(group="Structural")
@@ -448,6 +628,112 @@ def close(
         sys.exit(3)
 
 
+def triage_root(dag: RepoDag) -> int:
+    """Choose the triage root: the ledger-titled candidate when unambiguous."""
+    candidates = find_root_ledger_candidates(dag)
+    if not candidates:
+        print_diagnostic("E001")
+        sys.exit(2)
+    ledger_candidates = [c for c in candidates if is_root_ledger(dag.issues[c].title)]
+    if len(ledger_candidates) == 1:
+        return ledger_candidates[0]
+    return sorted(candidates)[0]
+
+
+@app.command(group="Diagnostic")
+def triage(
+    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or a specific orphan as OWNER/REPO#N")],
+    *,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
+) -> None:
+    """Repair orphans one at a time: absorb, attach, or close each one.
+
+    Surfaces the lowest-numbered orphan with its body and the candidate
+    work units, and prints the exact command for each route. Re-run
+    after each decision until no orphans remain.
+
+    Example:
+        $ itree triage owner/project-alpha
+    """
+    explicit: int | None = None
+    if "#" in target:
+        ref = parse_ref(target)
+        repo_ref, explicit = ref.repo_ref, ref.number
+    else:
+        repo_ref = parse_repo(target)
+
+    try:
+        dag = build_dag(repo_ref)
+    except Exception as e:
+        print(f"Error fetching issues from GitHub: {e}")
+        sys.exit(3)
+
+    root_num = triage_root(dag)
+    reachable: set[int] = set()
+    dag._collect_reachable(root_num, reachable)
+    orphans = [n for n, issue in sorted(dag.issues.items()) if issue.is_open and n not in reachable]
+    tree_node = dag.materialize_root(root_num)
+
+    if as_json:
+        work_units, groupings = candidate_sections(tree_node)
+        print(
+            json.dumps(
+                {
+                    "root": root_num,
+                    "orphans": [dag.issues[n].model_dump() for n in orphans],
+                    "work_units": [node.issue.model_dump() for node in work_units],
+                    "groupings": [node.issue.model_dump() for node in groupings],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    if not orphans:
+        print(f"No orphans. Every open issue is reachable from root #{root_num}.")
+        print(f"Next: itree doctor {repo_ref.slug}")
+        return
+
+    current = explicit if explicit is not None else orphans[0]
+    if current not in orphans:
+        print(f"#{current} is not an orphan (already reachable from root #{root_num}).")
+        sys.exit(1)
+    issue = dag.issues[current]
+    remaining = len(orphans) - 1
+
+    print(f"Orphan 1 of {len(orphans)}: #{issue.number} {issue.title}")
+    preview = (issue.body or "(no body)").strip()
+    if len(preview) > 300:
+        preview = preview[:300] + " ..."
+    for line in preview.splitlines()[:6]:
+        print(f"  | {line}")
+    print()
+
+    work_units, groupings = candidate_sections(tree_node)
+    if work_units:
+        print("Open work units:")
+        print(candidate_lines(work_units))
+    print("Grouping issues:")
+    print(candidate_lines(groupings))
+    print()
+
+    slug = repo_ref.slug
+    first_wu = str(work_units[0].issue.number) if work_units else "WORKUNIT"
+    first_grouping = example_grouping_number(groupings, tree_node)
+    print("Route it (absorb FIRST if it is less than one PR of work):")
+    print("  Part of an existing work unit -> merge, keeping the body verbatim:")
+    print(f"    itree absorb {slug}#{current} --into {slug}#{first_wu}")
+    print("  A separate PR-sized work unit -> attach under a grouping issue:")
+    print(f"    itree move {slug}#{current} --under {slug}#{first_grouping}")
+    print("  Stale or never planned -> close it:")
+    print(f"    itree close {slug}#{current} --reason not_planned")
+    print()
+    if remaining:
+        print(f"{remaining} orphan{'s' if remaining != 1 else ''} remain after this one. Re-run: itree triage {slug}")
+    else:
+        print(f"Last orphan. Afterwards run: itree doctor {slug}")
+
+
 @app.command(group="Diagnostic")
 def doctor(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
@@ -536,6 +822,8 @@ def doctor(
         non_info_findings = [f for f in report.findings if f.severity != "info"]
         if non_info_findings:
             example_code = non_info_findings[0].code
+        if any(f.code in ("E010", "E011") for f in report.findings):
+            print(f"  itree triage {repo_ref.slug}")
         print(f"  itree doctor {repo_ref.slug} --explain {example_code}")
         print(f"  itree tree {repo_ref.slug}")
         print(f"  itree doctor {repo_ref.slug} --json")

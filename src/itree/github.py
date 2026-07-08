@@ -199,6 +199,14 @@ class GithubApi(BaseModel):
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
+    def add_comment(self, number: int, body: str) -> None:
+        """Post a comment on an issue."""
+        self._exec(
+            "POST",
+            f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
+            fields={"body": body},
+        )
+
     def close_issue(
         self,
         number: int,
@@ -208,11 +216,7 @@ class GithubApi(BaseModel):
     ) -> GithubIssue:
         """Close a GitHub issue with an optional comment and reason."""
         if comment:
-            self._exec(
-                "POST",
-                f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
-                fields={"body": comment},
-            )
+            self.add_comment(number, comment)
         proc = self._exec(
             "PATCH",
             f"repos/{self.owner}/{self.repo}/issues/{number}",

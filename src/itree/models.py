@@ -23,6 +23,7 @@ class IssueCloseReason(StrEnum):
 
     completed = "completed"
     not_planned = "not_planned"
+    duplicate = "duplicate"
     reopened = "reopened"
 
 

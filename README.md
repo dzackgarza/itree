@@ -12,9 +12,9 @@ It is designed around **work-unit traversal**: keep a single ordered issue tree,
 itree init owner/repo "Project Alpha"
 
 # Add grouping or work-unit issues
-itree add owner/repo#1 "Milestone: v1"
-itree add owner/repo#2 "Implement editor preview sync"
-itree add owner/repo#2 "Add export command proof"
+itree new owner/repo#1 "Milestone: v1"
+itree new owner/repo#2 "Implement editor preview sync"
+itree new owner/repo#2 "Add export command proof"
 
 # Find the next work-unit issue
 itree next owner/repo
@@ -98,7 +98,9 @@ Build and modify the tree:
 | Command | Description | Example |
 | --- | --- | --- |
 | `init` | Create a root issue | `itree init owner/repo "Title"` |
-| `add` | Create a child issue | `itree add owner/repo#1 "Child title"` |
+| `new` | File an issue with guided placement | `itree new owner/repo "Title" --under owner/repo#2` |
+| `absorb` | Merge an issue into a work unit, verbatim | `itree absorb owner/repo#31 --into owner/repo#14` |
+| `triage` | Repair orphans one at a time | `itree triage owner/repo` |
 | `attach` | Attach an existing issue | `itree attach owner/repo#1 owner/repo#5` |
 | `detach` | Detach from parent | `itree detach owner/repo#1 owner/repo#5` |
 | `move` | Reparent an issue | `itree move owner/repo#5 --under owner/repo#3` |
