@@ -17,25 +17,33 @@ MAX_CHILDREN_SHOWN = 10
 TRUNCATE_HEAD = 6
 
 
-def _role(node: TreeNode, is_root: bool) -> str:
+def _role(node: TreeNode, root: TreeNode) -> str:
     if not node.issue.is_open:
         return "[closed]"
-    if is_root:
+    if node is root:
         return "[root]"
     if is_grouping_issue(node.issue.title):
         return "[grouping]"
     return "[WU]"
 
 
-def _label(node: TreeNode, *, is_root: bool, next_number: int | None, duplicate: bool) -> str:
-    parts = [f"#{node.issue.number} {node.issue.title}  {_role(node, is_root)}"]
-    if node.issue.number == next_number:
-        parts.append("<- next")
-    if duplicate:
-        parts.append("!E013: duplicate")
-    elif node.issue.is_open and not is_grouping_issue(node.issue.title) and any(child.issue.is_open for child in node.children):
-        parts.append("!E015: has child issues")
-    return "  ".join(parts)
+def prune_closed(root: TreeNode) -> tuple[TreeNode | None, int]:
+    """Copy the tree with closed subtrees removed; return (tree, hidden_count).
+
+    A closed node drops with its entire subtree, and each dropped subtree
+    counts as len(subtree.preorder()) hidden nodes. A closed root yields
+    (None, total).
+    """
+    if not root.issue.is_open:
+        return None, len(root.preorder())
+    hidden = 0
+    kept: list[TreeNode] = []
+    for child in root.children:
+        pruned, count = prune_closed(child)
+        hidden += count
+        if pruned is not None:
+            kept.append(pruned)
+    return TreeNode(issue=root.issue, children=tuple(kept)), hidden
 
 
 def shape_summary(root: TreeNode, next_number: int | None) -> str:
@@ -53,45 +61,49 @@ def shape_summary(root: TreeNode, next_number: int | None) -> str:
     return f"shape: {len(open_nodes)} open | {len(groupings)} groupings | {len(work_units)} work units | depth {depth(root)} | root fan-out {fan_out} | {next_part}"
 
 
-def render_tree(root: TreeNode, *, next_number: int | None = None, show_closed: bool = False) -> str:
-    """Render the tree as annotated ASCII with a trailing shape line."""
+def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count: int = 0) -> str:
+    """Render exactly the given tree as annotated ASCII with a trailing shape line.
+
+    Visibility filtering is not done here: pass an already-pruned tree and the
+    count of nodes it dropped as hidden_count (see prune_closed).
+    """
     lines: list[str] = []
     seen: set[int] = set()
-    hidden_closed = 0
 
-    def visible(node: TreeNode) -> bool:
-        nonlocal hidden_closed
-        if node.issue.is_open or show_closed:
-            return True
-        hidden_closed += len(node.preorder())
-        return False
-
-    def walk(node: TreeNode, prefix: str, connector: str, is_root: bool) -> None:
+    def walk(node: TreeNode, prefix: str, connector: str) -> None:
         duplicate = node.issue.number in seen
         seen.add(node.issue.number)
-        lines.append(f"{prefix}{connector}{_label(node, is_root=is_root, next_number=next_number, duplicate=duplicate)}")
+
+        parts = [f"#{node.issue.number} {node.issue.title}  {_role(node, root)}"]
+        if node.issue.number == next_number:
+            parts.append("<- next")
+        if duplicate:
+            parts.append("!E013: duplicate")
+        elif node.issue.is_open and not is_grouping_issue(node.issue.title) and any(child.issue.is_open for child in node.children):
+            parts.append("!E015: has child issues")
+        lines.append(f"{prefix}{connector}{'  '.join(parts)}")
         if duplicate:
             return
 
-        children = [child for child in node.children if visible(child)]
+        children = node.children
         shown = children
-        overflow: list[TreeNode] = []
+        overflow: tuple[TreeNode, ...] = ()
         if len(children) > MAX_CHILDREN_SHOWN:
             shown = children[:TRUNCATE_HEAD]
             overflow = children[TRUNCATE_HEAD:]
 
-        child_prefix = "" if is_root else prefix + ("    " if connector.startswith("└") else "│   ")
+        child_prefix = "" if node is root else prefix + ("    " if connector.startswith("└") else "│   ")
         for i, child in enumerate(shown):
             last = i == len(shown) - 1 and not overflow
-            walk(child, child_prefix, "└── " if last else "├── ", is_root=False)
+            walk(child, child_prefix, "└── " if last else "├── ")
         if overflow:
             numbers = " ".join(f"#{child.issue.number}" for child in overflow)
             lines.append(f"{child_prefix}└── ... {len(overflow)} more: {numbers}")
 
-    walk(root, "", "", is_root=True)
+    walk(root, "", "")
 
-    if hidden_closed:
+    if hidden_count:
         lines.append("")
-        lines.append(f"({hidden_closed} closed issue{'s' if hidden_closed != 1 else ''} hidden; --all to show)")
+        lines.append(f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)")
     lines.append(shape_summary(root, next_number))
     return "\n".join(lines)

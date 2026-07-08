@@ -25,7 +25,7 @@ from .models import (
     MoveRequest,
     RepoRef,
 )
-from .render import render_tree, shape_summary
+from .render import prune_closed, render_tree, shape_summary
 from .traversal import build_dag
 from .validate import (
     DIAGNOSTIC_CATALOG,
@@ -343,7 +343,17 @@ def tree(
         return
 
     next_node = first_open_work_unit(tree_node)
-    print(render_tree(tree_node, next_number=next_node.issue.number if next_node else None, show_closed=show_all))
+    next_number = next_node.issue.number if next_node else None
+
+    if show_all:
+        print(render_tree(tree_node, next_number=next_number, hidden_count=0))
+        return
+
+    pruned, hidden_count = prune_closed(tree_node)
+    if pruned is None:
+        print(f"Root ledger #{root_num} is closed; nothing open to render. Run: itree doctor {repo_ref.slug}")
+        sys.exit(1)
+    print(render_tree(pruned, next_number=next_number, hidden_count=hidden_count))
 
 
 @app.command(group="Query")

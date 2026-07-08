@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from itree.models import GithubIssue, IssueState, TreeNode
-from itree.render import render_tree, shape_summary
+from itree.render import prune_closed, render_tree, shape_summary
 
 
 def _issue(number: int, title: str, state: IssueState = IssueState.open) -> GithubIssue:
@@ -34,7 +34,9 @@ def _small_tree() -> TreeNode:
 
 
 def test_render_small_tree_golden() -> None:
-    out = render_tree(_small_tree(), next_number=3)
+    pruned, hidden = prune_closed(_small_tree())
+    assert pruned is not None
+    out = render_tree(pruned, next_number=3, hidden_count=hidden)
     assert out == (
         "#1 Ledger: t/t  [root]\n"
         "└── #2 Milestone: v1  [grouping]\n"
@@ -47,9 +49,30 @@ def test_render_small_tree_golden() -> None:
 
 
 def test_render_all_shows_closed() -> None:
-    out = render_tree(_small_tree(), next_number=3, show_closed=True)
+    out = render_tree(_small_tree(), next_number=3, hidden_count=0)
     assert "#5 Old thing  [closed]" in out
     assert "hidden" not in out
+
+
+def test_prune_closed_counts_subtree_and_drops_closed_root() -> None:
+    # A closed node drops with its whole subtree, counted via preorder length.
+    root = TreeNode(
+        issue=_issue(1, "Ledger: t/t"),
+        children=(
+            _leaf(2, "Open work"),
+            TreeNode(
+                issue=_issue(3, "Milestone: done", state=IssueState.closed),
+                children=(_leaf(4, "Child a"), _leaf(5, "Child b")),
+            ),
+        ),
+    )
+    pruned, hidden = prune_closed(root)
+    assert hidden == 3  # #3 plus its two children
+    assert pruned is not None
+    assert tuple(c.issue.number for c in pruned.children) == (2,)
+
+    closed_root = TreeNode(issue=_issue(1, "Ledger", state=IssueState.closed), children=(_leaf(2, "x"),))
+    assert prune_closed(closed_root) == (None, 2)
 
 
 def test_render_flat_tree_truncates_children() -> None:
