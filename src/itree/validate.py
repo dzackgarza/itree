@@ -4,7 +4,6 @@ import re
 from typing import TypedDict
 
 import networkx as nx
-from pydantic import BaseModel
 
 from .models import (
     AbsentReportRef,
@@ -29,9 +28,19 @@ class DiagnosticDetails(TypedDict):
 
 DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "E001": {
-        "title": "no_root_ledger",
+        "title": "no_root",
         "severity": "error",
-        "meaning": "The root of the issue tree is not a ledger (its title does not start with 'Ledger:').",
+        "meaning": "No parentless issue exists, so the repository has no traversal domain.",
+        "remediation": [
+            '1. Create one root ledger issue: itree init OWNER/REPO "Ledger: OWNER/REPO"',
+            "2. Attach every open planned issue under it, directly or through a milestone/backlog ledger.",
+            "Do not create multiple ledger issues. A milestone, project, roadmap, or epic is not a second root.",
+        ],
+    },
+    "E004": {
+        "title": "root_not_ledger",
+        "severity": "error",
+        "meaning": "The unique root of the tree is not a ledger (its title does not start with 'Ledger:').",
         "remediation": ["1. Rename the root issue title so it starts with 'Ledger:', e.g., 'Ledger: OWNER/REPO'"],
     },
     "E002": {
@@ -88,6 +97,15 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "meaning": "This model does not use DAG scheduling. Move blockers earlier in preorder or make the blocker its own ordered work-unit issue.",
         "remediation": ["A. Remove the blocked_by dependency using the GitHub UI or API.", "B. Reorder the issues in the tree so the blocker appears earlier in preorder."],
+    },
+    "W030": {
+        "title": "dead_open_grouping",
+        "severity": "warning",
+        "meaning": "An open grouping issue (milestone/backlog ledger) has no open descendants. It is a stale shelf: traversal gains nothing from it.",
+        "remediation": [
+            "A. Close the grouping issue if its work is complete.",
+            "B. Move live work under it if it is supposed to be active.",
+        ],
     },
     "W020": {
         "title": "depth_near_limit",
@@ -146,12 +164,6 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
 }
 
 
-class TreeViolation(BaseModel):
-    code: str
-    message: str
-    issue_number: int | None = None
-
-
 def issue_only_dag(dag: RepoDag) -> RepoDag:
     """Return the repository issue DAG with GitHub pull request records removed."""
     issues = {number: issue for number, issue in dag.issues.items() if not issue.is_pull_request}
@@ -171,103 +183,6 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
         children_of=children_of,
         dependencies=dependencies,
     )
-
-
-def validate_dag(dag: RepoDag) -> list[TreeViolation]:
-    """Validate DAG-level structural invariants using networkx."""
-    dag = issue_only_dag(dag)
-    violations: list[TreeViolation] = []
-
-    # 1. Build directed graph
-    G: nx.DiGraph[int] = nx.DiGraph()
-    G.add_nodes_from(dag.issues.keys())
-    for parent, children in dag.children_of.items():
-        for child in children:
-            G.add_edge(parent, child)
-
-    # 2. Check if it's a DAG (acyclic)
-    if not nx.is_directed_acyclic_graph(G):
-        cycles = list(nx.simple_cycles(G))
-        for cycle in cycles:
-            violations.append(
-                TreeViolation(
-                    code="cycle_detected",
-                    message=f"dependency cycle detected: {' -> '.join(f'#{num}' for num in cycle)}",
-                )
-            )
-
-    # 3. Find parentless nodes (roots of the DAG)
-    roots = [n for n in G.nodes if G.in_degree(n) == 0]
-
-    # If there are multiple roots (forest)
-    if len(roots) > 1:
-        root_numbers = ", ".join(f"#{r}" for r in sorted(roots))
-        violations.append(
-            TreeViolation(
-                code="fragmented_forest",
-                message=f"graph has {len(roots)} roots ({root_numbers}) — not a single tree",
-            )
-        )
-
-    # 4. Check connectivity / orphans
-    candidates = find_root_ledger_candidates(dag)
-    if candidates:
-        primary_root = candidates[0]
-        if nx.is_directed_acyclic_graph(G):
-            reachable = nx.descendants(G, primary_root) | {primary_root}
-        else:
-            reachable = set(nx.bfs_tree(G.to_undirected(), primary_root).nodes) if primary_root in G else {primary_root}
-
-        for num in sorted(dag.issues.keys()):
-            if num not in reachable:
-                violations.append(
-                    TreeViolation(
-                        code="orphaned_issue",
-                        message=f'issue #{num} "{dag.issues[num].title}" is not reachable from the primary root ledger #{primary_root}',
-                        issue_number=num,
-                    )
-                )
-    else:
-        for num in sorted(dag.issues.keys()):
-            if num not in roots:
-                violations.append(
-                    TreeViolation(
-                        code="orphaned_issue",
-                        message=f'issue #{num} "{dag.issues[num].title}" is not reachable from any root',
-                        issue_number=num,
-                    )
-                )
-
-    return violations
-
-
-def validate_tree(root: TreeNode) -> list[TreeViolation]:
-    """Validate tree invariants (stub for backward compatibility)."""
-    violations: list[TreeViolation] = []
-    seen: set[int] = set()
-
-    for node in root.preorder():
-        if node.issue.id in seen:
-            violations.append(
-                TreeViolation(
-                    code="duplicate_reachable_issue",
-                    message=f"issue #{node.issue.number} appears more than once under root",
-                    issue_number=node.issue.number,
-                )
-            )
-            continue
-        seen.add(node.issue.id)
-
-        if node.issue.is_open and node.children and all(child.first_open_leaf() is None for child in node.children):
-            violations.append(
-                TreeViolation(
-                    code="dead_open_internal_node",
-                    message=f"open internal issue #{node.issue.number} has no open descendants",
-                    issue_number=node.issue.number,
-                )
-            )
-
-    return violations
 
 
 def parse_milestone_ledger_name(title: str) -> str | None:
@@ -354,7 +269,6 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
 
     root_ref: IssueRef | None = None
     next_issue_ref: ReportRef = AbsentReportRef(reason="no_open_work_unit")
-    enclosing_wu_ref: ReportRef = AbsentReportRef(reason="not_applicable")
 
     # Metrics dictionary baseline
     metrics = {
@@ -400,16 +314,16 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         root_issue = dag.issues[root_num]
 
         # Check if the root issue is a ledger (starts with Ledger:)
-        if not root_issue.title.lower().startswith("ledger:"):
-            f_details = DIAGNOSTIC_CATALOG["E001"]
+        if not is_root_ledger(root_issue.title):
+            f_details = DIAGNOSTIC_CATALOG["E004"]
             findings_list.append(
                 Finding(
-                    code="E001",
+                    code="E004",
                     severity="error",
                     title=f_details["title"],
                     evidence=[f"Root issue #{root_num} \"{root_issue.title}\" title must start with 'Ledger:'"],
-                    meaning="The unique root of the tree must be a root ledger (title starts with 'Ledger:').",
-                    remediation=[f"Rename issue #{root_num} title to start with 'Ledger:'"],
+                    meaning=f_details["meaning"],
+                    remediation=f_details["remediation"],
                 )
             )
 
@@ -583,6 +497,25 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
             if node.issue.is_open and not is_grouping_issue(title):
                 work_unit_nodes.append(node)
 
+        # W030: open grouping issue (other than the root) with no open descendants.
+        dead_groupings = []
+        for node in tree_nodes[1:]:
+            if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
+                dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
+
+        if dead_groupings:
+            f_details = DIAGNOSTIC_CATALOG["W030"]
+            findings_list.append(
+                Finding(
+                    code="W030",
+                    severity="warning",
+                    title=f_details["title"],
+                    evidence=dead_groupings,
+                    meaning=f_details["meaning"],
+                    remediation=f_details["remediation"],
+                )
+            )
+
         # W041: active milestone without milestone ledger
         active_milestones = set()
         for issue in dag.issues.values():
@@ -684,7 +617,6 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         if next_node:
             next_issue = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
             next_issue_ref = PresentReportRef(ref=next_issue)
-            enclosing_wu_ref = PresentReportRef(ref=next_issue)
 
     # Determine status
     errors_count = sum(1 for f in findings_list if f.severity == "error")
@@ -718,7 +650,6 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         status=status,
         root=report_root,
         next_issue=next_issue_ref,
-        enclosing_work_unit=enclosing_wu_ref,
         metrics=metrics,
         findings=findings_list,
     )

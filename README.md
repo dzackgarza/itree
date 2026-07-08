@@ -27,8 +27,8 @@ itree close owner/repo#3 --reason completed
 itree next owner/repo
 # => #4: Add export command proof
 
-# Validate the tree structure
-itree validate owner/repo
+# Check tree health and get the exact next commands
+itree doctor owner/repo
 ```
 
 ## Conceptual Model
@@ -113,7 +113,7 @@ Read the tree structure:
 | `tree` | Dump full tree as JSON | `itree tree owner/repo` |
 | `next` | Find next open work-unit issue | `itree next owner/repo` |
 | `path` | Find path to an issue | `itree path owner/repo#5` |
-| `validate` | Check tree invariants | `itree validate owner/repo` |
+| `doctor` | Check tree health and invariants | `itree doctor owner/repo` |
 
 ### Terminal Operations
 
@@ -153,33 +153,26 @@ itree move owner/repo#5 --under owner/repo#1 --after owner/repo#3
 
 ### JSON Output
 
-Most query commands support `--as-json` for machine-readable output:
+Query commands support `--json` for machine-readable output:
 
 ```bash
-itree children owner/repo#1 --as-json
-itree next owner/repo --as-json
+itree children owner/repo#1 --json
+itree next owner/repo --json
+itree doctor owner/repo --json
 itree tree owner/repo  # always JSON
 ```
 
 ## Validation
 
-`itree validate` checks for:
+`itree doctor` is the single validator. It reports findings against a diagnostic
+catalog (`E…` errors, `W…` warnings) covering: missing/multiple roots, a root not
+titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents
+hiding open descendants, duplicate reachable issues, dependency edges, depth near
+GitHub's 8-level cap, work units decomposed into child issues, dead open grouping
+issues, milestone mismatches, and missing acceptance criteria.
 
-- **Duplicate reachable issues**: The same issue appearing more than once under the root.
-- **Dead open internal nodes**: An open issue with children, but none of its descendants are open.
-  This indicates a parent that should likely be closed or have its live work moved.
-
-Example output:
-
-```json
-[
-  {
-    "code": "dead_open_internal_node",
-    "message": "open internal issue #5 has no open descendants",
-    "issue_number": 5
-  }
-]
-```
+Use `itree doctor OWNER/REPO --explain CODE` for the meaning and repair routes of
+any finding code.
 
 ## Installation
 

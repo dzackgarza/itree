@@ -97,10 +97,24 @@ class TestCLICommandStructure:
             "tree",
             "next",
             "path",
-            "validate",
             "close",
+            "doctor",
         }
         assert expected.issubset(command_names)
+        for retired in ("validate", "root", "milestone", "work-unit"):
+            assert retired not in command_names
+
+    def test_machine_output_flag_is_json_everywhere(self) -> None:
+        """Every command exposing machine output uses --json, never --as-json."""
+        from typing import get_type_hints
+
+        from itree.cli import children, doctor, next, path
+
+        for cmd in (children, doctor, next, path):
+            hints = get_type_hints(cmd, include_extras=True)
+            names = hints["as_json"].__metadata__[0].name
+            assert "--json" in names
+            assert not any("as-json" in n for n in names)
 
     def test_cli_help_generated_from_docstrings(self) -> None:
         """CLI help text is generated from command docstrings."""

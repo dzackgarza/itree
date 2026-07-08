@@ -45,8 +45,22 @@ def _pull_request(number: int, title: str = "") -> GithubIssue:
     )
 
 
-def test_doctor_report_no_root_ledger() -> None:
-    """ERROR E001 is triggered when no root ledger is declared."""
+def test_doctor_report_no_root() -> None:
+    """ERROR E001 is triggered when no parentless issue exists at all."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={},
+        children_of={},
+    )
+    report = generate_doctor_report(dag)
+    assert report.status == "error"
+    findings = [f for f in report.findings if f.code == "E001"]
+    assert len(findings) == 1
+    assert findings[0].title == "no_root"
+
+
+def test_doctor_report_root_not_ledger() -> None:
+    """ERROR E004 is triggered when the unique root is not titled 'Ledger:'."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={1: _issue(1, "Task 1")},
@@ -54,9 +68,10 @@ def test_doctor_report_no_root_ledger() -> None:
     )
     report = generate_doctor_report(dag)
     assert report.status == "error"
-    findings = [f for f in report.findings if f.code == "E001"]
+    findings = [f for f in report.findings if f.code == "E004"]
     assert len(findings) == 1
-    assert "no_root_ledger" in findings[0].title
+    assert findings[0].title == "root_not_ledger"
+    assert all(f.code != "E001" for f in report.findings)
 
 
 def test_doctor_report_multiple_root_ledgers() -> None:
@@ -184,7 +199,6 @@ def test_doctor_accepts_single_issue_work_unit() -> None:
     )
     report = generate_doctor_report(dag)
     assert _present_number(report.next_issue) == 3
-    assert _present_number(report.enclosing_work_unit) == 3
     assert all(f.code != "W030" for f in report.findings)
 
 
@@ -231,6 +245,71 @@ def test_doctor_does_not_require_singleton_marker() -> None:
     )
     report = generate_doctor_report(dag)
     assert all(f.code != "W030" for f in report.findings)
+
+
+def test_doctor_report_dead_open_grouping() -> None:
+    """WARNING W030 is triggered for an open grouping issue with no open descendants."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: stale"),
+            3: _issue(3, "Finished work", state=IssueState.closed),
+            4: _issue(
+                4,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 4), 2: (3,)},
+    )
+    report = generate_doctor_report(dag)
+    findings = [f for f in report.findings if f.code == "W030"]
+    assert len(findings) == 1
+    assert "#2" in findings[0].evidence[0]
+
+
+def test_doctor_report_root_never_flagged_dead_grouping() -> None:
+    """The root ledger of a fully closed tree is DONE, not a W030 violation."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Old work", state=IssueState.closed),
+        },
+        children_of={1: (2,)},
+    )
+    report = generate_doctor_report(dag)
+    assert all(f.code != "W030" for f in report.findings)
+
+
+def test_doctor_report_duplicate_reachable_issue() -> None:
+    """ERROR E013 is triggered when an issue has multiple parents under the root."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: a"),
+            3: _issue(3, "Milestone: b"),
+            4: _issue(
+                4,
+                "Shared child",
+                body="## Acceptance Criteria\n- Proven.",
+            ),
+        },
+        children_of={1: (2, 3), 2: (4,), 3: (4,)},
+    )
+    report = generate_doctor_report(dag)
+    findings = [f for f in report.findings if f.code == "E013"]
+    assert len(findings) == 1
+    assert "#4" in findings[0].evidence[0]
+
+
+def test_doctor_report_has_no_enclosing_work_unit_field() -> None:
+    """The fictional next-vs-enclosing-work-unit distinction is gone from the report."""
+    from itree.models import DoctorReport
+
+    assert "enclosing_work_unit" not in DoctorReport.model_fields
 
 
 def test_doctor_report_milestone_mismatch() -> None:

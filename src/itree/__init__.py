@@ -15,7 +15,7 @@ from .models import (
     TreeNode,
 )
 from .traversal import build_dag
-from .validate import TreeViolation, validate_dag, validate_tree
+from .validate import DIAGNOSTIC_CATALOG, generate_doctor_report
 
 __all__ = [
     "app",
@@ -30,8 +30,7 @@ __all__ = [
     "AttachRequest",
     "DetachRequest",
     "MoveRequest",
-    "TreeViolation",
+    "DIAGNOSTIC_CATALOG",
     "build_dag",
-    "validate_dag",
-    "validate_tree",
+    "generate_doctor_report",
 ]
