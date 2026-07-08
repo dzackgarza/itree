@@ -5,11 +5,11 @@ from .models import GithubIssue, RepoDag, RepoRef
 
 
 def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:
-    """Construct the full issue DAG by scanning every issue and its sub-issues.
+    """Construct the full issue DAG from one paginated GraphQL query.
 
-    This is the foundational operation: it fetches ALL issues in the repo,
-    discovers every parent-child relationship via the sub-issues API,
-    and returns a RepoDag that all query commands operate on.
+    Every issue (open and closed) becomes a node, so closed parents that
+    hide open descendants are observable. Sub-issue edge order is sibling
+    priority order. GraphQL issue nodes are never pull requests.
 
     Args:
         repo_ref: A RepoRef identifying the repository.
@@ -21,32 +21,30 @@ def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:
     if api is None:
         api = GithubApi.from_repo_ref(repo_ref)
 
-    all_issues = tuple(issue for issue in api.list_all_issues() if not issue.is_pull_request)
-    issues_by_number: dict[int, GithubIssue] = {i.number: i for i in all_issues}
+    nodes = api.fetch_repo_graph()
+    issues: dict[int, GithubIssue] = {node["number"]: GithubIssue.from_graphql(node) for node in nodes}
 
-    # Build parent->children adjacency list by scanning every issue's sub-issues.
-    # Filter children to only those present in issues_by_number: the GitHub
-    # sub-issues API returns ALL children (open and closed), but list_all_issues
-    # only returns open issues, so closed children won't be in our dict.
-    children_of: dict[int, tuple[int, ...]] = {issue.number: () for issue in all_issues}
+    children_of: dict[int, tuple[int, ...]] = {}
     dependencies: dict[int, tuple[int, ...]] = {}
-    for issue in all_issues:
-        children = api.list_subissues(issue.number)
-        if children:
-            present = tuple(c.number for c in children if not c.is_pull_request and c.number in issues_by_number)
-            if present:
-                children_of[issue.number] = present
+    for node in nodes:
+        number = node["number"]
+        sub = node["subIssues"]
+        child_numbers = [child["number"] for child in sub["nodes"]]
+        if sub["totalCount"] > len(child_numbers):
+            # >100 children: the GraphQL page is truncated; fall back to the
+            # REST sub-issues endpoint for this one node to keep edges complete.
+            child_numbers = [child.number for child in api.list_subissues(number) if not child.is_pull_request]
+        present = tuple(child for child in child_numbers if child in issues)
+        if present:
+            children_of[number] = present
 
-        # Check blocked_by dependencies
-        blocked_by = api.list_blocked_by(issue.number)
-        if blocked_by:
-            present_blockers = tuple(b.number for b in blocked_by if not b.is_pull_request and b.number in issues_by_number)
-            if present_blockers:
-                dependencies[issue.number] = present_blockers
+        blockers = tuple(blocker["number"] for blocker in node["blockedBy"]["nodes"] if blocker["number"] in issues)
+        if blockers:
+            dependencies[number] = blockers
 
     return RepoDag(
         repo_ref=repo_ref,
-        issues=issues_by_number,
+        issues=issues,
         children_of=children_of,
         dependencies=dependencies,
     )

@@ -1,13 +1,13 @@
-"""Tests for build_dag — specifically the closed-children filtering logic.
+"""Tests for build_dag over the GraphQL repo-graph fetch.
 
-Proves that when list_subissues returns closed children that are absent from
-list_all_issues (GitHub's default open-only behavior), build_dag silently
-excludes them rather than crashing with a KeyError.
+build_dag consumes fetch_repo_graph node dicts: every issue (open and
+closed) becomes a DAG node, sub-issue edge order is sibling priority
+order, truncated sub-issue pages fall back to the REST endpoint, and
+blocked-by edges land in dependencies.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -16,150 +16,132 @@ from itree.models import GithubIssue, IssueState, RepoRef
 from itree.traversal import build_dag
 
 
-def _open_issue(number: int, title: str = "") -> GithubIssue:
-    return GithubIssue(
-        id=number,
-        number=number,
-        title=title or f"Issue #{number}",
-        state=IssueState.open,
-        html_url=f"https://github.com/testowner/testrepo/issues/{number}",
-    )
+def _node(
+    number: int,
+    title: str = "",
+    state: str = "OPEN",
+    children: tuple[int, ...] = (),
+    blocked_by: tuple[int, ...] = (),
+    total_children: int | None = None,
+) -> dict:
+    return {
+        "number": number,
+        "databaseId": number + 5000,
+        "title": title or f"Issue #{number}",
+        "state": state,
+        "stateReason": "COMPLETED" if state == "CLOSED" else None,
+        "body": None,
+        "url": f"https://github.com/testowner/testrepo/issues/{number}",
+        "milestone": None,
+        "subIssues": {
+            "totalCount": total_children if total_children is not None else len(children),
+            "nodes": [{"number": child} for child in children],
+        },
+        "blockedBy": {"nodes": [{"number": blocker} for blocker in blocked_by]},
+    }
 
 
-def _closed_issue(number: int, title: str = "") -> GithubIssue:
-    return GithubIssue(
-        id=number + 1000,
-        number=number,
-        title=title or f"Issue #{number}",
-        state=IssueState.closed,
-        html_url=f"https://github.com/testowner/testrepo/issues/{number}",
-    )
-
-
-def _pull_request(number: int, title: str = "") -> GithubIssue:
-    return GithubIssue(
-        id=number + 2000,
-        number=number,
-        title=title or f"Pull request #{number}",
-        state=IssueState.open,
-        html_url=f"https://github.com/testowner/testrepo/pull/{number}",
-        pull_request={"url": f"https://api.github.com/repos/testowner/testrepo/pulls/{number}"},
-    )
-
-
-def _make_api(
-    all_issues: tuple[GithubIssue, ...],
-    subissues: Mapping[int, tuple[GithubIssue, ...]] | None = None,
-) -> MagicMock:
-    """Build a GithubApi whose methods return the given fixtures."""
+def _make_api(nodes: tuple[dict, ...], rest_subissues: dict[int, tuple[GithubIssue, ...]] | None = None) -> MagicMock:
     api = MagicMock(spec=GithubApi)
-    subissue_map = subissues if subissues is not None else {}
-    api.list_all_issues.return_value = all_issues
-    api.list_subissues.side_effect = lambda n: subissue_map[n] if n in subissue_map else ()
-    api.list_blocked_by.return_value = ()
+    api.fetch_repo_graph.return_value = nodes
+    rest_map = rest_subissues or {}
+    api.list_subissues.side_effect = lambda n: rest_map[n]
     return api
 
 
-def test_pull_requests_filtered_out_of_issue_dag() -> None:
-    """GitHub PR records from the issues API are not issue-tree nodes."""
-    all_items = (
-        _pull_request(36),
-        _open_issue(43, "Ledger: Roadmap"),
-        _open_issue(54, "Standard editor semantics"),
-        _pull_request(103),
+def _repo_ref() -> RepoRef:
+    return RepoRef(owner="testowner", repo="testrepo")
+
+
+def test_open_and_closed_issues_both_in_dag() -> None:
+    """Closed issues are DAG nodes so closed parents of open work are observable."""
+    nodes = (
+        _node(1, "Ledger: Root", children=(2,)),
+        _node(2, "Closed parent", state="CLOSED", children=(3,)),
+        _node(3, "Open child"),
     )
-    subissues = {
-        43: (_open_issue(54),),
-        36: (_open_issue(999, "Should never be queried"),),
-        103: (_open_issue(998, "Should never be queried"),),
-    }
+    dag = build_dag(_repo_ref(), api=cast(GithubApi, _make_api(nodes)))
 
-    api = _make_api(all_items, subissues)
-    repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=cast(GithubApi, api))
-
-    assert set(dag.issues) == {43, 54}
-    assert dag.children_of == {43: (54,), 54: ()}
-    queried_subissues = {call.args[0] for call in api.list_subissues.call_args_list}
-    assert queried_subissues == {43, 54}
+    assert set(dag.issues) == {1, 2, 3}
+    assert dag.issues[2].state == IssueState.closed
+    assert dag.children_of[2] == (3,)
+    tree = dag.materialize_root(1)
+    assert [n.issue.number for n in tree.preorder()] == [1, 2, 3]
 
 
-def test_closed_child_filtered_out() -> None:
-    """build_dag excludes children returned by list_subissues but absent from list_all_issues."""
-    open_only = (_open_issue(1), _open_issue(2))
-    # Issue #3 is closed — returned by list_subissues but NOT by list_all_issues.
-    subissues = {
-        1: (_open_issue(2), _closed_issue(3, title="Already done")),
-    }
+def test_children_order_is_subissue_order() -> None:
+    """Sub-issue edge order defines sibling priority order, verbatim."""
+    nodes = (
+        _node(1, "Ledger: Root", children=(9, 4, 7)),
+        _node(9),
+        _node(4),
+        _node(7),
+    )
+    dag = build_dag(_repo_ref(), api=cast(GithubApi, _make_api(nodes)))
+    assert dag.children_of[1] == (9, 4, 7)
 
-    api = _make_api(open_only, subissues)
-    repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=cast(GithubApi, api))
 
-    # #3 must not appear in the adjacency list.
-    assert 3 not in dag.issues
-    assert 3 not in dag.parent_of
-    # #1's children should contain only #2.
+def test_child_absent_from_repo_graph_is_dropped() -> None:
+    """An edge to an issue absent from the fetched graph (e.g. transferred out) is dropped."""
+    nodes = (_node(1, "Ledger: Root", children=(2, 999)), _node(2))
+    dag = build_dag(_repo_ref(), api=cast(GithubApi, _make_api(nodes)))
     assert dag.children_of[1] == (2,)
-    # Materialize must not raise KeyError.
-    tree = dag.materialize_root(1)
-    numbers = [n.issue.number for n in tree.preorder()]
-    assert numbers == [1, 2]
+    assert 999 not in dag.issues
 
 
-def test_all_children_closed_parent_becomes_leaf() -> None:
-    """When all children are closed, parent has no children in the DAG."""
-    open_only = (_open_issue(1),)
-    subissues = {
-        1: (_closed_issue(2), _closed_issue(3)),
+def test_truncated_subissue_page_falls_back_to_rest() -> None:
+    """totalCount above the fetched page size triggers the per-node REST follow-up."""
+    kids = tuple(range(2, 7))
+    nodes = (
+        # Page carries only 2 of 5 children.
+        _node(1, "Ledger: Root", children=(2, 3), total_children=5),
+        *(_node(k) for k in kids),
+    )
+    rest_children = tuple(
+        GithubIssue(
+            id=k + 5000,
+            number=k,
+            title=f"Issue #{k}",
+            state=IssueState.open,
+            html_url=f"https://github.com/testowner/testrepo/issues/{k}",
+        )
+        for k in kids
+    )
+    api = _make_api(nodes, rest_subissues={1: rest_children})
+    dag = build_dag(_repo_ref(), api=cast(GithubApi, api))
+    assert dag.children_of[1] == kids
+    api.list_subissues.assert_called_once_with(1)
+
+
+def test_blocked_by_edges_become_dependencies() -> None:
+    """blockedBy edges land in dag.dependencies for the E014 check."""
+    nodes = (
+        _node(1, "Ledger: Root", children=(2, 3)),
+        _node(2, blocked_by=(3,)),
+        _node(3),
+    )
+    dag = build_dag(_repo_ref(), api=cast(GithubApi, _make_api(nodes)))
+    assert dag.dependencies == {2: (3,)}
+
+
+def test_from_graphql_field_mapping() -> None:
+    """GraphQL node fields map onto the REST-shaped GithubIssue model."""
+    node = {
+        "number": 7,
+        "databaseId": 1234,
+        "title": "Mapped issue",
+        "state": "CLOSED",
+        "stateReason": "NOT_PLANNED",
+        "body": "Body text",
+        "url": "https://github.com/o/r/issues/7",
+        "milestone": {"title": "v1"},
     }
-
-    api = _make_api(open_only, subissues)
-    repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=cast(GithubApi, api))
-
-    assert dag.children_of[1] == ()
-    tree = dag.materialize_root(1)
-    assert tree.children == ()
-    assert tree.issue.number == 1
-
-
-def test_mixed_open_and_closed_children() -> None:
-    """Only open children survive filtering; closed ones are silently dropped."""
-    open_only = (_open_issue(1), _open_issue(2), _open_issue(4))
-    subissues = {
-        1: (_open_issue(2), _closed_issue(3), _open_issue(4)),
-    }
-
-    api = _make_api(open_only, subissues)
-    repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=cast(GithubApi, api))
-
-    assert dag.children_of[1] == (2, 4)
-    assert 3 not in dag.issues
-    tree = dag.materialize_root(1)
-    numbers = [n.issue.number for n in tree.preorder()]
-    assert numbers == [1, 2, 4]
-
-
-def test_no_crash_when_child_number_not_in_issues() -> None:
-    """The exact scenario that caused KeyError on issue #152.
-
-    Parent issue has a closed child (#152) returned by list_subissues.
-    list_all_issues does not return #152. build_dag must not crash.
-    """
-    open_only = (_open_issue(100), _open_issue(151))
-    subissues = {
-        100: (_open_issue(151), _closed_issue(152, title="Already closed")),
-    }
-
-    api = _make_api(open_only, subissues)
-    repo_ref = RepoRef(owner="testowner", repo="testrepo")
-    dag = build_dag(repo_ref, api=cast(GithubApi, api))
-
-    assert 152 not in dag.issues
-    assert dag.children_of[100] == (151,)
-    tree = dag.materialize_root(100)
-    assert tree.issue.number == 100
-    assert len(tree.children) == 1
-    assert tree.children[0].issue.number == 151
+    issue = GithubIssue.from_graphql(node)
+    assert issue.id == 1234
+    assert issue.number == 7
+    assert issue.state == IssueState.closed
+    assert issue.state_reason == "not_planned"
+    assert issue.html_url == "https://github.com/o/r/issues/7"
+    assert issue.body == "Body text"
+    assert issue.milestone is not None and issue.milestone.title == "v1"
+    assert not issue.is_pull_request

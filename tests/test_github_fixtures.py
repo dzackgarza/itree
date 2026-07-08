@@ -102,3 +102,54 @@ class TestGithubIssueFromFixtures:
         assert repo.owner == "testowner"
         assert repo.repo == "testrepo"
         assert isinstance(repo, RepoRef)
+
+
+class TestFetchRepoGraph:
+    """Tests for the paginated GraphQL fetch against a captured --slurp payload."""
+
+    def test_pages_merge_into_flat_node_tuple(self) -> None:
+        """fetch_repo_graph concatenates issue nodes across slurped pages."""
+        import json as json_module
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        with open(FIXTURE_DIR / "graphql_issues_pages.json") as f:
+            raw = f.read()
+
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
+        proc = MagicMock()
+        proc.stdout = raw
+        with patch.object(GithubApi, "_run_api_command", return_value=proc) as run:
+            nodes = api.fetch_repo_graph()
+
+        assert [n["number"] for n in nodes] == [1, 2, 3, 4]
+        # The command must be the paginated, slurped GraphQL call.
+        cmd = run.call_args.args[0]
+        assert cmd[:3] == ["gh", "api", "graphql"]
+        assert "--paginate" in cmd and "--slurp" in cmd
+        # Sanity: the fixture is real slurp output — an array of page documents.
+        assert isinstance(json_module.loads(raw), list)
+
+    def test_closed_parent_chain_reaches_doctor_e012(self) -> None:
+        """End-to-end: the fixture's closed parent with an open child fires E012, not E010."""
+        from typing import cast
+        from unittest.mock import MagicMock
+
+        from itree.github import GithubApi
+        from itree.traversal import build_dag
+        from itree.validate import generate_doctor_report
+
+        with open(FIXTURE_DIR / "graphql_issues_pages.json") as f:
+            pages = json.load(f)
+        nodes = tuple(n for page in pages for n in page["data"]["repository"]["issues"]["nodes"])
+
+        api = MagicMock(spec=GithubApi)
+        api.fetch_repo_graph.return_value = nodes
+        dag = build_dag(RepoRef(owner="testowner", repo="testrepo"), api=cast(GithubApi, api))
+
+        report = generate_doctor_report(dag)
+        codes = {f.code for f in report.findings}
+        assert "E012" in codes
+        assert "E010" not in codes
+        assert "E011" not in codes

@@ -1,0 +1,75 @@
+[
+  {
+    "data": {
+      "repository": {
+        "issues": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "cursor1" },
+          "nodes": [
+            {
+              "number": 1,
+              "databaseId": 5001,
+              "title": "Ledger: testowner/testrepo",
+              "state": "OPEN",
+              "stateReason": null,
+              "body": "Root ledger.",
+              "url": "https://github.com/testowner/testrepo/issues/1",
+              "milestone": null,
+              "subIssues": {
+                "totalCount": 2,
+                "nodes": [{ "number": 2 }, { "number": 3 }]
+              },
+              "blockedBy": { "nodes": [] }
+            },
+            {
+              "number": 2,
+              "databaseId": 5002,
+              "title": "Closed parent",
+              "state": "CLOSED",
+              "stateReason": "COMPLETED",
+              "body": null,
+              "url": "https://github.com/testowner/testrepo/issues/2",
+              "milestone": null,
+              "subIssues": { "totalCount": 1, "nodes": [{ "number": 4 }] },
+              "blockedBy": { "nodes": [] }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "data": {
+      "repository": {
+        "issues": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "number": 3,
+              "databaseId": 5003,
+              "title": "Work unit",
+              "state": "OPEN",
+              "stateReason": null,
+              "body": "## Acceptance Criteria\n- Proven.",
+              "url": "https://github.com/testowner/testrepo/issues/3",
+              "milestone": { "title": "v1" },
+              "subIssues": { "totalCount": 0, "nodes": [] },
+              "blockedBy": { "nodes": [] }
+            },
+            {
+              "number": 4,
+              "databaseId": 5004,
+              "title": "Open child under closed parent",
+              "state": "OPEN",
+              "stateReason": null,
+              "body": "## Acceptance Criteria\n- Proven.",
+              "url": "https://github.com/testowner/testrepo/issues/4",
+              "milestone": null,
+              "subIssues": { "totalCount": 0, "nodes": [] },
+              "blockedBy": { "nodes": [] }
+            }
+          ]
+        }
+      }
+    }
+  }
+]

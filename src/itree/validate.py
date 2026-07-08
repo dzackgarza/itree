@@ -222,18 +222,20 @@ def first_open_work_unit(root: TreeNode) -> TreeNode | None:
 
 
 def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
-    # The root is discovered structurally by finding parentless nodes in the issue DAG
-    dag = issue_only_dag(dag)
-    import networkx as nx
+    """Discover root candidates structurally: parentless OPEN issues.
 
+    Closed issues are part of the DAG (their subtrees matter for E012 and
+    history rendering) but a closed parentless issue is finished work, not
+    a traversal root.
+    """
+    dag = issue_only_dag(dag)
     G: nx.DiGraph[int] = nx.DiGraph()
     G.add_nodes_from(dag.issues.keys())
     for parent, children in dag.children_of.items():
         for child in children:
             G.add_edge(parent, child)
 
-    roots = [n for n in G.nodes if G.in_degree(n) == 0]
-    return roots
+    return [n for n in G.nodes if G.in_degree(n) == 0 and dag.issues[n].is_open]
 
 
 def generate_doctor_report(dag: RepoDag) -> DoctorReport:
