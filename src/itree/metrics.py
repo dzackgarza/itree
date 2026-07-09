@@ -89,7 +89,7 @@ def structure_questions(
 ) -> list[Finding]:
     """Evaluate Q001/Q002/Q003 against a finished doctor report."""
     findings: list[Finding] = []
-    open_work_units = report.metrics.get("open work units", 0)
+    open_work_units = report.metrics.open_work_units
 
     if open_work_units > config.max_open_work_units:
         findings.append(
@@ -105,29 +105,19 @@ def structure_questions(
             findings.append(
                 _q_finding(
                     "Q002",
-                    [
-                        f"{open_work_units} open work units against {code_size.total_loc} LOC "
-                        f"supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"
-                    ],
+                    [f"{open_work_units} open work units against {code_size.total_loc} LOC supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"],
                 )
             )
 
     if report.root.kind == "present":
         root_num = report.root.ref.number
         open_children = [c for c in dag.children_of[root_num] if dag.issues[c].is_open]
-        open_reachable = report.metrics.get("open issues reachable from root", 0) - 1  # minus the root itself
-        if (
-            len(open_children) >= config.flat_min_children
-            and open_reachable > 0
-            and len(open_children) / open_reachable >= config.flat_children_ratio
-        ):
+        open_reachable = report.metrics.open_issues_reachable_from_root - 1  # minus the root itself
+        if len(open_children) >= config.flat_min_children and open_reachable > 0 and len(open_children) / open_reachable >= config.flat_children_ratio:
             findings.append(
                 _q_finding(
                     "Q003",
-                    [
-                        f"{len(open_children)} of {open_reachable} open issues hang directly off root "
-                        f"#{root_num} (>= flat_children_ratio={config.flat_children_ratio})"
-                    ],
+                    [f"{len(open_children)} of {open_reachable} open issues hang directly off root #{root_num} (>= flat_children_ratio={config.flat_children_ratio})"],
                 )
             )
 

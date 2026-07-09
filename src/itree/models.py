@@ -381,10 +381,23 @@ class AbsentReportRef(BaseModel):
 ReportRef = PresentReportRef | AbsentReportRef
 
 
+class DoctorMetrics(BaseModel):
+    """Doctor summary counters. Total by construction: every field is
+    computed on every run; there is no missing-key state to default."""
+
+    errors: int
+    warnings: int
+    open_issues_reachable_from_root: int
+    open_issues_outside_root: int
+    open_work_units: int
+    work_units: int
+    max_depth: int
+
+
 class DoctorReport(BaseModel):
     repo: str
     status: ReportStatus
     root: ReportRef
     next_issue: ReportRef
-    metrics: dict[str, int]
+    metrics: DoctorMetrics
     findings: list[Finding]

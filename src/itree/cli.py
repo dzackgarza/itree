@@ -809,12 +809,15 @@ def doctor(
             print("  Agent instruction: No open work units found.")
         print()
 
+        m = report.metrics
         print("Summary:")
-        for k, v in report.metrics.items():
-            if k == "max depth":
-                print(f"  {k}: {v} / 8")
-            else:
-                print(f"  {k}: {v}")
+        print(f"  errors: {m.errors}")
+        print(f"  warnings: {m.warnings}")
+        print(f"  open issues reachable from root: {m.open_issues_reachable_from_root}")
+        print(f"  open issues outside root: {m.open_issues_outside_root}")
+        print(f"  open work units: {m.open_work_units}")
+        print(f"  work units: {m.work_units}")
+        print(f"  max depth: {m.max_depth} / 8")
         if report.root.kind == "present":
             tree_node = dag.materialize_root(report.root.ref.number)
             next_node = first_open_work_unit(tree_node)
