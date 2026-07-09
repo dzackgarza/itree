@@ -827,14 +827,12 @@ def doctor(
         print()
 
         print("Run:")
-        # Display command suggestion for the first non-info finding if exists
-        example_code = "E010"
-        non_info_findings = [f for f in report.findings if f.severity != "info"]
-        if non_info_findings:
-            example_code = non_info_findings[0].code
         if any(f.code in ("E010", "E011") for f in report.findings):
             print(f"  itree triage {repo_ref.slug}")
-        print(f"  itree doctor {repo_ref.slug} --explain {example_code}")
+        # Suggest --explain only for a code actually present in the findings.
+        non_info_findings = [f for f in report.findings if f.severity != "info"]
+        if non_info_findings:
+            print(f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}")
         print(f"  itree tree {repo_ref.slug}")
         print(f"  itree doctor {repo_ref.slug} --json")
 

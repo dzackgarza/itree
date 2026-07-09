@@ -86,7 +86,6 @@ class TestDoctorExplainFooter:
             body=body,
         )
 
-    @pytest.mark.xfail(reason="#15: clean-tree doctor footer suggests --explain E010", strict=True)
     def test_clean_tree_omits_explain_suggestion(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
         dag = self._dag(
             {
