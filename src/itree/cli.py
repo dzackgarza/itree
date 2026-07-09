@@ -462,7 +462,10 @@ def move(
     api = GithubApi.from_issue_ref(req.parent)
     try:
         child_issue = api.get_issue(req.child.number)
-        api.replace_parent_subissue(req.parent.number, child_issue.id)
+        # GitHub 422s replace_parent=true when the parent is unchanged, so a
+        # same-parent reorder goes straight to the priority endpoint.
+        if api.get_parent_number(req.child.number) != req.parent.number:
+            api.replace_parent_subissue(req.parent.number, child_issue.id)
         if req.before is not None or req.after is not None:
             before_id = api.get_issue(req.before.number).id if req.before is not None else None
             after_id = api.get_issue(req.after.number).id if req.after is not None else None

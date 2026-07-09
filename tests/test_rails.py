@@ -203,7 +203,6 @@ class TestMove:
     current siblings must skip the reparent POST.
     """
 
-    @pytest.mark.xfail(reason="#15: same-parent move POSTs replace_parent=true and 422s", strict=True)
     def test_same_parent_reorder_skips_reparent(self, api: MagicMock) -> None:
         api.get_issue.side_effect = lambda n: _issue(n, f"Issue {n}")
         api.get_parent_number.return_value = 2
