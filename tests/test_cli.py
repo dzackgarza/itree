@@ -54,7 +54,6 @@ class TestParseFunctions:
 class TestPrintDiagnostic:
     """print_diagnostic renders the catalog severity truthfully (#15)."""
 
-    @pytest.mark.xfail(reason="#15: print_diagnostic hardcodes the ERROR prefix", strict=True)
     def test_warning_code_renders_warning_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A W-code routed through print_diagnostic must not claim to be an ERROR."""
         print_diagnostic("W020")

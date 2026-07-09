@@ -22,6 +22,7 @@ from .github import GithubApi
 from .models import (
     AttachRequest,
     DetachRequest,
+    FindingSeverity,
     IssueCloseReason,
     IssueRef,
     MoveRequest,
@@ -90,10 +91,19 @@ def parse_repo(raw: str) -> RepoRef:
     return RepoRef.parse(raw)
 
 
+# Total over FindingSeverity: adding a severity without a prefix is a type error.
+SEVERITY_PREFIX: dict[FindingSeverity, str] = {
+    "error": "ERROR",
+    "warning": "WARNING",
+    "question": "QUESTION",
+    "info": "INFO",
+}
+
+
 def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
     """Print one catalog diagnostic: code, meaning, evidence, remediation."""
     details = DIAGNOSTIC_CATALOG[code]
-    print(f"ERROR {code}: {details['title']}.\n")
+    print(f"{SEVERITY_PREFIX[details['severity']]} {code}: {details['title']}.\n")
     print("Meaning:")
     print(f"  {details['meaning']}")
     if evidence:

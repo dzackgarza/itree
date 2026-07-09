@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
-FindingSeverity = Literal["error", "warning", "info"]
+FindingSeverity = Literal["error", "warning", "question", "info"]
 ReportStatus = Literal["ok", "warning", "error"]
 MissingReportRefReason = Literal["no_root_ledger", "no_open_work_unit"]
 
