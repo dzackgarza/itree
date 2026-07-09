@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from itree.models import GithubIssue, IssueRef, IssueState, RepoRef
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -104,6 +106,83 @@ class TestGithubIssueFromFixtures:
         assert isinstance(repo, RepoRef)
 
 
+class TestListSubissuesPagination:
+    """The wide-node fallback must return ALL children, not one REST page (#15)."""
+
+    CHILDREN = [
+        {
+            "id": 9000 + n,
+            "number": n,
+            "title": f"Child {n}",
+            "state": "open",
+            "html_url": f"https://github.com/testowner/testrepo/issues/{n}",
+        }
+        for n in range(1, 131)
+    ]
+
+    def _fake_gh(self, cmd: list[str]) -> str:
+        """Behave like gh api: 30 items per page unless --paginate walks them all."""
+        if "--paginate" in cmd:
+            assert "--slurp" in cmd, "paginated array responses need --slurp to stay parseable"
+            assert any("per_page=100" in part for part in cmd), "pagination should request full pages"
+            return json.dumps([self.CHILDREN[:100], self.CHILDREN[100:]])
+        return json.dumps(self.CHILDREN[:30])
+
+    def test_130_child_node_returns_all_children_in_order(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
+
+        def run(cmd: list[str], path: str, timeout: int) -> MagicMock:
+            proc = MagicMock()
+            proc.stdout = self._fake_gh(cmd)
+            return proc
+
+        with patch.object(GithubApi, "_run_api_command", side_effect=run):
+            children = api.list_subissues(7)
+
+        assert [c.number for c in children] == list(range(1, 131))
+
+
+class TestGetParentNumber:
+    """GithubApi.get_parent_number parses GraphQL Issue.parent (#15)."""
+
+    @staticmethod
+    def _api_with_payload(payload: dict) -> "tuple[Any, Any]":
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
+        proc = MagicMock()
+        proc.stdout = json.dumps(payload)
+        return api, patch.object(GithubApi, "_run_api_command", return_value=proc)
+
+    def test_parented_issue_returns_parent_number(self) -> None:
+        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": {"number": 2}}}}})
+        with patcher:
+            assert api.get_parent_number(15) == 2
+
+    def test_parentless_issue_returns_none(self) -> None:
+        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": None}}}})
+        with patcher:
+            assert api.get_parent_number(1) is None
+
+    def test_unresolvable_issue_fails_loudly(self) -> None:
+        api, patcher = self._api_with_payload(
+            {
+                "data": {"repository": {"issue": None}},
+                "errors": [{"message": "Could not resolve to an issue with the number of 999."}],
+            }
+        )
+        with patcher:
+            with pytest.raises(RuntimeError) as exc:
+                api.get_parent_number(999)
+        assert "Could not resolve to an issue" in str(exc.value)
+
+
 class TestFetchRepoGraph:
     """Tests for the paginated GraphQL fetch against a captured --slurp payload."""
 
@@ -130,6 +209,25 @@ class TestFetchRepoGraph:
         assert "--paginate" in cmd and "--slurp" in cmd
         # Sanity: the fixture is real slurp output — an array of page documents.
         assert isinstance(json_module.loads(raw), list)
+
+    def test_null_repository_raises_runtime_error_with_api_text(self) -> None:
+        """A missing/inaccessible repo fails loudly with the GraphQL error text, not a traceback (#15)."""
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        page = {
+            "data": {"repository": None},
+            "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'testowner/gone'."}],
+        }
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="gone"))
+        proc = MagicMock()
+        proc.stdout = json.dumps([page])
+        with patch.object(GithubApi, "_run_api_command", return_value=proc):
+            with pytest.raises(RuntimeError) as exc:
+                api.fetch_repo_graph()
+        # The API's own error text must reach the user (containment, not exact match).
+        assert "Could not resolve to a Repository" in str(exc.value)
 
     def test_closed_parent_chain_reaches_doctor_e012(self) -> None:
         """End-to-end: the fixture's closed parent with an open child fires E012, not E010."""

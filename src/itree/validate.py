@@ -7,6 +7,7 @@ import networkx as nx
 
 from .models import (
     AbsentReportRef,
+    DoctorMetrics,
     DoctorReport,
     Finding,
     FindingSeverity,
@@ -152,6 +153,34 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "meaning": "A work-unit issue should not make agents infer completion semantics. Add explicit done criteria to the issue itself.",
         "remediation": ['A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'],
     },
+    "Q001": {
+        "title": "too_many_open_work_units",
+        "severity": "question",
+        "meaning": "More work units are open in parallel than the configured ceiling; claims may be thrashing instead of finishing.",
+        "remediation": [
+            "1. Finish or close open work units before planning more.",
+            "2. Consolidate related work units into one PR-sized unit: itree absorb.",
+            "3. If the ceiling is genuinely too low, raise max_open_work_units in ~/.config/itree/config.toml.",
+        ],
+    },
+    "Q002": {
+        "title": "work_units_disproportionate_to_code",
+        "severity": "question",
+        "meaning": "Open work units outnumber what the codebase size supports; planning may be outpacing implementation.",
+        "remediation": [
+            "1. Consolidate related work units into one PR-sized unit: itree absorb.",
+            "2. If the proportion is genuinely wrong, tune loc_per_work_unit in ~/.config/itree/config.toml.",
+        ],
+    },
+    "Q003": {
+        "title": "flat_tree",
+        "severity": "question",
+        "meaning": "Most open issues hang directly off the root ledger; the tree has no grouping structure to order traversal.",
+        "remediation": [
+            "1. Group related issues under milestone or backlog ledgers: itree move ISSUE --under LEDGER.",
+            "2. If flat is intended for this repo, tune flat_children_ratio / flat_min_children in ~/.config/itree/config.toml.",
+        ],
+    },
     "I001": {
         "title": "valid_tree",
         "severity": "info",
@@ -269,16 +298,12 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
     root_ref: IssueRef | None = None
     next_issue_ref: ReportRef = AbsentReportRef(reason="no_open_work_unit")
 
-    # Metrics dictionary baseline
-    metrics = {
-        "errors": 0,
-        "warnings": 0,
-        "open issues reachable from root": 0,
-        "open issues outside root": 0,
-        "open work units": 0,
-        "work units": 0,
-        "max depth": 0,
-    }
+    # Tree-scoped counters; zero when no acyclic root exists to measure.
+    open_reachable_count = 0
+    open_outside_count = 0
+    open_work_unit_count = 0
+    work_unit_count = 0
+    max_depth_count = 0
 
     if len(candidates) == 0:
         f_details = DIAGNOSTIC_CATALOG["E001"]
@@ -328,7 +353,10 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
 
         root_ref = IssueRef(repo_ref=dag.repo_ref, number=root_num)
 
-    if root_ref is not None:
+    # Tree-dependent checks require an acyclic graph: materializing the root
+    # recurses through children_of and would not terminate on a cycle. E003
+    # above already reports the cycles.
+    if root_ref is not None and is_acyclic:
         root_num = root_ref.number
 
         # Build tree node
@@ -336,10 +364,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         tree_nodes = tree_node.preorder()
 
         # Connectivity check: reachable nodes from root ledger
-        if is_acyclic:
-            reachable = nx.descendants(G, root_num) | {root_num}
-        else:
-            reachable = set(nx.bfs_tree(G.to_undirected(), root_num).nodes) if root_num in G else {root_num}
+        reachable = nx.descendants(G, root_num) | {root_num}
 
         # Collect open issues outside the root ledger
         unreachable_open = []
@@ -605,12 +630,12 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
                 )
             )
 
-        # Populate metrics
-        metrics["open issues reachable from root"] = len([n for n in tree_nodes if n.issue.is_open])
-        metrics["open issues outside root"] = len(unreachable_open)
-        metrics["open work units"] = len(open_work_units)
-        metrics["work units"] = len(work_unit_nodes)
-        metrics["max depth"] = max_depth + 1
+        # Populate tree-scoped counters
+        open_reachable_count = len([n for n in tree_nodes if n.issue.is_open])
+        open_outside_count = len(unreachable_open)
+        open_work_unit_count = len(open_work_units)
+        work_unit_count = len(work_unit_nodes)
+        max_depth_count = max_depth + 1
 
         next_node = first_open_work_unit(tree_node)
         if next_node:
@@ -621,8 +646,15 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
     errors_count = sum(1 for f in findings_list if f.severity == "error")
     warnings_count = sum(1 for f in findings_list if f.severity == "warning")
 
-    metrics["errors"] = errors_count
-    metrics["warnings"] = warnings_count
+    metrics = DoctorMetrics(
+        errors=errors_count,
+        warnings=warnings_count,
+        open_issues_reachable_from_root=open_reachable_count,
+        open_issues_outside_root=open_outside_count,
+        open_work_units=open_work_unit_count,
+        work_units=work_unit_count,
+        max_depth=max_depth_count,
+    )
 
     status: ReportStatus
     if errors_count > 0:

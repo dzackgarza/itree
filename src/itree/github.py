@@ -39,6 +39,31 @@ query($owner: String!, $name: String!, $endCursor: String) {
 """
 
 
+# Single-issue parent lookup: the sub-issues REST surface has no parent
+# endpoint, but GraphQL exposes Issue.parent directly.
+ISSUE_PARENT_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      parent { number }
+    }
+  }
+}
+"""
+
+
+def _graphql_error_text(payload: dict) -> str:
+    """Extract the error messages from a GraphQL response document.
+
+    The GraphQL spec requires every entry in ``errors`` to carry ``message``,
+    so a missing message is a malformed response and fails loudly.
+    """
+    errors = payload.get("errors")
+    if not errors:
+        return "no error details in response"
+    return "; ".join(str(err["message"]) for err in errors)
+
+
 class GithubApi(BaseModel):
     """Typed boundary owning all GitHub API communication.
 
@@ -109,9 +134,17 @@ class GithubApi(BaseModel):
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
     def list_subissues(self, number: int) -> tuple[GithubIssue, ...]:
-        """List all sub-issues of a parent issue."""
-        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues")
-        return tuple(GithubIssue.model_validate(item) for item in json.loads(proc.stdout))
+        """List ALL sub-issues of a parent issue, following REST pagination.
+
+        REST returns 30 items per page by default; this is the >100-children
+        GraphQL fallback, so it must walk every page. ``--slurp`` wraps the
+        per-page arrays in one array.
+        """
+        path = f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues?per_page=100"
+        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        proc = self._run_api_command(cmd, path, timeout=120)
+        pages: list[list[dict]] = json.loads(proc.stdout)
+        return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
 
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
@@ -137,8 +170,34 @@ class GithubApi(BaseModel):
         pages: list[dict] = json.loads(proc.stdout)
         nodes: list[dict] = []
         for page in pages:
-            nodes.extend(page["data"]["repository"]["issues"]["nodes"])
+            repository = page["data"]["repository"]
+            if repository is None:
+                raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {_graphql_error_text(page)}")
+            nodes.extend(repository["issues"]["nodes"])
         return tuple(nodes)
+
+    def get_parent_number(self, number: int) -> int | None:
+        """Return the issue's current parent number via GraphQL Issue.parent, or None."""
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={ISSUE_PARENT_QUERY}",
+            "-F",
+            f"owner={self.owner}",
+            "-F",
+            f"name={self.repo}",
+            "-F",
+            f"number={number}",
+        ]
+        proc = self._run_api_command(cmd, "graphql", timeout=30)
+        payload: dict = json.loads(proc.stdout)
+        repository = payload["data"]["repository"]
+        if repository is None or repository["issue"] is None:
+            raise RuntimeError(f"gh api graphql could not resolve {self.owner}/{self.repo}#{number}: {_graphql_error_text(payload)}")
+        parent = repository["issue"]["parent"]
+        return None if parent is None else int(parent["number"])
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""

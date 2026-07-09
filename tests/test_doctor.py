@@ -407,6 +407,24 @@ def test_doctor_ignores_pull_requests_when_finding_repository_root() -> None:
     assert all(f.code != "E011" for f in report.findings)
 
 
+def test_doctor_cyclic_children_reports_e003_without_crashing() -> None:
+    """Regression (#15): a children_of cycle yields E003 and a usable report, not RecursionError."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: v1"),
+            3: _issue(3, "Task in cycle", body="## Acceptance Criteria\n- ok"),
+        },
+        children_of={1: (2,), 2: (3,), 3: (2,)},
+    )
+    report = generate_doctor_report(dag)
+    assert report.status == "error"
+    findings = [f for f in report.findings if f.code == "E003"]
+    assert len(findings) == 1
+    assert any("#2" in ev and "#3" in ev for ev in findings[0].evidence)
+
+
 def test_doctor_report_missing_acceptance_criteria() -> None:
     """WARNING W050 is triggered when a work-unit issue lacks acceptance criteria."""
     dag = RepoDag(

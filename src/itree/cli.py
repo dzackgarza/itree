@@ -19,9 +19,11 @@ from typing import Annotated
 from cyclopts import App, Parameter
 
 from .github import GithubApi
+from .metrics import load_config, measure_code_size, structure_questions
 from .models import (
     AttachRequest,
     DetachRequest,
+    FindingSeverity,
     IssueCloseReason,
     IssueRef,
     MoveRequest,
@@ -90,10 +92,19 @@ def parse_repo(raw: str) -> RepoRef:
     return RepoRef.parse(raw)
 
 
+# Total over FindingSeverity: adding a severity without a prefix is a type error.
+SEVERITY_PREFIX: dict[FindingSeverity, str] = {
+    "error": "ERROR",
+    "warning": "WARNING",
+    "question": "QUESTION",
+    "info": "INFO",
+}
+
+
 def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
     """Print one catalog diagnostic: code, meaning, evidence, remediation."""
     details = DIAGNOSTIC_CATALOG[code]
-    print(f"ERROR {code}: {details['title']}.\n")
+    print(f"{SEVERITY_PREFIX[details['severity']]} {code}: {details['title']}.\n")
     print("Meaning:")
     print(f"  {details['meaning']}")
     if evidence:
@@ -452,7 +463,10 @@ def move(
     api = GithubApi.from_issue_ref(req.parent)
     try:
         child_issue = api.get_issue(req.child.number)
-        api.replace_parent_subissue(req.parent.number, child_issue.id)
+        # GitHub 422s replace_parent=true when the parent is unchanged, so a
+        # same-parent reorder goes straight to the priority endpoint.
+        if api.get_parent_number(req.child.number) != req.parent.number:
+            api.replace_parent_subissue(req.parent.number, child_issue.id)
         if req.before is not None or req.after is not None:
             before_id = api.get_issue(req.before.number).id if req.before is not None else None
             after_id = api.get_issue(req.after.number).id if req.after is not None else None
@@ -795,12 +809,15 @@ def doctor(
             print("  Agent instruction: No open work units found.")
         print()
 
+        m = report.metrics
         print("Summary:")
-        for k, v in report.metrics.items():
-            if k == "max depth":
-                print(f"  {k}: {v} / 8")
-            else:
-                print(f"  {k}: {v}")
+        print(f"  errors: {m.errors}")
+        print(f"  warnings: {m.warnings}")
+        print(f"  open issues reachable from root: {m.open_issues_reachable_from_root}")
+        print(f"  open issues outside root: {m.open_issues_outside_root}")
+        print(f"  open work units: {m.open_work_units}")
+        print(f"  work units: {m.work_units}")
+        print(f"  max depth: {m.max_depth} / 8")
         if report.root.kind == "present":
             tree_node = dag.materialize_root(report.root.ref.number)
             next_node = first_open_work_unit(tree_node)
@@ -816,15 +833,24 @@ def doctor(
                 print(f"  {f.code}: {len(f.evidence)} {f.title.replace('_', ' ')}")
         print()
 
+        # Advisory Q-codes: rendered here, never part of the exit status.
+        q_findings = structure_questions(dag, report, load_config(), measure_code_size(repo_ref.slug, Path.cwd()))
+        print("Structure questions:")
+        if not q_findings:
+            print("  (none)")
+        else:
+            for q in q_findings:
+                for ev in q.evidence:
+                    print(f"  {q.code}: {ev}")
+        print()
+
         print("Run:")
-        # Display command suggestion for the first non-info finding if exists
-        example_code = "E010"
-        non_info_findings = [f for f in report.findings if f.severity != "info"]
-        if non_info_findings:
-            example_code = non_info_findings[0].code
         if any(f.code in ("E010", "E011") for f in report.findings):
             print(f"  itree triage {repo_ref.slug}")
-        print(f"  itree doctor {repo_ref.slug} --explain {example_code}")
+        # Suggest --explain only for a code actually present in the findings.
+        non_info_findings = [f for f in report.findings if f.severity != "info"]
+        if non_info_findings:
+            print(f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}")
         print(f"  itree tree {repo_ref.slug}")
         print(f"  itree doctor {repo_ref.slug} --json")
 
