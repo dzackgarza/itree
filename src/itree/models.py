@@ -401,3 +401,19 @@ class DoctorReport(BaseModel):
     next_issue: ReportRef
     metrics: DoctorMetrics
     findings: list[Finding]
+
+
+class RepoHealth(BaseModel):
+    """One-line account-scan health digest for a single repository."""
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    open_issues: int
+    # "ok" when the tree has exactly one ledger root; otherwise the blocking
+    # root diagnostic code (E001/E002/E004).
+    root_status: str
+    error_count: int
+    # Total by construction: present with the next issue, or absent with a
+    # reason. Same representation the doctor report uses for next_issue.
+    next_work_unit: ReportRef

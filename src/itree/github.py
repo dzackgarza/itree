@@ -52,6 +52,41 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+def list_repos(owner: str, *, timeout: int = 60) -> tuple[RepoRef, ...]:
+    """List an owner's non-archived, non-fork repos that have >=1 open issue.
+
+    ``--source`` excludes forks; ``--no-archived`` excludes archived repos;
+    ``issues.totalCount`` is the open-issue prefilter so empty repos never
+    incur a per-repo graph fetch. Order follows gh's default (pushed-at).
+    """
+    cmd = [
+        "gh",
+        "repo",
+        "list",
+        owner,
+        "--source",
+        "--no-archived",
+        "--limit",
+        "1000",
+        "--json",
+        "name,issues",
+    ]
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"gh repo list timed out after {timeout}s for {owner}") from e
+    if proc.returncode != 0:
+        raise RuntimeError(f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    repos: list[dict] = json.loads(proc.stdout)
+    # gh returns issues=null when a repo has issues disabled; such a repo has
+    # no open issues to scan, so skip it rather than crash on subscripting None.
+    return tuple(
+        RepoRef(owner=owner, repo=r["name"])
+        for r in repos
+        if r["issues"] is not None and r["issues"]["totalCount"] > 0
+    )
+
+
 def _graphql_error_text(payload: dict) -> str:
     """Extract the error messages from a GraphQL response document.
 
