@@ -195,6 +195,34 @@ class TestAbsorb:
         assert "same repository" in capsys.readouterr().out
 
 
+class TestMove:
+    """move routes same-parent reorders straight to reprioritize (#15).
+
+    GitHub rejects replace_parent=true with 'Issue may not contain duplicate
+    sub-issues' (HTTP 422) when the parent is unchanged, so reordering among
+    current siblings must skip the reparent POST.
+    """
+
+    @pytest.mark.xfail(reason="#15: same-parent move POSTs replace_parent=true and 422s", strict=True)
+    def test_same_parent_reorder_skips_reparent(self, api: MagicMock) -> None:
+        api.get_issue.side_effect = lambda n: _issue(n, f"Issue {n}")
+        api.get_parent_number.return_value = 2
+
+        cli.move("t/t#5", under="t/t#2", before="t/t#7")
+
+        api.replace_parent_subissue.assert_not_called()
+        api.reprioritize.assert_called_once_with(2, 5 + 5000, before_id=7 + 5000, after_id=None)
+
+    def test_cross_parent_move_reparents(self, api: MagicMock) -> None:
+        api.get_issue.side_effect = lambda n: _issue(n, f"Issue {n}")
+        api.get_parent_number.return_value = 1
+
+        cli.move("t/t#5", under="t/t#2")
+
+        api.replace_parent_subissue.assert_called_once_with(2, 5 + 5000)
+        api.reprioritize.assert_not_called()
+
+
 class TestTriage:
     def _dag_with_orphans(self) -> RepoDag:
         return _dag(

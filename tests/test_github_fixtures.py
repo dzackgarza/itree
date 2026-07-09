@@ -146,6 +146,43 @@ class TestListSubissuesPagination:
         assert [c.number for c in children] == list(range(1, 131))
 
 
+class TestGetParentNumber:
+    """GithubApi.get_parent_number parses GraphQL Issue.parent (#15)."""
+
+    @staticmethod
+    def _api_with_payload(payload: dict) -> "tuple[Any, Any]":
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
+        proc = MagicMock()
+        proc.stdout = json.dumps(payload)
+        return api, patch.object(GithubApi, "_run_api_command", return_value=proc)
+
+    def test_parented_issue_returns_parent_number(self) -> None:
+        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": {"number": 2}}}}})
+        with patcher:
+            assert api.get_parent_number(15) == 2
+
+    def test_parentless_issue_returns_none(self) -> None:
+        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": None}}}})
+        with patcher:
+            assert api.get_parent_number(1) is None
+
+    def test_unresolvable_issue_fails_loudly(self) -> None:
+        api, patcher = self._api_with_payload(
+            {
+                "data": {"repository": {"issue": None}},
+                "errors": [{"message": "Could not resolve to an issue with the number of 999."}],
+            }
+        )
+        with patcher:
+            with pytest.raises(RuntimeError) as exc:
+                api.get_parent_number(999)
+        assert "Could not resolve to an issue" in str(exc.value)
+
+
 class TestFetchRepoGraph:
     """Tests for the paginated GraphQL fetch against a captured --slurp payload."""
 

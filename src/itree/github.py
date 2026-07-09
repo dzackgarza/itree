@@ -39,6 +39,19 @@ query($owner: String!, $name: String!, $endCursor: String) {
 """
 
 
+# Single-issue parent lookup: the sub-issues REST surface has no parent
+# endpoint, but GraphQL exposes Issue.parent directly.
+ISSUE_PARENT_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      parent { number }
+    }
+  }
+}
+"""
+
+
 class GithubApi(BaseModel):
     """Typed boundary owning all GitHub API communication.
 
@@ -151,6 +164,30 @@ class GithubApi(BaseModel):
                 raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {messages}")
             nodes.extend(repository["issues"]["nodes"])
         return tuple(nodes)
+
+    def get_parent_number(self, number: int) -> int | None:
+        """Return the issue's current parent number via GraphQL Issue.parent, or None."""
+        cmd = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={ISSUE_PARENT_QUERY}",
+            "-F",
+            f"owner={self.owner}",
+            "-F",
+            f"name={self.repo}",
+            "-F",
+            f"number={number}",
+        ]
+        proc = self._run_api_command(cmd, "graphql", timeout=30)
+        payload: dict = json.loads(proc.stdout)
+        repository = payload["data"]["repository"]
+        if repository is None or repository["issue"] is None:
+            messages = "; ".join(err.get("message", "") for err in payload.get("errors", ())) or "issue is null"
+            raise RuntimeError(f"gh api graphql could not resolve {self.owner}/{self.repo}#{number}: {messages}")
+        parent = repository["issue"]["parent"]
+        return None if parent is None else int(parent["number"])
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""
