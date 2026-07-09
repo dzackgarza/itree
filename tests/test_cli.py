@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from itree import cli
 from itree.cli import (
     app,
     doctor,
@@ -16,7 +17,7 @@ from itree.cli import (
     path,
     print_diagnostic,
 )
-from itree.models import AttachRequest, IssueRef, MoveRequest, RepoRef
+from itree.models import AttachRequest, GithubIssue, IssueRef, IssueState, MoveRequest, RepoDag, RepoRef
 
 
 class TestParseFunctions:
@@ -65,6 +66,58 @@ class TestPrintDiagnostic:
         print_diagnostic("E001")
         out = capsys.readouterr().out
         assert out.startswith("ERROR E001:")
+
+
+class TestDoctorExplainFooter:
+    """The Run: footer only suggests --explain for codes present in findings (#15)."""
+
+    @staticmethod
+    def _dag(issues: dict[int, GithubIssue], children_of: dict[int, tuple[int, ...]]) -> RepoDag:
+        return RepoDag(repo_ref=RepoRef(owner="t", repo="t"), issues=issues, children_of=children_of)
+
+    @staticmethod
+    def _issue(number: int, title: str, body: str | None = None) -> GithubIssue:
+        return GithubIssue(
+            id=number,
+            number=number,
+            title=title,
+            state=IssueState.open,
+            html_url=f"https://github.com/t/t/issues/{number}",
+            body=body,
+        )
+
+    @pytest.mark.xfail(reason="#15: clean-tree doctor footer suggests --explain E010", strict=True)
+    def test_clean_tree_omits_explain_suggestion(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        dag = self._dag(
+            {
+                1: self._issue(1, "Ledger: t/t"),
+                2: self._issue(2, "Work unit", body="## Acceptance Criteria\n- ok"),
+            },
+            {1: (2,)},
+        )
+        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
+
+        with pytest.raises(SystemExit) as exc:
+            doctor("t/t")
+        assert exc.value.code == 0
+        assert "--explain" not in capsys.readouterr().out
+
+    def test_error_tree_suggests_a_present_code(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        dag = self._dag(
+            {
+                1: self._issue(1, "Ledger: Root 1"),
+                2: self._issue(2, "Ledger: Root 2"),
+            },
+            {},
+        )
+        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
+
+        with pytest.raises(SystemExit) as exc:
+            doctor("t/t")
+        assert exc.value.code == 2
+        out = capsys.readouterr().out
+        assert "--explain E002" in out
+        assert "--explain E010" not in out
 
 
 class TestOrchestrationFunctions:
