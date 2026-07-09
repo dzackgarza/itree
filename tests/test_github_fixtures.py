@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from itree.models import GithubIssue, IssueRef, IssueState, RepoRef
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -130,6 +132,26 @@ class TestFetchRepoGraph:
         assert "--paginate" in cmd and "--slurp" in cmd
         # Sanity: the fixture is real slurp output — an array of page documents.
         assert isinstance(json_module.loads(raw), list)
+
+    @pytest.mark.xfail(reason="#15: null data.repository raises TypeError instead of a clean RuntimeError", strict=True)
+    def test_null_repository_raises_runtime_error_with_api_text(self) -> None:
+        """A missing/inaccessible repo fails loudly with the GraphQL error text, not a traceback (#15)."""
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        page = {
+            "data": {"repository": None},
+            "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'testowner/gone'."}],
+        }
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="gone"))
+        proc = MagicMock()
+        proc.stdout = json.dumps([page])
+        with patch.object(GithubApi, "_run_api_command", return_value=proc):
+            with pytest.raises(RuntimeError) as exc:
+                api.fetch_repo_graph()
+        # The API's own error text must reach the user (containment, not exact match).
+        assert "Could not resolve to a Repository" in str(exc.value)
 
     def test_closed_parent_chain_reaches_doctor_e012(self) -> None:
         """End-to-end: the fixture's closed parent with an open child fires E012, not E010."""
