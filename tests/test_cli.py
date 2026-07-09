@@ -14,6 +14,7 @@ from itree.cli import (
     parse_ref,
     parse_repo,
     path,
+    print_diagnostic,
 )
 from itree.models import AttachRequest, IssueRef, MoveRequest, RepoRef
 
@@ -48,6 +49,23 @@ class TestParseFunctions:
         """parse_repo raises ValueError when hash is included."""
         with pytest.raises(ValueError, match="expected OWNER/REPO"):
             parse_repo("owner/repo#123")
+
+
+class TestPrintDiagnostic:
+    """print_diagnostic renders the catalog severity truthfully (#15)."""
+
+    @pytest.mark.xfail(reason="#15: print_diagnostic hardcodes the ERROR prefix", strict=True)
+    def test_warning_code_renders_warning_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """A W-code routed through print_diagnostic must not claim to be an ERROR."""
+        print_diagnostic("W020")
+        out = capsys.readouterr().out
+        assert out.startswith("WARNING W020:")
+
+    def test_error_code_renders_error_prefix(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """E-codes keep their ERROR prefix."""
+        print_diagnostic("E001")
+        out = capsys.readouterr().out
+        assert out.startswith("ERROR E001:")
 
 
 class TestOrchestrationFunctions:
