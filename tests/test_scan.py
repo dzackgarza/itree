@@ -12,12 +12,12 @@ from itree.render import render_scan
 from itree.validate import repo_health
 
 
-def _issue(number: int, title: str, body: str | None = None, is_open: bool = True) -> GithubIssue:
+def _issue(number: int, title: str, body: str | None = None, state: IssueState = IssueState.open) -> GithubIssue:
     return GithubIssue(
         id=number,
         number=number,
         title=title,
-        state=IssueState.open if is_open else IssueState.closed,
+        state=state,
         html_url=f"https://github.com/o/r/issues/{number}",
         body=body,
     )
@@ -43,7 +43,7 @@ class TestRepoHealth:
                 1: _issue(1, "Ledger: o/clean"),
                 2: _issue(2, "First work unit", body=ACCEPTANCE),
                 3: _issue(3, "Second work unit", body=ACCEPTANCE),
-                4: _issue(4, "Old thing", is_open=False),
+                4: _issue(4, "Old thing", state=IssueState.closed),
             },
             {1: (2, 3)},
         )
@@ -61,7 +61,7 @@ class TestRepoHealth:
         # root candidate exists at all -> E001.
         dag = _dag(
             "o/noroot",
-            {1: _issue(1, "Ledger: o/noroot", is_open=False), 2: _issue(2, "WU", body=ACCEPTANCE)},
+            {1: _issue(1, "Ledger: o/noroot", state=IssueState.closed), 2: _issue(2, "WU", body=ACCEPTANCE)},
             {1: (2,)},
         )
         health = repo_health(dag)
@@ -84,6 +84,25 @@ class TestRepoHealth:
             {1: (2,)},
         )
         assert repo_health(dag).root_status == "E004"
+
+
+class TestListRepos:
+    def test_skips_zero_issue_and_issues_disabled_repos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import json
+        from unittest.mock import MagicMock
+
+        from itree import github
+
+        payload = [
+            {"name": "active", "issues": {"totalCount": 3}},
+            {"name": "empty", "issues": {"totalCount": 0}},
+            {"name": "issues-disabled", "issues": None},  # gh returns null here
+        ]
+        proc = MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+        monkeypatch.setattr(github.subprocess, "run", lambda *a, **k: proc)
+
+        refs = github.list_repos("o")
+        assert [r.slug for r in refs] == ["o/active"]
 
 
 class TestRenderScan:
