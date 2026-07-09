@@ -137,7 +137,11 @@ class GithubApi(BaseModel):
         pages: list[dict] = json.loads(proc.stdout)
         nodes: list[dict] = []
         for page in pages:
-            nodes.extend(page["data"]["repository"]["issues"]["nodes"])
+            repository = page["data"]["repository"]
+            if repository is None:
+                messages = "; ".join(err.get("message", "") for err in page.get("errors", ())) or "repository is null"
+                raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {messages}")
+            nodes.extend(repository["issues"]["nodes"])
         return tuple(nodes)
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:

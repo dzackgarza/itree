@@ -133,7 +133,6 @@ class TestFetchRepoGraph:
         # Sanity: the fixture is real slurp output — an array of page documents.
         assert isinstance(json_module.loads(raw), list)
 
-    @pytest.mark.xfail(reason="#15: null data.repository raises TypeError instead of a clean RuntimeError", strict=True)
     def test_null_repository_raises_runtime_error_with_api_text(self) -> None:
         """A missing/inaccessible repo fails loudly with the GraphQL error text, not a traceback (#15)."""
         from unittest.mock import MagicMock, patch
