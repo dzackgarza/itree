@@ -52,6 +52,18 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+def _graphql_error_text(payload: dict) -> str:
+    """Extract the error messages from a GraphQL response document.
+
+    The GraphQL spec requires every entry in ``errors`` to carry ``message``,
+    so a missing message is a malformed response and fails loudly.
+    """
+    errors = payload.get("errors")
+    if not errors:
+        return "no error details in response"
+    return "; ".join(str(err["message"]) for err in errors)
+
+
 class GithubApi(BaseModel):
     """Typed boundary owning all GitHub API communication.
 
@@ -160,8 +172,7 @@ class GithubApi(BaseModel):
         for page in pages:
             repository = page["data"]["repository"]
             if repository is None:
-                messages = "; ".join(err.get("message", "") for err in page.get("errors", ())) or "repository is null"
-                raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {messages}")
+                raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {_graphql_error_text(page)}")
             nodes.extend(repository["issues"]["nodes"])
         return tuple(nodes)
 
@@ -184,8 +195,7 @@ class GithubApi(BaseModel):
         payload: dict = json.loads(proc.stdout)
         repository = payload["data"]["repository"]
         if repository is None or repository["issue"] is None:
-            messages = "; ".join(err.get("message", "") for err in payload.get("errors", ())) or "issue is null"
-            raise RuntimeError(f"gh api graphql could not resolve {self.owner}/{self.repo}#{number}: {messages}")
+            raise RuntimeError(f"gh api graphql could not resolve {self.owner}/{self.repo}#{number}: {_graphql_error_text(payload)}")
         parent = repository["issue"]["parent"]
         return None if parent is None else int(parent["number"])
 
