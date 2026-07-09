@@ -150,7 +150,7 @@ class TestGetParentNumber:
     """GithubApi.get_parent_number parses GraphQL Issue.parent (#15)."""
 
     @staticmethod
-    def _api_with_payload(payload: dict) -> "tuple[Any, Any]":
+    def _api_with_payload(payload: dict) -> tuple[Any, Any]:
         from unittest.mock import MagicMock, patch
 
         from itree.github import GithubApi

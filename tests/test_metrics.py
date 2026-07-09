@@ -25,8 +25,6 @@ from itree.models import DoctorReport, GithubIssue, IssueState, Milestone, RepoD
 from itree.validate import generate_doctor_report
 
 
-
-
 def _issue(number: int, title: str, body: str | None = "## Acceptance Criteria\n- ok", milestone: str | None = None) -> GithubIssue:
     return GithubIssue(
         id=number,
@@ -68,7 +66,6 @@ def _grouped_dag(work_units: int) -> RepoDag:
 
 
 class TestLoadConfig:
-
     def test_missing_file_returns_documented_defaults(self, tmp_path: Path) -> None:
         config = load_config(tmp_path / "does-not-exist.toml")
         assert config == MetricsConfig(
@@ -78,7 +75,6 @@ class TestLoadConfig:
             flat_min_children=6,
         )
 
-
     def test_real_toml_overrides_defaults(self, tmp_path: Path) -> None:
         path = tmp_path / "config.toml"
         path.write_text("max_open_work_units = 3\nloc_per_work_unit = 250\n")
@@ -87,13 +83,11 @@ class TestLoadConfig:
         assert config.loc_per_work_unit == 250
         assert config.flat_min_children == 6
 
-
     def test_malformed_toml_fails_loudly(self, tmp_path: Path) -> None:
         path = tmp_path / "config.toml"
         path.write_text("max_open_work_units = = 3")
         with pytest.raises(tomllib.TOMLDecodeError):
             load_config(path)
-
 
     def test_wrong_typed_field_fails_loudly(self, tmp_path: Path) -> None:
         path = tmp_path / "config.toml"
@@ -103,11 +97,9 @@ class TestLoadConfig:
 
 
 class TestCodeSize:
-
     def test_parse_scc_total_sums_code_lines_across_languages(self) -> None:
         scc_json = '[{"Name": "Python", "Code": 3100, "Lines": 4000}, {"Name": "Markdown", "Code": 420, "Lines": 500}]'
         assert parse_scc_total(scc_json) == 3520
-
 
     def test_non_matching_checkout_is_absent(self) -> None:
         evidence = measure_code_size("no-such-owner/no-such-repo", Path(__file__).resolve().parents[1])
@@ -116,20 +108,17 @@ class TestCodeSize:
 
 
 class TestPredicates:
-
     def test_q001_flags_open_work_units_above_ceiling(self) -> None:
         dag = _grouped_dag(3)
         config = MetricsConfig(max_open_work_units=2)
         codes = [f.code for f in structure_questions(dag, _report(dag), config, AbsentCodeSize(reason="n/a"))]
         assert "Q001" in codes
 
-
     def test_q001_silent_at_the_ceiling(self) -> None:
         dag = _grouped_dag(2)
         config = MetricsConfig(max_open_work_units=2)
         codes = [f.code for f in structure_questions(dag, _report(dag), config, AbsentCodeSize(reason="n/a"))]
         assert "Q001" not in codes
-
 
     def test_q002_flags_work_units_disproportionate_to_code(self) -> None:
         dag = _grouped_dag(3)
@@ -140,20 +129,17 @@ class TestPredicates:
         assert len(q002) == 1
         assert any("800" in ev for ev in q002[0].evidence)
 
-
     def test_q002_absent_without_code_evidence(self) -> None:
         dag = _grouped_dag(3)
         config = MetricsConfig(loc_per_work_unit=400)
         codes = [f.code for f in structure_questions(dag, _report(dag), config, AbsentCodeSize(reason="no checkout"))]
         assert "Q002" not in codes
 
-
     def test_q003_flags_flat_tree(self) -> None:
         dag = _flat_dag(6)
         config = MetricsConfig(flat_min_children=6, flat_children_ratio=0.5)
         codes = [f.code for f in structure_questions(dag, _report(dag), config, AbsentCodeSize(reason="n/a"))]
         assert "Q003" in codes
-
 
     def test_q003_silent_on_grouped_tree(self) -> None:
         dag = _grouped_dag(6)
@@ -164,7 +150,6 @@ class TestPredicates:
 
 class TestDoctorIntegration:
     """Q findings render in their own section and never change the exit code (#7)."""
-
 
     def test_q_findings_render_without_changing_exit_code(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
         from itree import cli
@@ -181,7 +166,6 @@ class TestDoctorIntegration:
         assert "Structure questions:" in out
         assert "Q001" in out
 
-
     def test_clean_tree_renders_empty_structure_questions(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
         from itree import cli
 
@@ -196,7 +180,6 @@ class TestDoctorIntegration:
         out = capsys.readouterr().out
         assert "Structure questions:" in out
         assert "Q001" not in out and "Q002" not in out and "Q003" not in out
-
 
     def test_explain_resolves_q_codes(self, capsys: pytest.CaptureFixture[str]) -> None:
         from itree import cli
