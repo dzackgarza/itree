@@ -116,6 +116,7 @@ Read the tree structure:
 | `next` | Find next open work-unit issue | `itree next owner/repo` |
 | `path` | Find path to an issue | `itree path owner/repo#5` |
 | `doctor` | Check tree health and invariants | `itree doctor owner/repo` |
+| `scan` | Account-wide health, one line per repo | `itree scan owner` |
 
 ### Terminal Operations
 

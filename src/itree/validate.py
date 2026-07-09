@@ -14,6 +14,7 @@ from .models import (
     IssueRef,
     PresentReportRef,
     RepoDag,
+    RepoHealth,
     ReportRef,
     ReportStatus,
     TreeNode,
@@ -262,6 +263,24 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
             G.add_edge(parent, child)
 
     return [n for n in G.nodes if G.in_degree(n) == 0 and dag.issues[n].is_open]
+
+
+# Root-shape diagnostics, in the order the scan reports them as root_status.
+ROOT_STATUS_CODES = ("E001", "E002", "E004")
+
+
+def repo_health(dag: RepoDag) -> RepoHealth:
+    """Condense a repo's issue DAG into one account-scan health digest."""
+    report = generate_doctor_report(dag)
+    codes = {f.code for f in report.findings}
+    root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
+    return RepoHealth(
+        slug=dag.slug,
+        open_issues=sum(1 for issue in dag.issues.values() if issue.is_open),
+        root_status=root_status,
+        error_count=report.metrics.errors,
+        next_work_unit=report.next_issue,
+    )
 
 
 def generate_doctor_report(dag: RepoDag) -> DoctorReport:

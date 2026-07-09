@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .github import GithubApi
+from .github import GithubApi, list_repos
 from .metrics import load_config, measure_code_size, structure_questions
 from .models import (
     AttachRequest,
@@ -28,10 +29,11 @@ from .models import (
     IssueRef,
     MoveRequest,
     RepoDag,
+    RepoHealth,
     RepoRef,
     TreeNode,
 )
-from .render import prune_closed, render_tree, shape_summary
+from .render import prune_closed, render_scan, render_tree, shape_summary
 from .traversal import build_dag
 from .validate import (
     DIAGNOSTIC_CATALOG,
@@ -40,6 +42,7 @@ from .validate import (
     generate_doctor_report,
     is_grouping_issue,
     is_root_ledger,
+    repo_health,
 )
 
 # Core ontology and help text
@@ -864,6 +867,56 @@ def doctor(
             sys.exit(1)
     else:
         sys.exit(0)
+
+
+@app.command(group="Diagnostic")
+def scan(
+    owner: Annotated[str, Parameter(help="GitHub account login to scan")],
+    *,
+    as_json: Annotated[bool, Parameter(name="--json")] = False,
+) -> None:
+    """Account-wide health scan: one line per issue-bearing repo.
+
+    Lists the owner's non-archived, non-fork repos with at least one open
+    issue, fetches each issue tree, and prints open count, root status,
+    error count, and next work unit, with a footer naming the worst repos.
+
+    Example:
+        $ itree scan owner
+    """
+    try:
+        repos = list_repos(owner)
+    except Exception as e:
+        print(f"Error listing repos for {owner}: {e}")
+        sys.exit(3)
+
+    # Each repo is an independent, IO-bound gh round-trip; fetch them
+    # concurrently and keep the owner's repo order in the output.
+    def health_of(repo_ref: RepoRef) -> RepoHealth | tuple[str, str]:
+        try:
+            return repo_health(build_dag(repo_ref))
+        except Exception as e:
+            return (repo_ref.slug, str(e))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(health_of, repos))
+
+    healths = [r for r in results if isinstance(r, RepoHealth)]
+    fetch_errors: list[tuple[str, str]] = [r for r in results if isinstance(r, tuple)]
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "repos": [h.model_dump() for h in healths],
+                    "errors": [{"repo": slug, "message": msg} for slug, msg in fetch_errors],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    print(render_scan(healths, fetch_errors))
 
 
 if __name__ == "__main__":
