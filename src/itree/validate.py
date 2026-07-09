@@ -152,6 +152,34 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "meaning": "A work-unit issue should not make agents infer completion semantics. Add explicit done criteria to the issue itself.",
         "remediation": ['A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'],
     },
+    "Q001": {
+        "title": "too_many_open_work_units",
+        "severity": "question",
+        "meaning": "More work units are open in parallel than the configured ceiling; claims may be thrashing instead of finishing.",
+        "remediation": [
+            "1. Finish or close open work units before planning more.",
+            "2. Consolidate related work units into one PR-sized unit: itree absorb.",
+            "3. If the ceiling is genuinely too low, raise max_open_work_units in ~/.config/itree/config.toml.",
+        ],
+    },
+    "Q002": {
+        "title": "work_units_disproportionate_to_code",
+        "severity": "question",
+        "meaning": "Open work units outnumber what the codebase size supports; planning may be outpacing implementation.",
+        "remediation": [
+            "1. Consolidate related work units into one PR-sized unit: itree absorb.",
+            "2. If the proportion is genuinely wrong, tune loc_per_work_unit in ~/.config/itree/config.toml.",
+        ],
+    },
+    "Q003": {
+        "title": "flat_tree",
+        "severity": "question",
+        "meaning": "Most open issues hang directly off the root ledger; the tree has no grouping structure to order traversal.",
+        "remediation": [
+            "1. Group related issues under milestone or backlog ledgers: itree move ISSUE --under LEDGER.",
+            "2. If flat is intended for this repo, tune flat_children_ratio / flat_min_children in ~/.config/itree/config.toml.",
+        ],
+    },
     "I001": {
         "title": "valid_tree",
         "severity": "info",

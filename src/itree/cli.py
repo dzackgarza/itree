@@ -19,6 +19,7 @@ from typing import Annotated
 from cyclopts import App, Parameter
 
 from .github import GithubApi
+from .metrics import load_config, measure_code_size, structure_questions
 from .models import (
     AttachRequest,
     DetachRequest,
@@ -827,6 +828,17 @@ def doctor(
             for f in report.findings:
                 # Format to only display standard code summary
                 print(f"  {f.code}: {len(f.evidence)} {f.title.replace('_', ' ')}")
+        print()
+
+        # Advisory Q-codes: rendered here, never part of the exit status.
+        q_findings = structure_questions(dag, report, load_config(), measure_code_size(repo_ref.slug, Path.cwd()))
+        print("Structure questions:")
+        if not q_findings:
+            print("  (none)")
+        else:
+            for q in q_findings:
+                for ev in q.evidence:
+                    print(f"  {q.code}: {ev}")
         print()
 
         print("Run:")
