@@ -128,7 +128,6 @@ class TestListSubissuesPagination:
             return json.dumps([self.CHILDREN[:100], self.CHILDREN[100:]])
         return json.dumps(self.CHILDREN[:30])
 
-    @pytest.mark.xfail(reason="#15: unpaginated sub_issues fallback truncates to one REST page", strict=True)
     def test_130_child_node_returns_all_children_in_order(self) -> None:
         from unittest.mock import MagicMock, patch
 

@@ -109,9 +109,17 @@ class GithubApi(BaseModel):
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
     def list_subissues(self, number: int) -> tuple[GithubIssue, ...]:
-        """List all sub-issues of a parent issue."""
-        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues")
-        return tuple(GithubIssue.model_validate(item) for item in json.loads(proc.stdout))
+        """List ALL sub-issues of a parent issue, following REST pagination.
+
+        REST returns 30 items per page by default; this is the >100-children
+        GraphQL fallback, so it must walk every page. ``--slurp`` wraps the
+        per-page arrays in one array.
+        """
+        path = f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues?per_page=100"
+        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        proc = self._run_api_command(cmd, path, timeout=120)
+        pages: list[list[dict]] = json.loads(proc.stdout)
+        return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
 
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
