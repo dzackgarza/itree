@@ -106,6 +106,47 @@ class TestGithubIssueFromFixtures:
         assert isinstance(repo, RepoRef)
 
 
+class TestListSubissuesPagination:
+    """The wide-node fallback must return ALL children, not one REST page (#15)."""
+
+    CHILDREN = [
+        {
+            "id": 9000 + n,
+            "number": n,
+            "title": f"Child {n}",
+            "state": "open",
+            "html_url": f"https://github.com/testowner/testrepo/issues/{n}",
+        }
+        for n in range(1, 131)
+    ]
+
+    def _fake_gh(self, cmd: list[str]) -> str:
+        """Behave like gh api: 30 items per page unless --paginate walks them all."""
+        if "--paginate" in cmd:
+            assert "--slurp" in cmd, "paginated array responses need --slurp to stay parseable"
+            assert any("per_page=100" in part for part in cmd), "pagination should request full pages"
+            return json.dumps([self.CHILDREN[:100], self.CHILDREN[100:]])
+        return json.dumps(self.CHILDREN[:30])
+
+    @pytest.mark.xfail(reason="#15: unpaginated sub_issues fallback truncates to one REST page", strict=True)
+    def test_130_child_node_returns_all_children_in_order(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from itree.github import GithubApi
+
+        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
+
+        def run(cmd: list[str], path: str, timeout: int) -> MagicMock:
+            proc = MagicMock()
+            proc.stdout = self._fake_gh(cmd)
+            return proc
+
+        with patch.object(GithubApi, "_run_api_command", side_effect=run):
+            children = api.list_subissues(7)
+
+        assert [c.number for c in children] == list(range(1, 131))
+
+
 class TestFetchRepoGraph:
     """Tests for the paginated GraphQL fetch against a captured --slurp payload."""
 
