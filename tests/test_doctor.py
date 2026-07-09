@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from itree.models import GithubIssue, IssueState, Milestone, RepoDag, RepoRef, ReportRef
 from itree.validate import generate_doctor_report
 
@@ -409,7 +407,6 @@ def test_doctor_ignores_pull_requests_when_finding_repository_root() -> None:
     assert all(f.code != "E011" for f in report.findings)
 
 
-@pytest.mark.xfail(reason="#15: doctor RecursionError on cyclic children_of", strict=True)
 def test_doctor_cyclic_children_reports_e003_without_crashing() -> None:
     """Regression (#15): a children_of cycle yields E003 and a usable report, not RecursionError."""
     dag = RepoDag(

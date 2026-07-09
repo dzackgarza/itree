@@ -328,7 +328,10 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
 
         root_ref = IssueRef(repo_ref=dag.repo_ref, number=root_num)
 
-    if root_ref is not None:
+    # Tree-dependent checks require an acyclic graph: materializing the root
+    # recurses through children_of and would not terminate on a cycle. E003
+    # above already reports the cycles.
+    if root_ref is not None and is_acyclic:
         root_num = root_ref.number
 
         # Build tree node
@@ -336,10 +339,7 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
         tree_nodes = tree_node.preorder()
 
         # Connectivity check: reachable nodes from root ledger
-        if is_acyclic:
-            reachable = nx.descendants(G, root_num) | {root_num}
-        else:
-            reachable = set(nx.bfs_tree(G.to_undirected(), root_num).nodes) if root_num in G else {root_num}
+        reachable = nx.descendants(G, root_num) | {root_num}
 
         # Collect open issues outside the root ledger
         unreachable_open = []
