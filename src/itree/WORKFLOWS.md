@@ -126,3 +126,11 @@ Keep it proportional:
 
 The tree should be as small as the work is.
 When in doubt, absorb.
+
+## Deferred groupings (long-horizon shelves)
+
+A milestone or backlog ledger may legitimately hold no work units yet, on purpose: far-future capabilities are often best left un-broken-down until prerequisite work lands, so premature breakdown does not churn.
+
+Label such a grouping `deferred` (configurable via `deferral_label` in `~/.config/itree/config.toml`). `itree doctor` then reports it as informational `I010` ("deferred, awaiting breakdown") instead of warning `W030` (dead shelf).
+An untagged empty grouping still warns as a stale shelf.
+Because a deferred grouping has no open work units, `next` skips past it until its work is filed in.

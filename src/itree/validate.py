@@ -104,6 +104,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "remediation": [
             "A. Close the grouping issue if its work is complete.",
             "B. Move live work under it if it is supposed to be active.",
+            "C. If it is an intentional long-horizon shelf awaiting breakdown, label it with your "
+            "configured deferral label (deferral_label in ~/.config/itree/config.toml; default "
+            "'deferred'); doctor then reports it as I010 instead of warning.",
         ],
     },
     "W020": {
@@ -188,6 +191,13 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "meaning": "Traversal is deterministic. The reported next work-unit issue is safe for agents.",
         "remediation": [],
     },
+    "I010": {
+        "title": "deferred_grouping",
+        "severity": "info",
+        "meaning": "An intentionally deferred grouping (carrying the configured deferral label) has no open descendants yet. "
+        "It is a long-horizon shelf awaiting breakdown once it becomes the next item, not a stale one.",
+        "remediation": [],
+    },
 }
 
 
@@ -269,9 +279,14 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
 ROOT_STATUS_CODES = ("E001", "E002", "E004")
 
 
-def repo_health(dag: RepoDag) -> RepoHealth:
-    """Condense a repo's issue DAG into one account-scan health digest."""
-    report = generate_doctor_report(dag)
+def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
+    """Condense a repo's issue DAG into one account-scan health digest.
+
+    Config is read at the CLI command boundary (once per invocation) and the
+    resolved deferral_label is passed in, so a concurrent account scan does not
+    re-read config once per repo.
+    """
+    report = generate_doctor_report(dag, deferral_label=deferral_label)
     codes = {f.code for f in report.findings}
     root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
     return RepoHealth(
@@ -283,7 +298,7 @@ def repo_health(dag: RepoDag) -> RepoHealth:
     )
 
 
-def generate_doctor_report(dag: RepoDag) -> DoctorReport:
+def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> DoctorReport:
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
 
@@ -541,10 +556,16 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
                 work_unit_nodes.append(node)
 
         # W030: open grouping issue (other than the root) with no open descendants.
+        # A grouping carrying the deferral label is an intentional long-horizon
+        # shelf awaiting breakdown, not a dead one: it is reported as I010 instead.
         dead_groupings = []
+        deferred_groupings = []
         for node in tree_nodes[1:]:
             if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
-                dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
+                if deferral_label.casefold() in {label.casefold() for label in node.issue.labels}:
+                    deferred_groupings.append(f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown')
+                else:
+                    dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
 
         if dead_groupings:
             f_details = DIAGNOSTIC_CATALOG["W030"]
@@ -554,6 +575,19 @@ def generate_doctor_report(dag: RepoDag) -> DoctorReport:
                     severity="warning",
                     title=f_details["title"],
                     evidence=dead_groupings,
+                    meaning=f_details["meaning"],
+                    remediation=f_details["remediation"],
+                )
+            )
+
+        if deferred_groupings:
+            f_details = DIAGNOSTIC_CATALOG["I010"]
+            findings_list.append(
+                Finding(
+                    code="I010",
+                    severity="info",
+                    title=f_details["title"],
+                    evidence=deferred_groupings,
                     meaning=f_details["meaning"],
                     remediation=f_details["remediation"],
                 )

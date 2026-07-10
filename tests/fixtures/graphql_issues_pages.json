@@ -3,7 +3,10 @@
     "data": {
       "repository": {
         "issues": {
-          "pageInfo": { "hasNextPage": true, "endCursor": "cursor1" },
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "cursor1"
+          },
           "nodes": [
             {
               "number": 1,
@@ -16,9 +19,21 @@
               "milestone": null,
               "subIssues": {
                 "totalCount": 2,
-                "nodes": [{ "number": 2 }, { "number": 3 }]
+                "nodes": [
+                  {
+                    "number": 2
+                  },
+                  {
+                    "number": 3
+                  }
+                ]
               },
-              "blockedBy": { "nodes": [] }
+              "blockedBy": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": []
+              }
             },
             {
               "number": 2,
@@ -29,8 +44,20 @@
               "body": null,
               "url": "https://github.com/testowner/testrepo/issues/2",
               "milestone": null,
-              "subIssues": { "totalCount": 1, "nodes": [{ "number": 4 }] },
-              "blockedBy": { "nodes": [] }
+              "subIssues": {
+                "totalCount": 1,
+                "nodes": [
+                  {
+                    "number": 4
+                  }
+                ]
+              },
+              "blockedBy": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": []
+              }
             }
           ]
         }
@@ -41,7 +68,10 @@
     "data": {
       "repository": {
         "issues": {
-          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
           "nodes": [
             {
               "number": 3,
@@ -51,9 +81,19 @@
               "stateReason": null,
               "body": "## Acceptance Criteria\n- Proven.",
               "url": "https://github.com/testowner/testrepo/issues/3",
-              "milestone": { "title": "v1" },
-              "subIssues": { "totalCount": 0, "nodes": [] },
-              "blockedBy": { "nodes": [] }
+              "milestone": {
+                "title": "v1"
+              },
+              "subIssues": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "blockedBy": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": []
+              }
             },
             {
               "number": 4,
@@ -64,8 +104,16 @@
               "body": "## Acceptance Criteria\n- Proven.",
               "url": "https://github.com/testowner/testrepo/issues/4",
               "milestone": null,
-              "subIssues": { "totalCount": 0, "nodes": [] },
-              "blockedBy": { "nodes": [] }
+              "subIssues": {
+                "totalCount": 0,
+                "nodes": []
+              },
+              "blockedBy": {
+                "nodes": []
+              },
+              "labels": {
+                "nodes": []
+              }
             }
           ]
         }

@@ -25,6 +25,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         body
         url
         milestone { title }
+        labels(first: 100) { nodes { name } }  # GitHub single-page max; one issue never exceeds this
         subIssues(first: 100) {
           totalCount
           nodes { number }

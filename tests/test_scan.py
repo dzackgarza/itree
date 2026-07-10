@@ -5,14 +5,21 @@ from __future__ import annotations
 
 import pytest
 
-from itree import cli
+from itree import cli, validate
 from itree.cli import scan
+from itree.metrics import MetricsConfig
 from itree.models import GithubIssue, IssueState, PresentReportRef, RepoDag, RepoHealth, RepoRef
 from itree.render import render_scan
-from itree.validate import repo_health
+from itree.validate import generate_doctor_report, repo_health
 
 
-def _issue(number: int, title: str, body: str | None = None, state: IssueState = IssueState.open) -> GithubIssue:
+def _issue(
+    number: int,
+    title: str,
+    body: str | None = None,
+    state: IssueState = IssueState.open,
+    labels: tuple[str, ...] = (),
+) -> GithubIssue:
     return GithubIssue(
         id=number,
         number=number,
@@ -20,6 +27,7 @@ def _issue(number: int, title: str, body: str | None = None, state: IssueState =
         state=state,
         html_url=f"https://github.com/o/r/issues/{number}",
         body=body,
+        labels=labels,
     )
 
 
@@ -84,6 +92,93 @@ class TestRepoHealth:
             {1: (2,)},
         )
         assert repo_health(dag).root_status == "E004"
+
+
+class TestScanHonorsConfiguredDeferralLabel:
+    """The account-scan health path must apply the SAME configured deferral_label
+    as doctor. Config is now read once at the CLI command boundary and threaded
+    in as repo_health(dag, deferral_label=...); repo_health no longer reads
+    config itself.
+
+    A grouping carrying the configured label with no open descendants is an
+    intentional shelf (I010), not a dead grouping (W030). A scan that ignored
+    the configured label (used the "deferred" default while config set a custom
+    one) would flag a custom-labeled shelf as W030 instead.
+    """
+
+    def _deferred_shelf_dag(self) -> RepoDag:
+        # #2 is an open milestone ledger with no open descendants, labeled with
+        # the *custom* deferral label. Default "deferred" would NOT suppress it.
+        return _dag(
+            "o/deferred",
+            {
+                1: _issue(1, "Ledger: o/deferred"),
+                2: _issue(2, "Milestone: Future work", labels=("epic",)),
+                3: _issue(3, "Real work unit", body=ACCEPTANCE),
+            },
+            {1: (2, 3)},
+        )
+
+    def _spy_on_report(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+        # Spy: wrap the REAL generate_doctor_report so its true findings still
+        # drive RepoHealth, but the label it received and the codes it produced
+        # are observable. repo_health condenses findings away, so the flip
+        # between W030 and I010 is only visible on the real report.
+        captured: dict[str, object] = {}
+        real_report = validate.generate_doctor_report
+
+        def capturing(dag: RepoDag, deferral_label: str = "deferred") -> object:
+            report = real_report(dag, deferral_label=deferral_label)
+            captured["label"] = deferral_label
+            captured["codes"] = {f.code for f in report.findings}
+            return report
+
+        monkeypatch.setattr(validate, "generate_doctor_report", capturing)
+        return captured
+
+    def test_repo_health_forwards_explicit_label_flipping_w030_to_i010(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = self._spy_on_report(monkeypatch)
+
+        repo_health(self._deferred_shelf_dag(), deferral_label="epic")
+
+        # repo_health forwarded its explicit label to generate_doctor_report,
+        # which then treated the "epic"-labeled shelf as an intentional shelf.
+        assert captured["label"] == "epic"
+        codes = captured["codes"]
+        assert isinstance(codes, set)
+        assert "I010" in codes and "W030" not in codes
+
+    def test_scan_loads_config_once_and_applies_configured_label(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        # Real scan/health_of wiring: scan must read load_config once at the
+        # command boundary and pass config.deferral_label into every repo_health
+        # call. A scan that ignored config (default "deferred") would produce
+        # W030, not I010, and the captured label would be "deferred".
+        calls = {"count": 0}
+
+        def counting_load_config(*a: object, **k: object) -> MetricsConfig:
+            calls["count"] += 1
+            return MetricsConfig(deferral_label="epic")
+
+        monkeypatch.setattr(cli, "load_config", counting_load_config)
+        monkeypatch.setattr(cli, "list_repos", lambda owner: (RepoRef(owner="o", repo="deferred"),))
+        monkeypatch.setattr(cli, "build_dag", lambda ref, *a, **k: self._deferred_shelf_dag())
+        captured = self._spy_on_report(monkeypatch)
+
+        scan("o")
+
+        assert calls["count"] == 1
+        assert captured["label"] == "epic"
+        codes = captured["codes"]
+        assert isinstance(codes, set)
+        assert "I010" in codes and "W030" not in codes
+
+    def test_default_label_does_not_suppress_a_custom_labeled_shelf(self) -> None:
+        # Negative control: with the default label the "epic"-labeled shelf is a
+        # dead grouping (W030), proving the label is load-bearing and that
+        # generate_doctor_report keeps its explicit deferral_label parameter.
+        report = generate_doctor_report(self._deferred_shelf_dag(), deferral_label="deferred")
+        codes = {f.code for f in report.findings}
+        assert "W030" in codes and "I010" not in codes
 
 
 class TestListRepos:

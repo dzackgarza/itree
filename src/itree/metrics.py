@@ -31,6 +31,7 @@ class MetricsConfig(BaseModel):
     loc_per_work_unit: int = 400
     flat_children_ratio: float = 0.5
     flat_min_children: int = 6
+    deferral_label: str = "deferred"
 
 
 class PresentCodeSize(BaseModel):

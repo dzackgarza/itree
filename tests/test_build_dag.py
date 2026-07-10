@@ -23,6 +23,7 @@ def _node(
     children: tuple[int, ...] = (),
     blocked_by: tuple[int, ...] = (),
     total_children: int | None = None,
+    labels: tuple[str, ...] = (),
 ) -> dict:
     return {
         "number": number,
@@ -33,6 +34,7 @@ def _node(
         "body": None,
         "url": f"https://github.com/testowner/testrepo/issues/{number}",
         "milestone": None,
+        "labels": {"nodes": [{"name": name} for name in labels]},
         "subIssues": {
             "totalCount": total_children if total_children is not None else len(children),
             "nodes": [{"number": child} for child in children],
@@ -135,8 +137,10 @@ def test_from_graphql_field_mapping() -> None:
         "body": "Body text",
         "url": "https://github.com/o/r/issues/7",
         "milestone": {"title": "v1"},
+        "labels": {"nodes": [{"name": "bug"}]},
     }
     issue = GithubIssue.from_graphql(node)
+    assert issue.labels == ("bug",)
     assert issue.id == 1234
     assert issue.number == 7
     assert issue.state == IssueState.closed

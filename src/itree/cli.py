@@ -750,7 +750,8 @@ def doctor(
         print(f"GitHub/auth/API failure: {e}")
         sys.exit(3)
 
-    report = generate_doctor_report(dag)
+    config = load_config()
+    report = generate_doctor_report(dag, deferral_label=config.deferral_label)
 
     if as_json:
         print(report.model_dump_json(indent=2))
@@ -805,7 +806,7 @@ def doctor(
         print()
 
         # Advisory Q-codes: rendered here, never part of the exit status.
-        q_findings = structure_questions(dag, report, load_config(), measure_code_size(repo_ref.slug, Path.cwd()))
+        q_findings = structure_questions(dag, report, config, measure_code_size(repo_ref.slug, Path.cwd()))
         print("Structure questions:")
         if not q_findings:
             print("  (none)")
@@ -858,11 +859,15 @@ def scan(
         print(f"Error listing repos for {owner}: {e}")
         sys.exit(3)
 
+    # Read config once at the command boundary (mirrors doctor), then apply the
+    # same deferral_label to every scanned repo.
+    deferral_label = load_config().deferral_label
+
     # Each repo is an independent, IO-bound gh round-trip; fetch them
     # concurrently and keep the owner's repo order in the output.
     def health_of(repo_ref: RepoRef) -> RepoHealth | tuple[str, str]:
         try:
-            return repo_health(build_dag(repo_ref))
+            return repo_health(build_dag(repo_ref), deferral_label=deferral_label)
         except Exception as e:
             return (repo_ref.slug, str(e))
 
