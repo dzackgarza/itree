@@ -104,9 +104,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "remediation": [
             "A. Close the grouping issue if its work is complete.",
             "B. Move live work under it if it is supposed to be active.",
-            "C. If it is an intentional long-horizon shelf awaiting breakdown, label it 'deferred' "
-            "(configurable via deferral_label in ~/.config/itree/config.toml); "
-            "doctor then reports it as I010 instead of warning.",
+            "C. If it is an intentional long-horizon shelf awaiting breakdown, label it with your "
+            "configured deferral label (deferral_label in ~/.config/itree/config.toml; default "
+            "'deferred'); doctor then reports it as I010 instead of warning.",
         ],
     },
     "W020": {
