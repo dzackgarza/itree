@@ -279,13 +279,14 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
 ROOT_STATUS_CODES = ("E001", "E002", "E004")
 
 
-def repo_health(dag: RepoDag) -> RepoHealth:
-    """Condense a repo's issue DAG into one account-scan health digest."""
-    # Function-local import: metrics.py imports DIAGNOSTIC_CATALOG from this
-    # module at import time, so a top-level import here would be circular.
-    from .metrics import load_config
+def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
+    """Condense a repo's issue DAG into one account-scan health digest.
 
-    report = generate_doctor_report(dag, deferral_label=load_config().deferral_label)
+    Config is read at the CLI command boundary (once per invocation) and the
+    resolved deferral_label is passed in, so a concurrent account scan does not
+    re-read config once per repo.
+    """
+    report = generate_doctor_report(dag, deferral_label=deferral_label)
     codes = {f.code for f in report.findings}
     root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
     return RepoHealth(

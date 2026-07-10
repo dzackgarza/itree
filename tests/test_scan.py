@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from itree import cli, metrics, validate
+from itree import cli, validate
 from itree.cli import scan
 from itree.metrics import MetricsConfig
 from itree.models import GithubIssue, IssueState, PresentReportRef, RepoDag, RepoHealth, RepoRef
@@ -95,13 +95,15 @@ class TestRepoHealth:
 
 
 class TestScanHonorsConfiguredDeferralLabel:
-    """The account-scan health path (repo_health) must apply the SAME configured
-    deferral_label as doctor, not the hardcoded generate_doctor_report default.
+    """The account-scan health path must apply the SAME configured deferral_label
+    as doctor. Config is now read once at the CLI command boundary and threaded
+    in as repo_health(dag, deferral_label=...); repo_health no longer reads
+    config itself.
 
     A grouping carrying the configured label with no open descendants is an
-    intentional shelf (I010), not a dead grouping (W030). The pre-fix
-    repo_health called generate_doctor_report(dag) with no label, so it always
-    used "deferred" and would have flagged a custom-labeled shelf as W030.
+    intentional shelf (I010), not a dead grouping (W030). A scan that ignored
+    the configured label (used the "deferred" default while config set a custom
+    one) would flag a custom-labeled shelf as W030 instead.
     """
 
     def _deferred_shelf_dag(self) -> RepoDag:
@@ -117,11 +119,11 @@ class TestScanHonorsConfiguredDeferralLabel:
             {1: (2, 3)},
         )
 
-    def test_repo_health_applies_configured_label_flipping_w030_to_i010(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(metrics, "load_config", lambda *a, **k: MetricsConfig(deferral_label="epic"))
-
-        # Observe the report repo_health actually produces by capturing the real
-        # collaborator's return; the unit under test (repo_health) runs for real.
+    def _spy_on_report(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+        # Spy: wrap the REAL generate_doctor_report so its true findings still
+        # drive RepoHealth, but the label it received and the codes it produced
+        # are observable. repo_health condenses findings away, so the flip
+        # between W030 and I010 is only visible on the real report.
         captured: dict[str, object] = {}
         real_report = validate.generate_doctor_report
 
@@ -132,10 +134,39 @@ class TestScanHonorsConfiguredDeferralLabel:
             return report
 
         monkeypatch.setattr(validate, "generate_doctor_report", capturing)
+        return captured
 
-        repo_health(self._deferred_shelf_dag())
+    def test_repo_health_forwards_explicit_label_flipping_w030_to_i010(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured = self._spy_on_report(monkeypatch)
 
-        # repo_health forwarded the configured label, not the hardcoded default.
+        repo_health(self._deferred_shelf_dag(), deferral_label="epic")
+
+        # repo_health forwarded its explicit label to generate_doctor_report,
+        # which then treated the "epic"-labeled shelf as an intentional shelf.
+        assert captured["label"] == "epic"
+        codes = captured["codes"]
+        assert isinstance(codes, set)
+        assert "I010" in codes and "W030" not in codes
+
+    def test_scan_loads_config_once_and_applies_configured_label(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        # Real scan/health_of wiring: scan must read load_config once at the
+        # command boundary and pass config.deferral_label into every repo_health
+        # call. A scan that ignored config (default "deferred") would produce
+        # W030, not I010, and the captured label would be "deferred".
+        calls = {"count": 0}
+
+        def counting_load_config(*a: object, **k: object) -> MetricsConfig:
+            calls["count"] += 1
+            return MetricsConfig(deferral_label="epic")
+
+        monkeypatch.setattr(cli, "load_config", counting_load_config)
+        monkeypatch.setattr(cli, "list_repos", lambda owner: (RepoRef(owner="o", repo="deferred"),))
+        monkeypatch.setattr(cli, "build_dag", lambda ref, *a, **k: self._deferred_shelf_dag())
+        captured = self._spy_on_report(monkeypatch)
+
+        scan("o")
+
+        assert calls["count"] == 1
         assert captured["label"] == "epic"
         codes = captured["codes"]
         assert isinstance(codes, set)
