@@ -750,7 +750,8 @@ def doctor(
         print(f"GitHub/auth/API failure: {e}")
         sys.exit(3)
 
-    report = generate_doctor_report(dag, deferral_label=load_config().deferral_label)
+    config = load_config()
+    report = generate_doctor_report(dag, deferral_label=config.deferral_label)
 
     if as_json:
         print(report.model_dump_json(indent=2))
@@ -805,7 +806,7 @@ def doctor(
         print()
 
         # Advisory Q-codes: rendered here, never part of the exit status.
-        q_findings = structure_questions(dag, report, load_config(), measure_code_size(repo_ref.slug, Path.cwd()))
+        q_findings = structure_questions(dag, report, config, measure_code_size(repo_ref.slug, Path.cwd()))
         print("Structure questions:")
         if not q_findings:
             print("  (none)")

@@ -5,14 +5,21 @@ from __future__ import annotations
 
 import pytest
 
-from itree import cli
+from itree import cli, metrics, validate
 from itree.cli import scan
+from itree.metrics import MetricsConfig
 from itree.models import GithubIssue, IssueState, PresentReportRef, RepoDag, RepoHealth, RepoRef
 from itree.render import render_scan
-from itree.validate import repo_health
+from itree.validate import generate_doctor_report, repo_health
 
 
-def _issue(number: int, title: str, body: str | None = None, state: IssueState = IssueState.open) -> GithubIssue:
+def _issue(
+    number: int,
+    title: str,
+    body: str | None = None,
+    state: IssueState = IssueState.open,
+    labels: tuple[str, ...] = (),
+) -> GithubIssue:
     return GithubIssue(
         id=number,
         number=number,
@@ -20,6 +27,7 @@ def _issue(number: int, title: str, body: str | None = None, state: IssueState =
         state=state,
         html_url=f"https://github.com/o/r/issues/{number}",
         body=body,
+        labels=labels,
     )
 
 
@@ -84,6 +92,62 @@ class TestRepoHealth:
             {1: (2,)},
         )
         assert repo_health(dag).root_status == "E004"
+
+
+class TestScanHonorsConfiguredDeferralLabel:
+    """The account-scan health path (repo_health) must apply the SAME configured
+    deferral_label as doctor, not the hardcoded generate_doctor_report default.
+
+    A grouping carrying the configured label with no open descendants is an
+    intentional shelf (I010), not a dead grouping (W030). The pre-fix
+    repo_health called generate_doctor_report(dag) with no label, so it always
+    used "deferred" and would have flagged a custom-labeled shelf as W030.
+    """
+
+    def _deferred_shelf_dag(self) -> RepoDag:
+        # #2 is an open milestone ledger with no open descendants, labeled with
+        # the *custom* deferral label. Default "deferred" would NOT suppress it.
+        return _dag(
+            "o/deferred",
+            {
+                1: _issue(1, "Ledger: o/deferred"),
+                2: _issue(2, "Milestone: Future work", labels=("epic",)),
+                3: _issue(3, "Real work unit", body=ACCEPTANCE),
+            },
+            {1: (2, 3)},
+        )
+
+    def test_repo_health_applies_configured_label_flipping_w030_to_i010(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(metrics, "load_config", lambda *a, **k: MetricsConfig(deferral_label="epic"))
+
+        # Observe the report repo_health actually produces by capturing the real
+        # collaborator's return; the unit under test (repo_health) runs for real.
+        captured: dict[str, object] = {}
+        real_report = validate.generate_doctor_report
+
+        def capturing(dag: RepoDag, deferral_label: str = "deferred") -> object:
+            report = real_report(dag, deferral_label=deferral_label)
+            captured["label"] = deferral_label
+            captured["codes"] = {f.code for f in report.findings}
+            return report
+
+        monkeypatch.setattr(validate, "generate_doctor_report", capturing)
+
+        repo_health(self._deferred_shelf_dag())
+
+        # repo_health forwarded the configured label, not the hardcoded default.
+        assert captured["label"] == "epic"
+        codes = captured["codes"]
+        assert isinstance(codes, set)
+        assert "I010" in codes and "W030" not in codes
+
+    def test_default_label_does_not_suppress_a_custom_labeled_shelf(self) -> None:
+        # Negative control: with the default label the "epic"-labeled shelf is a
+        # dead grouping (W030), proving the label is load-bearing and that
+        # generate_doctor_report keeps its explicit deferral_label parameter.
+        report = generate_doctor_report(self._deferred_shelf_dag(), deferral_label="deferred")
+        codes = {f.code for f in report.findings}
+        assert "W030" in codes and "I010" not in codes
 
 
 class TestListRepos:

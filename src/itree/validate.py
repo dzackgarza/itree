@@ -281,7 +281,11 @@ ROOT_STATUS_CODES = ("E001", "E002", "E004")
 
 def repo_health(dag: RepoDag) -> RepoHealth:
     """Condense a repo's issue DAG into one account-scan health digest."""
-    report = generate_doctor_report(dag)
+    # Function-local import: metrics.py imports DIAGNOSTIC_CATALOG from this
+    # module at import time, so a top-level import here would be circular.
+    from .metrics import load_config
+
+    report = generate_doctor_report(dag, deferral_label=load_config().deferral_label)
     codes = {f.code for f in report.findings}
     root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
     return RepoHealth(
