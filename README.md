@@ -2,53 +2,84 @@
 
 Deterministic traversal layer over GitHub sub-issue trees.
 
-`itree` treats GitHub issues as nodes in a rooted, ordered tree and gives you a CLI to build, query, and validate that structure.
-It is designed around **work-unit traversal**: keep a single ordered issue tree, ask for the next coherent work-unit issue, and track stories, plans, proof obligations, and implementation checklists inside that issue.
+`itree` keeps one ordered issue tree per repository and tells an agent the single next work unit to do.
+You keep stories, plans, proof obligations, and checklists *inside* each work-unit issue; `itree` handles structure and traversal.
 
-## Quick Start
+The full organization model, repo state machine, guard rails, and proportionality doctrine live in [`WORKFLOWS.md`](WORKFLOWS.md) and print verbatim from `itree help model`.
+
+## Install / invoke
+
+Canonical invocation is via `uvx` straight from GitHub — no install step:
 
 ```bash
-# Create a root issue that defines the boundary of a problem domain
-itree init owner/repo "Project Alpha"
+uvx --from git+https://github.com/dzackgarza/itree itree --help
+uvx --from git+https://github.com/dzackgarza/itree itree next owner/repo
+```
 
-# Add grouping or work-unit issues
-itree new owner/repo#1 "Milestone: v1"
-itree new owner/repo#2 "Implement editor preview sync"
-itree new owner/repo#2 "Add export command proof"
+`itree` shells out to the GitHub CLI (`gh`), so `gh` must be installed and authenticated.
+From a local checkout, use `uv run --with-editable . itree ...`.
 
-# Find the next work-unit issue
+## The loop
+
+`itree` is built around one rails-guarded loop.
+`doctor` classifies the repo, and each state routes to one command:
+
+| State | Detected by | Do |
+| --- | --- | --- |
+| `NO_TREE` | no root ledger (E001) | `itree init owner/repo "Ledger: ..."` |
+| `FOREST` | open issues unreachable from root (E010/E011) | `itree triage owner/repo` |
+| `MALFORMED` | other E-findings (cycles, dup roots, hidden work) | `itree doctor owner/repo --explain CODE` |
+| `CLEAN_WITH_WORK` | doctor OK, open work unit exists | `itree next` → work → `itree close` |
+| `DONE` | doctor OK, no open work units | stop, or `itree new` for new work |
+
+The four guard rails keep the tree proportional as you go:
+
+1. **File, don't invent** — `new` without a placement creates nothing; it shows where the item already fits and prints the exact absorb/under commands.
+2. **Work units are leaves** — `new --under` a work unit is refused; sub-tasks are body content, not child issues.
+3. **Absorb, don't fragment** — sub-PR content merges into a work unit verbatim via `absorb`; nothing is summarized or lost.
+4. **Traverse, don't re-plan** — `next` names one unit and the standing instruction; do it, `close` it, ask again.
+
+See `itree help model` for each rail as a full transcript.
+
+## Quick start
+
+```bash
+alias itree='uvx --from git+https://github.com/dzackgarza/itree itree'
+
+# One root ledger defines the boundary of a problem domain.
+itree init owner/repo "Ledger: Project Alpha"
+
+# Grouping issues order work; work units are PR-sized leaves under them.
+itree new owner/repo "Milestone: v1" --under owner/repo#1
+itree new owner/repo "Editor preview sync" --under owner/repo#2
+itree new owner/repo "Export command proof" --under owner/repo#2
+
+# Ask for the next work unit; implement and prove it through its PR.
 itree next owner/repo
-# => #3: Implement editor preview sync
+# => #3 Editor preview sync
 
-# Close the work-unit issue when its acceptance criteria are satisfied
+# Close it when its acceptance criteria are satisfied, then repeat.
 itree close owner/repo#3 --reason completed
-
-# Find the next work-unit issue
 itree next owner/repo
-# => #4: Add export command proof
-
-# Check tree health and get the exact next commands
-itree doctor owner/repo
+# => #4 Export command proof
 ```
 
-## Conceptual Model
+## Conceptual model
 
-### Sub-Issue Trees
-
-GitHub has a native feature called **sub-issues** — you can attach an issue as a child of another issue.
-`itree` takes this flat parent-child relationship and builds a full **rooted ordered tree** on top of it:
+GitHub has a native **sub-issue** feature: you attach an issue as a child of another.
+`itree` reads that flat parent-child relation and builds a **rooted ordered tree** on top of it:
 
 ```
-#1 Ledger: Project Alpha (open)          ← root of the traversal domain
+#1 Ledger: Project Alpha (open)          ← root ledger, anchors the domain
 ├── #2 Milestone: v1 (open)              ← grouping issue
-│   ├── #3 Editor preview sync (open)    ← work-unit issue
-│   └── #4 Export command proof (open)   ← work-unit issue
+│   ├── #3 Editor preview sync (open)    ← work-unit issue (a leaf)
+│   └── #4 Export command proof (open)   ← work-unit issue (a leaf)
 ├── #5 Backlog (open)                    ← grouping issue
 │   └── #6 PDF import workflow (open)    ← work-unit issue
 └── #7 Old experiment (closed)
 ```
 
-Issue #3 can contain its own implementation checklist:
+A work-unit issue carries its own plan; sub-tasks never become child issues:
 
 ```markdown
 ## Acceptance Criteria
@@ -61,142 +92,90 @@ Issue #3 can contain its own implementation checklist:
 - [ ] Post the proof result as an issue comment.
 ```
 
-Ordinary implementation tasks stay inside the work-unit issue body or issue comments.
-They are not separate GitHub issues, and the PR is not the planning surface.
+### Key terms
 
-### Key Terms
+- **Root ledger**: the single parentless issue anchoring the repo's work tree (titled `Ledger: ...`). A grouping issue, not a work unit.
+- **Grouping issue**: a ledger, milestone, backlog, roadmap, or phase issue used to order work units.
+- **Work-unit issue**: a coherent review/proof boundary implemented through one PR. Always a leaf.
+- **Sub-issue**: an issue attached under another — legal only under a grouping issue, only for a separate PR-sized work unit.
+- **Preorder traversal**: depth-first, left-to-right; `next` uses it to find the next open work unit.
 
-- **Root issue**: The single parentless issue that anchors the repository's work tree.
-- **Grouping issue**: A ledger, milestone, backlog, roadmap, or phase issue used to order work units.
-- **Work-unit issue**: A coherent review/proof boundary that can be implemented and reviewed through one PR.
-- **Sub-issue**: An issue attached as a child of another issue.
-  Use this only under grouping issues, and only for separate PR-sized work units, not for ordinary implementation tasks.
-- **Preorder traversal**: Depth-first, left-to-right traversal of the tree.
-  `next` uses this to find the next work-unit issue.
-- **Tree violation**: A structural problem in the tree (e.g., duplicate reachable issues, open internal nodes with no open descendants).
+### Reference format
 
-### Reference Format
-
-Commands that act on a specific issue accept issue references in the format `OWNER/REPO#NUMBER`:
+Issue references are `OWNER/REPO#NUMBER`; repository references are `OWNER/REPO`:
 
 ```
 owner/project-alpha#42
-```
-
-Repository references use `OWNER/REPO`:
-
-```
 owner/project-alpha
 ```
 
 ## Commands
 
-### Structural Operations
-
-Build and modify the tree:
+### Structural
 
 | Command | Description | Example |
 | --- | --- | --- |
-| `init` | Create a root issue | `itree init owner/repo "Title"` |
+| `init` | Create the root ledger issue | `itree init owner/repo "Ledger: ..."` |
 | `new` | File an issue with guided placement | `itree new owner/repo "Title" --under owner/repo#2` |
 | `absorb` | Merge an issue into a work unit, verbatim | `itree absorb owner/repo#31 --into owner/repo#14` |
-| `triage` | Repair orphans one at a time | `itree triage owner/repo` |
 | `attach` | Attach an existing issue | `itree attach owner/repo#1 owner/repo#5` |
 | `detach` | Detach from parent | `itree detach owner/repo#1 owner/repo#5` |
-| `move` | Reparent an issue | `itree move owner/repo#5 --under owner/repo#3` |
+| `move` | Reparent / reorder an issue | `itree move owner/repo#5 --under owner/repo#3` |
 
-### Query Operations
-
-Read the tree structure:
+### Query
 
 | Command | Description | Example |
 | --- | --- | --- |
 | `children` | List children | `itree children owner/repo#1` |
-| `tree` | Dump full tree as JSON | `itree tree owner/repo` |
-| `next` | Find next open work-unit issue | `itree next owner/repo` |
-| `path` | Find path to an issue | `itree path owner/repo#5` |
+| `tree` | Render the ordered tree (ASCII; `--json`) | `itree tree owner/repo` |
+| `next` | Find the next open work-unit issue | `itree next owner/repo` |
+| `path` | Find the path from root to an issue | `itree path owner/repo#5` |
+
+### Diagnostic
+
+| Command | Description | Example |
+| --- | --- | --- |
+| `triage` | Repair orphans one at a time | `itree triage owner/repo` |
 | `doctor` | Check tree health and invariants | `itree doctor owner/repo` |
 | `scan` | Account-wide health, one line per repo | `itree scan owner` |
 
-### Terminal Operations
-
-Close issues:
+### Terminal
 
 | Command | Description | Example |
 | --- | --- | --- |
 | `close` | Close an issue | `itree close owner/repo#5 --reason completed` |
 
-## Workflow
+### Ordering siblings
 
-The typical workflow follows a **work-unit traversal** pattern:
-
-1. **Organize**: Create one root ledger and attach grouping or work-unit issues beneath it.
-2. **Scope**: Put acceptance criteria, proof obligations, and implementation checklists inside each work-unit issue.
-3. **Traverse**: Use `next` to find the next open work-unit issue in preorder.
-4. **Work**: Implement and prove the work-unit issue through its PR.
-5. **Close**: Mark the work-unit issue as completed with `close`.
-6. **Repeat**: Run `next` again to find the next work unit.
-7. **Validate**: Use `validate` to check for structural problems (duplicates, dead-end nodes).
-
-Create child issues only under organizational grouping issues, and only when the child is itself a separate PR-sized work unit: independently valuable, independently reviewable, and carrying its own acceptance/proof boundary.
-Do not break a work-unit issue into child issues for sub-tasks, sub-stories, proof burdens, or implementation checklists.
-Those details belong in the issue body or comments.
-
-### Ordering Siblings
-
-Use `--before` and `--after` with the `move` command to prioritize siblings:
+Use `--before` and `--after` with `move` to prioritize siblings:
 
 ```bash
-# Place issue #5 before issue #3 (higher priority)
-itree move owner/repo#5 --under owner/repo#1 --before owner/repo#3
-
-# Place issue #5 after issue #3 (lower priority)
-itree move owner/repo#5 --under owner/repo#1 --after owner/repo#3
+itree move owner/repo#5 --under owner/repo#1 --before owner/repo#3   # higher priority
+itree move owner/repo#5 --under owner/repo#1 --after  owner/repo#3   # lower priority
 ```
 
-### JSON Output
+### JSON output
 
-Query commands support `--json` for machine-readable output:
+Query and diagnostic commands accept `--json` for machine-readable output:
 
 ```bash
 itree children owner/repo#1 --json
 itree next owner/repo --json
 itree doctor owner/repo --json
-itree tree owner/repo  # always JSON
+itree tree owner/repo --json
 ```
 
 ## Validation
 
 `itree doctor` is the single validator.
-It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, and missing acceptance criteria.
+It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, and missing acceptance criteria.
 
-Use `itree doctor OWNER/REPO --explain CODE` for the meaning and repair routes of any finding code.
-
-## Installation
-
-### Run from GitHub
-
-```bash
-uvx --from git+https://github.com/dzackgarza/itree itree --help
-```
-
-### Run from a local checkout
-
-```bash
-git clone git@github.com:dzackgarza/itree.git
-cd itree
-uv run --with-editable . itree --help
-```
+Use `itree doctor owner/repo --explain CODE` for the meaning and repair routes of any finding code.
 
 ## Development
 
-The project uses:
-
-- **cyclopts** for CLI argument parsing
-- **pydantic** for data validation and models
-- **GitHub CLI (`gh`)** for API communication (requires `gh` authenticated)
-
-### Running Tests
+The project uses **cyclopts** for CLI parsing, **pydantic** for models, and the **GitHub CLI (`gh`)** for API access.
+Run the local quality gate with:
 
 ```bash
 just test
