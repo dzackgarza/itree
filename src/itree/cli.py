@@ -9,6 +9,7 @@
 # ///
 from __future__ import annotations
 
+import importlib.resources
 import json
 import sys
 from collections.abc import Sequence
@@ -46,32 +47,19 @@ from .validate import (
 )
 
 # Core ontology and help text
-CORE_HELP_TEXT = """itree maintains a deterministic GitHub issue tree.
+CORE_HELP_TEXT = """itree maintains one deterministic GitHub issue tree per repo
+and names the single next work unit to do.
 
-Desired structure:
+  One repo has exactly one root ledger. Every open work issue is reachable
+  from it. Sub-issue order is traversal order. The next work unit is the
+  first open non-ledger issue in preorder.
 
-  One repository has exactly one root ledger issue.
-  Every open issue that represents planned work must be reachable from that root.
-  The order of GitHub sub-issues is the traversal order.
-  The next work unit is the first open non-ledger issue in preorder.
+  Grouping issues (ledger, milestone, backlog) order work. Work units are
+  leaves: checklists, proof, and status live in their body or comments, not
+  in child issues.
 
-Issue roles:
-
-  root ledger
-    The single issue anchoring the repository's work tree.
-    It is a grouping issue, not a work-unit issue.
-
-  milestone ledger
-    Optional grouping issue under the root.
-    Use it to mirror a GitHub milestone or backlog area.
-    It is not a traversal root.
-
-  work unit
-    A coherent review/proof boundary that normally deserves a PR.
-    Put implementation checklists, status notes, and proof details in the
-    issue body or issue comments.
-    Do not create child issues under a work unit. Use child issues only under
-    organizational grouping issues, and only for separate PR-sized work units.
+Run `itree help model` for the full organization model, repo state machine,
+guard rails, and proportionality doctrine.
 """
 
 app = App(
@@ -148,34 +136,14 @@ def get_repo_and_issue_or_root(target: str) -> tuple[RepoRef, int]:
 
 @help_app.command(name="model")
 def help_model() -> None:
-    """Full explanation of root ledger, grouping issues, work units, preorder
-    traversal, and PR policy.
+    """Print the full organization model: ontology, repo state machine, the four
+    guard rails, and proportionality doctrine (the packaged WORKFLOWS.md).
     """
-    print("""Mental model:
-  Repository issue structure = one rooted ordered tree.
-
-  Root ledger issue
-    Milestone ledger or backlog ledger
-      Work-unit issue
-      Work-unit issue
-
-  Inside a work-unit issue:
-    Acceptance criteria
-    Proof obligations
-    Implementation checklist
-    Status comments
-
-  Individual implementation tasks stay inside the work-unit issue body,
-  or issue comments. Do not create GitHub issues for ordinary implementation tasks.
-
-Traversal:
-  next(root) = first open work-unit issue in preorder.
-
-Review policy:
-  PRs correspond to work-unit issues. Child issues are justified only under
-  organizational grouping issues, and only when they are separate PR-sized work
-  units with independent acceptance/proof boundaries.
-""")
+    # Read lazily and as UTF-8: the doc holds non-ASCII (e.g. U+2026), and the
+    # read stays inside this command so a packaging regression degrades only
+    # `help model`, never every import of itree.cli.
+    doc = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
+    print(doc, end="")
 
 
 @app.command(group="Structural")

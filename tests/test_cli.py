@@ -199,6 +199,15 @@ class TestCLICommandStructure:
         assert "root" not in signature(doctor).parameters
         assert "root" not in signature(path).parameters
 
+    def test_help_model_prints_packaged_workflows_verbatim(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """`itree help model` output equals the packaged WORKFLOWS.md byte-for-byte."""
+        import importlib.resources
+
+        cli.help_model()
+        out = capsys.readouterr().out
+        expected = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
+        assert out == expected
+
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""
         result = subprocess.run(

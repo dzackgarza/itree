@@ -80,11 +80,7 @@ def list_repos(owner: str, *, timeout: int = 60) -> tuple[RepoRef, ...]:
     repos: list[dict] = json.loads(proc.stdout)
     # gh returns issues=null when a repo has issues disabled; such a repo has
     # no open issues to scan, so skip it rather than crash on subscripting None.
-    return tuple(
-        RepoRef(owner=owner, repo=r["name"])
-        for r in repos
-        if r["issues"] is not None and r["issues"]["totalCount"] > 0
-    )
+    return tuple(RepoRef(owner=owner, repo=r["name"]) for r in repos if r["issues"] is not None and r["issues"]["totalCount"] > 0)
 
 
 def _graphql_error_text(payload: dict) -> str:
