@@ -205,7 +205,7 @@ class TestCLICommandStructure:
 
         cli.help_model()
         out = capsys.readouterr().out
-        expected = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text()
+        expected = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
         assert out == expected
 
     def test_move_cli_rejects_both_before_and_after(self) -> None:

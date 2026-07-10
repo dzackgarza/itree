@@ -134,15 +134,16 @@ def get_repo_and_issue_or_root(target: str) -> tuple[RepoRef, int]:
     return get_repo_root(target)
 
 
-WORKFLOWS_DOC = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text()
-
-
 @help_app.command(name="model")
 def help_model() -> None:
     """Print the full organization model: ontology, repo state machine, the four
     guard rails, and proportionality doctrine (the packaged WORKFLOWS.md).
     """
-    print(WORKFLOWS_DOC, end="")
+    # Read lazily and as UTF-8: the doc holds non-ASCII (e.g. U+2026), and the
+    # read stays inside this command so a packaging regression degrades only
+    # `help model`, never every import of itree.cli.
+    doc = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
+    print(doc, end="")
 
 
 @app.command(group="Structural")
