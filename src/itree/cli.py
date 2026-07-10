@@ -750,7 +750,7 @@ def doctor(
         print(f"GitHub/auth/API failure: {e}")
         sys.exit(3)
 
-    report = generate_doctor_report(dag)
+    report = generate_doctor_report(dag, deferral_label=load_config().deferral_label)
 
     if as_json:
         print(report.model_dump_json(indent=2))

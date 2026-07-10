@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
@@ -126,6 +126,15 @@ class GithubIssue(BaseModel):
     state_reason: str | None = None
     milestone: Milestone | None = None
     pull_request: dict | None = None
+    labels: tuple[str, ...] = ()
+
+    @field_validator("labels", mode="before")
+    @classmethod
+    def _normalize_labels(cls, value: Any) -> tuple[str, ...]:
+        """Accept REST (``[{"name": ...}]``) and plain-string label shapes alike."""
+        if value is None:
+            return ()
+        return tuple(item["name"] if isinstance(item, dict) else item for item in value)
 
     @classmethod
     def from_graphql(cls, node: dict) -> GithubIssue:
@@ -137,6 +146,7 @@ class GithubIssue(BaseModel):
         """
         milestone = node.get("milestone")
         state_reason = node.get("stateReason")
+        label_nodes = node["labels"]["nodes"]
         return cls(
             id=node["databaseId"],
             number=node["number"],
@@ -146,6 +156,7 @@ class GithubIssue(BaseModel):
             body=node.get("body") or None,
             state_reason=state_reason.lower() if state_reason else None,
             milestone=Milestone(title=milestone["title"]) if milestone else None,
+            labels=tuple(label["name"] for label in label_nodes),
         )
 
     @property

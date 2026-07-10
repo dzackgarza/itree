@@ -21,6 +21,7 @@ def _issue(
     state: IssueState = IssueState.open,
     body: str | None = None,
     milestone: str | None = None,
+    labels: tuple[str, ...] = (),
 ) -> GithubIssue:
     m = Milestone(title=milestone) if milestone else None
     return GithubIssue(
@@ -31,6 +32,7 @@ def _issue(
         html_url=f"https://github.com/t/t/issues/{number}",
         body=body,
         milestone=m,
+        labels=labels,
     )
 
 
@@ -295,6 +297,91 @@ def test_doctor_report_root_never_flagged_dead_grouping() -> None:
         children_of={1: (2,)},
     )
     report = generate_doctor_report(dag)
+    assert all(f.code != "W030" for f in report.findings)
+
+
+def test_doctor_deferred_grouping_suppresses_w030() -> None:
+    """A grouping labeled 'deferred' is an intentional long-horizon shelf, not a dead one."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: far future", labels=("deferred",)),
+            3: _issue(
+                3,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 3), 2: ()},
+    )
+    report = generate_doctor_report(dag)
+    assert all(f.code != "W030" for f in report.findings)
+
+
+def test_doctor_deferred_grouping_surfaces_info_finding() -> None:
+    """Deferred shelves stay visible via a non-warning I010 line that names them."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: far future", labels=("deferred",)),
+            3: _issue(
+                3,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 3), 2: ()},
+    )
+    report = generate_doctor_report(dag)
+    info = [f for f in report.findings if f.code == "I010"]
+    assert len(info) == 1
+    assert "#2" in info[0].evidence[0]
+    assert info[0].severity == "info"
+    # An info-only deferral must not push the repo out of OK status.
+    assert report.status == "ok"
+
+
+def test_doctor_untagged_empty_grouping_still_warns_alongside_deferred() -> None:
+    """Only the tagged grouping is spared; an untagged empty shelf still warns W030."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: far future", labels=("deferred",)),
+            3: _issue(3, "Milestone: stale shelf"),
+            4: _issue(
+                4,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 3, 4), 2: (), 3: ()},
+    )
+    report = generate_doctor_report(dag)
+    w030 = [f for f in report.findings if f.code == "W030"]
+    assert len(w030) == 1
+    assert "#3" in w030[0].evidence[0]
+    assert all("#2" not in e for e in w030[0].evidence)
+
+
+def test_doctor_deferral_label_is_configurable() -> None:
+    """The sanctioned label name is a knob; a custom label suppresses W030 too."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: far future", labels=("long-horizon",)),
+            3: _issue(
+                3,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 3), 2: ()},
+    )
+    report = generate_doctor_report(dag, deferral_label="long-horizon")
     assert all(f.code != "W030" for f in report.findings)
 
 

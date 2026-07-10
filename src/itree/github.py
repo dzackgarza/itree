@@ -25,6 +25,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         body
         url
         milestone { title }
+        labels(first: 20) { nodes { name } }
         subIssues(first: 100) {
           totalCount
           nodes { number }

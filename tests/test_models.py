@@ -105,6 +105,45 @@ class TestGithubIssue:
         )
         assert issue.is_open is False
 
+    def test_labels_default_empty(self) -> None:
+        """Labels default to an empty tuple when absent."""
+        issue = GithubIssue(
+            id=1,
+            number=1,
+            title="T",
+            state=IssueState.open,
+            html_url="https://github.com/o/r/issues/1",
+        )
+        assert issue.labels == ()
+
+    def test_labels_from_rest_shape(self) -> None:
+        """REST returns labels as objects with a 'name'; the validator flattens them."""
+        issue = GithubIssue.model_validate(
+            {
+                "id": 1,
+                "number": 1,
+                "title": "T",
+                "state": "open",
+                "html_url": "https://github.com/o/r/issues/1",
+                "labels": [{"name": "deferred"}, {"name": "enhancement"}],
+            }
+        )
+        assert issue.labels == ("deferred", "enhancement")
+
+    def test_labels_from_graphql_shape(self) -> None:
+        """from_graphql flattens the nested labels.nodes[].name shape."""
+        issue = GithubIssue.from_graphql(
+            {
+                "databaseId": 1,
+                "number": 1,
+                "title": "T",
+                "state": "OPEN",
+                "url": "https://github.com/o/r/issues/1",
+                "labels": {"nodes": [{"name": "deferred"}]},
+            }
+        )
+        assert issue.labels == ("deferred",)
+
 
 class TestTreeNode:
     """Tests for TreeNode model."""
