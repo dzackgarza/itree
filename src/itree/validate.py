@@ -194,7 +194,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "I010": {
         "title": "deferred_grouping",
         "severity": "info",
-        "meaning": "An intentionally deferred grouping (labeled 'deferred') has no open descendants yet. "
+        "meaning": "An intentionally deferred grouping (carrying the configured deferral label) has no open descendants yet. "
         "It is a long-horizon shelf awaiting breakdown once it becomes the next item, not a stale one.",
         "remediation": [],
     },
@@ -561,7 +561,7 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         deferred_groupings = []
         for node in tree_nodes[1:]:
             if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
-                if deferral_label in node.issue.labels:
+                if deferral_label.casefold() in {label.casefold() for label in node.issue.labels}:
                     deferred_groupings.append(f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown')
                 else:
                     dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')

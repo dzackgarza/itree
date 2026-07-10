@@ -385,6 +385,27 @@ def test_doctor_deferral_label_is_configurable() -> None:
     assert all(f.code != "W030" for f in report.findings)
 
 
+def test_doctor_deferral_label_match_is_case_insensitive() -> None:
+    """GitHub label identity is case-insensitive; a case-variant label still means deferred."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: far future", labels=("Deferred",)),
+            3: _issue(
+                3,
+                "Live work unit",
+                body="## Acceptance Criteria\n- Proven at the boundary.",
+            ),
+        },
+        children_of={1: (2, 3), 2: ()},
+    )
+    report = generate_doctor_report(dag, deferral_label="deferred")
+    codes = {f.code for f in report.findings}
+    assert "I010" in codes
+    assert "W030" not in codes
+
+
 def test_doctor_report_duplicate_reachable_issue() -> None:
     """ERROR E013 is triggered when an issue has multiple parents under the root."""
     dag = RepoDag(
