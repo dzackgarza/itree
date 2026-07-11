@@ -28,12 +28,23 @@ jobs:
           path: ai-review-ci
           persist-credentials: false
 
-      - name: Expose shared CI gate at its declared path
-        run: |
+      - name: Verify and relocate shared CI gate
+        env:
+          SHARED_QC_PIN: 97ee58d535571b792205658930407ecac50f9c7d
+        run: |-
           set -euo pipefail
+          source_path="$GITHUB_WORKSPACE/ai-review-ci"
+          target_path="$RUNNER_TEMP/ai-review-ci"
+          test -d "$source_path"
+          test ! -e "$target_path"
+          test "$(git -C "$source_path" rev-parse HEAD)" = "$SHARED_QC_PIN"
+          mv "$source_path" "$target_path"
+          test ! -e "$source_path"
+          test -d "$target_path"
+          test "$(git -C "$target_path" rev-parse HEAD)" = "$SHARED_QC_PIN"
           test ! -e "$HOME/ai-review-ci"
-          ln --symbolic "$GITHUB_WORKSPACE/ai-review-ci" "$HOME/ai-review-ci"
-
+          ln --symbolic "$target_path" "$HOME/ai-review-ci"
+          test "$(readlink --canonicalize "$HOME/ai-review-ci")" = "$target_path"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
