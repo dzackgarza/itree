@@ -4,10 +4,11 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
+GithubMilestoneNumber = Annotated[int, Field(gt=0)]
 FindingSeverity = Literal["error", "warning", "question", "info"]
 ReportStatus = Literal["ok", "warning", "error"]
 MissingReportRefReason = Literal["no_root_ledger", "no_open_work_unit"]
@@ -110,6 +111,324 @@ class IssueRef(BaseModel):
 class Milestone(BaseModel):
     model_config = ConfigDict(frozen=True)
     title: str
+
+
+class GithubMilestoneState(StrEnum):
+    open = "open"
+    closed = "closed"
+
+
+class MilestoneTitle(RootModel[str]):
+    """One normalized title shared by the GitHub milestone and ledger issue."""
+
+    model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, raw: object) -> object:
+        assert isinstance(raw, str), f"milestone title must be text; found type={type(raw).__name__}; fix the CLI value or GitHub response parser"
+        normalized = raw.strip()
+        assert normalized, "milestone title must contain non-whitespace text; fix the CLI title"
+        return normalized
+
+    @classmethod
+    def parse(cls, raw: str) -> MilestoneTitle:
+        return cls.model_validate(raw)
+
+    @property
+    def value(self) -> str:
+        return self.root
+
+    @property
+    def ledger_title(self) -> str:
+        return f"Milestone: {self.root}"
+
+
+class GithubMilestone(BaseModel):
+    """Typed subset of the GitHub milestone REST response."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    number: GithubMilestoneNumber
+    title: MilestoneTitle
+    state: GithubMilestoneState
+    html_url: str
+
+
+class WorkUnitPlacement(StrEnum):
+    attach = "attach"
+    replace_parent = "replace_parent"
+
+
+class ParentlessPriorPlacement(BaseModel):
+    """A work unit that had no parent before milestone orchestration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal[WorkUnitPlacement.attach]
+
+
+class ParentedPriorPlacement(BaseModel):
+    """A work unit's complete prior position under an existing parent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal[WorkUnitPlacement.replace_parent]
+    parent_number: IssueNumber
+    position: Annotated[int, Field(ge=0)]
+
+
+PriorWorkUnitPlacement = Annotated[
+    ParentlessPriorPlacement | ParentedPriorPlacement,
+    Field(discriminator="kind"),
+]
+
+
+class UnassignedPriorMilestone(BaseModel):
+    """A work unit that had no milestone assignment before orchestration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["unassigned"]
+
+
+class AssignedPriorMilestone(BaseModel):
+    """A work unit's complete prior milestone assignment."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["assigned"]
+    title: str = Field(min_length=1)
+
+
+PriorMilestone = Annotated[
+    UnassignedPriorMilestone | AssignedPriorMilestone,
+    Field(discriminator="kind"),
+]
+
+
+class MilestoneEffectKind(StrEnum):
+    create_milestone = "create_milestone"
+    create_ledger = "create_ledger"
+    attach_ledger = "attach_ledger"
+    assign_ledger = "assign_ledger"
+    attach_work_unit = "attach_work_unit"
+    replace_work_unit_parent = "replace_work_unit_parent"
+    assign_work_unit = "assign_work_unit"
+
+
+class MilestoneEffect(BaseModel):
+    """A remote milestone operation without an existing work-unit target."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: MilestoneEffectKind
+
+    @model_validator(mode="after")
+    def _coherent_kind(self) -> Self:
+        assert self.kind in (
+            MilestoneEffectKind.create_milestone,
+            MilestoneEffectKind.create_ledger,
+            MilestoneEffectKind.attach_ledger,
+            MilestoneEffectKind.assign_ledger,
+        ), f"untargeted milestone effect must not name a work unit; found={self.kind}; fix preflight"
+        return self
+
+
+class WorkUnitMilestoneEffect(MilestoneEffect):
+    """A remote milestone operation targeting one preflighted work unit."""
+
+    ref: IssueRef
+
+    @model_validator(mode="after")
+    def _coherent_kind(self) -> Self:
+        assert self.kind in (
+            MilestoneEffectKind.attach_work_unit,
+            MilestoneEffectKind.replace_work_unit_parent,
+            MilestoneEffectKind.assign_work_unit,
+        ), f"work-unit milestone effect must name a targeted operation; found={self.kind}; ref={self.ref.slug}; fix preflight"
+        return self
+
+
+PlannedMilestoneEffect = WorkUnitMilestoneEffect | MilestoneEffect
+
+
+class PlacementInquiry(BaseModel):
+    """Non-write-capable milestone intent produced when placement is omitted."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_ref: RepoRef
+    title: MilestoneTitle
+
+
+class CreateMilestoneRequest(BaseModel):
+    """Write-capable milestone intent with an explicit grouping parent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo_ref: RepoRef
+    title: MilestoneTitle
+    parent: IssueRef
+    body: str
+    work_units: tuple[IssueRef, ...] = ()
+
+    @model_validator(mode="after")
+    def _same_repository(self) -> Self:
+        refs = (self.parent, *self.work_units)
+        assert all(ref.repo_ref == self.repo_ref for ref in refs), (
+            f"milestone parent and work units must match the target repository; repo={self.repo_ref.slug}; refs={[ref.slug for ref in refs]}; fix the CLI references"
+        )
+        return self
+
+
+class ExistingWorkUnit(BaseModel):
+    """Preflighted work unit with total recovery-relevant prior state."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ref: IssueRef
+    issue_id: GithubIssueId
+    prior_placement: PriorWorkUnitPlacement
+    prior_milestone: PriorMilestone
+
+    @property
+    def placement(self) -> WorkUnitPlacement:
+        return self.prior_placement.kind
+
+
+class MilestonePreflightErrorKind(StrEnum):
+    repository_malformed = "repository_malformed"
+    parent_invalid = "parent_invalid"
+    milestone_title_collision = "milestone_title_collision"
+    ledger_title_collision = "ledger_title_collision"
+    duplicate_work_unit = "duplicate_work_unit"
+    invalid_work_unit = "invalid_work_unit"
+    cycle_risk = "cycle_risk"
+
+
+class MilestonePreflightRejected(BaseModel):
+    """Typed terminal rejection produced before any remote write."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: MilestonePreflightErrorKind
+    references: tuple[str, ...]
+
+
+class ValidatedMilestonePlan(BaseModel):
+    """A completely preflighted request; only this type may reach execution."""
+
+    model_config = ConfigDict(frozen=True)
+
+    request: CreateMilestoneRequest
+    parent_issue: GithubIssue
+    work_units: tuple[ExistingWorkUnit, ...]
+    effects: tuple[PlannedMilestoneEffect, ...]
+
+
+class GithubRejectedOperation(BaseModel):
+    """GitHub explicitly rejected the current mutation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["rejected"] = "rejected"
+    effect: PlannedMilestoneEffect
+    detail: str = Field(min_length=1)
+
+
+class GithubIndeterminateOperation(BaseModel):
+    """A mutation was invoked but its remote outcome cannot be known locally."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["indeterminate"] = "indeterminate"
+    effect: PlannedMilestoneEffect
+    detail: str = Field(min_length=1)
+
+
+RemoteOperationFailure = GithubRejectedOperation | GithubIndeterminateOperation
+
+
+class MilestoneExecutionProgress(BaseModel):
+    """Immutable cursor over confirmed, current, and untouched effects."""
+
+    model_config = ConfigDict(frozen=True)
+
+    effects: tuple[PlannedMilestoneEffect, ...]
+    confirmed: tuple[PlannedMilestoneEffect, ...]
+    cursor: int
+    work_units: tuple[ExistingWorkUnit, ...] = ()
+
+    @model_validator(mode="after")
+    def _coherent_cursor(self) -> Self:
+        assert self.effects, "milestone execution requires at least one planned effect; fix preflight"
+        assert 0 <= self.cursor < len(self.effects), (
+            f"milestone execution cursor must identify the current effect; cursor={self.cursor}; effect_count={len(self.effects)}; fix orchestration"
+        )
+        assert self.confirmed == self.effects[: self.cursor], (
+            f"confirmed effects must equal the plan prefix; cursor={self.cursor}; confirmed={self.confirmed}; effects={self.effects}; fix orchestration"
+        )
+        return self
+
+    @classmethod
+    def start(
+        cls,
+        effects: tuple[PlannedMilestoneEffect, ...],
+        work_units: tuple[ExistingWorkUnit, ...] = (),
+    ) -> MilestoneExecutionProgress:
+        return cls(effects=effects, confirmed=(), cursor=0, work_units=work_units)
+
+    @property
+    def current(self) -> PlannedMilestoneEffect:
+        return self.effects[self.cursor]
+
+    @property
+    def untouched(self) -> tuple[PlannedMilestoneEffect, ...]:
+        return self.effects[self.cursor + 1 :]
+
+    def confirm(self, effect: PlannedMilestoneEffect) -> MilestoneExecutionProgress:
+        assert effect == self.current, f"confirmed effect must be the current planned effect; current={self.current}; found={effect}; fix orchestration ordering"
+        next_cursor = self.cursor + 1
+        assert next_cursor < len(self.effects), (
+            f"final effect completes execution and must produce success instead of another progress cursor; effect={effect}; fix orchestration completion"
+        )
+        return MilestoneExecutionProgress(
+            effects=self.effects,
+            confirmed=(*self.confirmed, effect),
+            cursor=next_cursor,
+            work_units=self.work_units,
+        )
+
+    def stop(self, outcome: RemoteOperationFailure) -> MilestoneCreationFailed:
+        assert outcome.effect == self.current, (
+            f"failure outcome must describe the current planned effect; current={self.current}; outcome={outcome}; fix GitHub adapter propagation"
+        )
+        return MilestoneCreationFailed(progress=self, outcome=outcome)
+
+
+class MilestoneCreationFailed(BaseModel):
+    """Terminal non-success after mutation begins."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["failed"] = "failed"
+    progress: MilestoneExecutionProgress
+    outcome: RemoteOperationFailure
+
+
+class MilestoneCreationSucceeded(BaseModel):
+    """Terminal success after every planned effect is confirmed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["succeeded"] = "succeeded"
+    milestone: GithubMilestone
+    ledger: GithubIssue
+    work_units: tuple[ExistingWorkUnit, ...]
+
+
+MilestoneCreationResult = MilestoneCreationSucceeded | MilestoneCreationFailed
 
 
 class GithubIssue(BaseModel):

@@ -17,11 +17,16 @@ def test_nonzero_gh_without_http_status_is_indeterminate() -> None:
 
     with pytest.raises(GithubIndeterminateError) as raised:
         api._run_mutation_command(
-            "INVALID METHOD",
+            [
+                "gh",
+                "api",
+                "--include",
+                "-X",
+                "INVALID METHOD",
+                "rate_limit",
+            ],
             "rate_limit",
             effect,
-            raw_fields={},
-            typed_fields={},
             timeout=30,
         )
 

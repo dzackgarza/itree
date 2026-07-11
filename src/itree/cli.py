@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.resources
 import json
+import shlex
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -22,17 +23,28 @@ from cyclopts import App, Parameter
 
 from .github import GithubApi, list_repos
 from .metrics import load_config, measure_code_size, structure_questions
+from .milestone import execute_milestone, preflight_milestone
 from .models import (
+    AssignedPriorMilestone,
     AttachRequest,
+    CreateMilestoneRequest,
     DetachRequest,
     FindingSeverity,
+    GithubIssue,
     IssueCloseReason,
     IssueRef,
+    MilestoneCreationFailed,
+    MilestonePreflightRejected,
+    MilestoneTitle,
     MoveRequest,
+    ParentedPriorPlacement,
+    PlacementInquiry,
+    PlannedMilestoneEffect,
     RepoDag,
     RepoHealth,
     RepoRef,
     TreeNode,
+    WorkUnitMilestoneEffect,
 )
 from .render import prune_closed, render_scan, render_tree, shape_summary
 from .traversal import build_dag
@@ -226,6 +238,107 @@ def print_placement_menu(slug: str, title: str, tree_node: TreeNode) -> None:
     print(f'  itree new {slug} "{title}" --under {slug}#{grouping_number} --body "..."')
 
 
+def reachable_issue_numbers(dag: RepoDag, root_number: int) -> set[int]:
+    """Collect one repository root's reachable issue numbers without recursion."""
+    reachable: set[int] = set()
+    pending = [root_number]
+    while pending:
+        number = pending.pop()
+        if number in reachable:
+            continue
+        reachable.add(number)
+        pending.extend(reversed(dag.children_of[number]))
+    return reachable
+
+
+def issue_lines(issues: Sequence[GithubIssue]) -> str:
+    """Render numbered issues for non-mutating milestone placement guidance."""
+    return "\n".join(f"  #{issue.number} {issue.title}" for issue in issues) if issues else "  (none)"
+
+
+def print_milestone_placement(
+    inquiry: PlacementInquiry,
+    dag: RepoDag,
+    body: str,
+    body_file: str | None,
+    issues: Sequence[str],
+) -> None:
+    """Render the required, write-incapable response when ``--under`` is absent."""
+    roots = tuple(issue for issue in dag.roots if issue.is_open and is_root_ledger(issue.title))
+    if len(roots) != 1:
+        print("Refusing before mutation: the repository does not have one open root ledger.")
+        print(issue_lines(roots))
+        sys.exit(2)
+
+    reachable = reachable_issue_numbers(dag, roots[0].number)
+    milestone_ledgers = tuple(
+        issue for number, issue in sorted(dag.issues.items()) if number in reachable and issue.is_open and issue.title.casefold().startswith("milestone:")
+    )
+    grouping_targets = tuple(issue for number, issue in sorted(dag.issues.items()) if number in reachable and issue.is_open and is_grouping_issue(issue.title))
+
+    print("Nothing was created. --under is required before milestone mutation.\n")
+    print("Existing milestone ledgers:")
+    print(issue_lines(milestone_ledgers))
+    print("\nValid grouping targets:")
+    print(issue_lines(grouping_targets))
+
+    target = grouping_targets[0]
+    command = [
+        "itree",
+        "milestone",
+        inquiry.repo_ref.slug,
+        inquiry.title.value,
+        "--under",
+        f"{inquiry.repo_ref.slug}#{target.number}",
+    ]
+    if body_file is not None:
+        command.extend(("--body-file", body_file))
+    elif body:
+        command.extend(("--body", body))
+    if issues:
+        command.extend(("--issues", *issues))
+    print("\nRun with the intended grouping target:")
+    print(f"  {shlex.join(command)}")
+
+
+def describe_milestone_effect(effect: PlannedMilestoneEffect) -> str:
+    """Render one closed effect variant without erasing its target."""
+    if isinstance(effect, WorkUnitMilestoneEffect):
+        return f"{effect.kind.value} {effect.ref.slug}"
+    return effect.kind.value
+
+
+def print_milestone_failure(failure: MilestoneCreationFailed) -> None:
+    """Report typed partial progress without implying rollback or completion."""
+    print(f"Milestone creation stopped: outcome={failure.outcome.kind}")
+    print(f"  detail: {failure.outcome.detail}")
+    print("  confirmed complete:")
+    if failure.progress.confirmed:
+        for effect in failure.progress.confirmed:
+            print(f"    {describe_milestone_effect(effect)}")
+    else:
+        print("    (none)")
+    print("  current operation:")
+    print(f"    {describe_milestone_effect(failure.progress.current)}")
+    print("  confirmed not attempted:")
+    if failure.progress.untouched:
+        for effect in failure.progress.untouched:
+            print(f"    {describe_milestone_effect(effect)}")
+    else:
+        print("    (none)")
+    print("  preflight work-unit state:")
+    if failure.progress.work_units:
+        for work_unit in failure.progress.work_units:
+            prior_placement = work_unit.prior_placement
+            parent = f"parent=#{prior_placement.parent_number} position={prior_placement.position}" if isinstance(prior_placement, ParentedPriorPlacement) else "parentless"
+            prior_milestone = work_unit.prior_milestone
+            milestone = f"assigned title={prior_milestone.title!r}" if isinstance(prior_milestone, AssignedPriorMilestone) else "unassigned"
+            print(f"    {work_unit.ref.slug} {parent} milestone={milestone}")
+    else:
+        print("    (none)")
+    print("Recovery: reread the live GitHub milestone, issue tree, and assignments before acting.")
+
+
 @app.command(group="Structural")
 def new(
     target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N")],
@@ -284,6 +397,83 @@ def new(
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(3)
+
+
+@app.command(group="Structural")
+def milestone(
+    repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
+    title: Annotated[str, Parameter(help="Shared GitHub milestone and ledger title")],
+    *,
+    under: Annotated[
+        str | None,
+        Parameter(help="Open grouping parent as OWNER/REPO#N"),
+    ] = None,
+    body: Annotated[str, Parameter(help="Milestone ledger body in Markdown")] = "",
+    body_file: Annotated[
+        str | None,
+        Parameter(help="Read the milestone ledger body from a file"),
+    ] = None,
+    issues: Annotated[
+        list[str] | None,
+        Parameter(
+            help="Ordered work-unit references as OWNER/REPO#N",
+            consume_multiple=True,
+            allow_repeating=False,
+        ),
+    ] = None,
+) -> None:
+    """Create a GitHub Milestone and its issue-tree ledger.
+
+    Without --under this creates nothing and prints existing milestone
+    ledgers, valid grouping targets, and an exact command with placement.
+    With placement supplied, one complete preflight precedes the ordered
+    milestone, ledger, parentage, and assignment writes. A rejected or
+    indeterminate write stops the untouched suffix without rollback.
+
+    Example:
+        $ itree milestone owner/project-alpha "release 2" \\
+            --under owner/project-alpha#2 \\
+            --issues owner/project-alpha#5 owner/project-alpha#7
+        owner/project-alpha#8 milestone=3
+    """
+    inquiry = PlacementInquiry(
+        repo_ref=parse_repo(repo),
+        title=MilestoneTitle.parse(title),
+    )
+    ordered_issue_arguments = tuple(issues) if issues is not None else ()
+    api = GithubApi.from_repo_ref(inquiry.repo_ref)
+    dag = build_dag(inquiry.repo_ref, api=api)
+
+    if under is None:
+        print_milestone_placement(
+            inquiry,
+            dag,
+            body,
+            body_file,
+            ordered_issue_arguments,
+        )
+        sys.exit(1)
+
+    request = CreateMilestoneRequest(
+        repo_ref=inquiry.repo_ref,
+        title=inquiry.title,
+        parent=parse_ref(under),
+        body=read_body(body, body_file),
+        work_units=tuple(parse_ref(raw) for raw in ordered_issue_arguments),
+    )
+    preflight = preflight_milestone(request, dag, api.list_milestones())
+    if isinstance(preflight, MilestonePreflightRejected):
+        print(f"Refusing before mutation: {preflight.kind.value}")
+        for reference in preflight.references:
+            print(f"  {reference}")
+        sys.exit(2)
+
+    result = execute_milestone(preflight, api)
+    if isinstance(result, MilestoneCreationFailed):
+        print_milestone_failure(result)
+        sys.exit(3)
+
+    print(f"{request.repo_ref.slug}#{result.ledger.number} milestone={result.milestone.number}")
 
 
 @app.command(group="Structural")

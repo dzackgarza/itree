@@ -113,6 +113,35 @@ $ itree close owner/repo#3 --reason completed
 owner/repo#3
 ```
 
+## Milestone orchestration
+
+A release has two owners: a native GitHub Milestone owns release grouping, while its `Milestone: TITLE` grouping issue owns traversal order.
+Create both through one command:
+
+```
+$ itree milestone owner/repo "v1" \
+    --under owner/repo#1 \
+    --issues owner/repo#8 owner/repo#13
+owner/repo#21 milestone=4
+```
+
+Placement is mandatory.
+Without `--under`, the command creates nothing, lists existing milestone ledgers and valid open grouping targets, prints an exact command with placement, and exits nonzero.
+
+With placement supplied, the command fetches the full tree and all open or closed GitHub Milestones before writing.
+It rejects an invalid grouping parent, malformed tree state, an exact milestone or `Milestone: TITLE` collision, duplicate or invalid work-unit leaves, and cycle risks.
+A successful preflight fixes this effect order:
+
+1. Create the GitHub Milestone.
+2. Create `Milestone: TITLE`, attach it beneath `PARENT`, and assign the milestone.
+3. In CLI order, attach each parentless supplied work unit or replace the parent of each parented unit, then assign the milestone.
+
+GitHub has no cross-resource transaction for these operations.
+After mutation starts, `itree` stops at the first explicit rejection or indeterminate timeout, interruption, or unusable response.
+It does not roll back, compensate, retry, silently reuse an object, or attempt the remaining suffix.
+The error identifies the confirmed prefix, current outcome, untouched suffix, and each work unit's preflight-recorded parent, sibling position, and milestone assignment.
+Recovery always begins with a live GitHub and tree reread.
+
 ## Proportionality doctrine
 
 The tree records PR-sized decisions, not task lists.
