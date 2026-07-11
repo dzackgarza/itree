@@ -99,6 +99,8 @@ jobs:
           test -z "$existing_release"
 
       - name: Run CI gate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: just test-ci
 
       - name: Build distribution
