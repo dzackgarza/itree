@@ -133,6 +133,19 @@ def _graphql_error_text(payload: dict) -> str:
     return "; ".join(str(err["message"]) for err in errors)
 
 
+def _graphql_data(document: dict, identity: str) -> dict:
+    """Return the ``data`` envelope of a GraphQL response document.
+
+    A successful GraphQL response carries a top-level ``data`` object; an absent
+    or null ``data`` is a failed/malformed document (typically an ``errors``-only
+    envelope). Assert that envelope invariant once here — dumping the offending
+    document — so callers subscript the guaranteed keys of ``data`` directly.
+    """
+    data = document.get("data")
+    assert isinstance(data, dict), f"gh api graphql: no data envelope for {identity}; document was {document!r}"
+    return data
+
+
 def parse_subissues_pages(raw: str) -> tuple[GithubIssue, ...]:
     """Parse ``--slurp`` sub-issue pages (an array of REST page arrays).
 
@@ -152,7 +165,7 @@ def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
     pages: list[dict] = json.loads(raw)
     nodes: list[dict] = []
     for page in pages:
-        repository = page["data"]["repository"]
+        repository = _graphql_data(page, f"{owner}/{repo}")["repository"]
         if repository is None:
             raise RuntimeError(f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}")
         nodes.extend(repository["issues"]["nodes"])
@@ -166,7 +179,7 @@ def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> int | No
     the reference could not be resolved and fails loudly.
     """
     payload: dict = json.loads(raw)
-    repository = payload["data"]["repository"]
+    repository = _graphql_data(payload, f"{owner}/{repo}#{number}")["repository"]
     if repository is None or repository["issue"] is None:
         raise RuntimeError(f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}")
     parent = repository["issue"]["parent"]

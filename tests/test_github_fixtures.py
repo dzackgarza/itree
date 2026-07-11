@@ -170,6 +170,22 @@ class TestParseIssueParent:
             parse_issue_parent(raw, "o", "r", 999)
         assert "Could not resolve to an issue" in str(exc.value)
 
+    def test_data_absent_envelope_fails_loudly(self) -> None:
+        """An errors-only document (no top-level ``data``) trips the envelope
+        assertion, dumping the document — not a bare KeyError."""
+        raw = json.dumps({"errors": [{"message": "Something went wrong while executing your query."}]})
+        with pytest.raises(AssertionError) as exc:
+            parse_issue_parent(raw, "o", "r", 999)
+        assert "Something went wrong" in str(exc.value)
+
+    def test_data_null_envelope_fails_loudly(self) -> None:
+        """A document whose top-level ``data`` is null trips the envelope
+        assertion, dumping the document — not a bare TypeError."""
+        raw = json.dumps({"data": None, "errors": [{"message": "You do not have permission to view this issue."}]})
+        with pytest.raises(AssertionError) as exc:
+            parse_issue_parent(raw, "o", "r", 999)
+        assert "do not have permission" in str(exc.value)
+
 
 class TestParseRepoGraphPages:
     """parse_repo_graph_pages merges slurped GraphQL pages into issue nodes."""
@@ -196,6 +212,22 @@ class TestParseRepoGraphPages:
         with pytest.raises(RuntimeError) as exc:
             parse_repo_graph_pages(raw, "testowner", "gone")
         assert "Could not resolve to a Repository" in str(exc.value)
+
+    def test_data_absent_envelope_fails_loudly(self) -> None:
+        """A page with no top-level ``data`` (errors-only) trips the envelope
+        assertion, dumping the document — not a bare KeyError."""
+        raw = json.dumps([{"errors": [{"message": "Something went wrong while executing your query."}]}])
+        with pytest.raises(AssertionError) as exc:
+            parse_repo_graph_pages(raw, "testowner", "testrepo")
+        assert "Something went wrong" in str(exc.value)
+
+    def test_data_null_envelope_fails_loudly(self) -> None:
+        """A page whose top-level ``data`` is null trips the envelope assertion,
+        dumping the document — not a bare TypeError."""
+        raw = json.dumps([{"data": None, "errors": [{"message": "API rate limit exceeded."}]}])
+        with pytest.raises(AssertionError) as exc:
+            parse_repo_graph_pages(raw, "testowner", "testrepo")
+        assert "rate limit exceeded" in str(exc.value)
 
     def test_closed_parent_chain_reaches_doctor_e012(self) -> None:
         """End-to-end over the pure transform: the fixture's closed parent with an
