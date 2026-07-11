@@ -1,4 +1,11 @@
-"""Tests using real GitHub API fixtures."""
+"""Tests for the GitHub adapter's pure response parsers plus live boundary proofs.
+
+The adapter splits each call into a ``gh`` invocation and a pure parser
+(``parse_subissues_pages``, ``parse_repo_graph_pages``, ``parse_issue_parent``).
+These proofs feed the parsers real captured JSON shapes, and separate live
+proofs exercise the ``gh`` boundary end to end against the disposable
+integration repo (#24). Nothing is stubbed.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +15,18 @@ from typing import Any
 
 import pytest
 
+from itree.github import (
+    GithubApi,
+    parse_issue_parent,
+    parse_repo_graph_pages,
+    parse_subissues_pages,
+)
 from itree.models import GithubIssue, IssueRef, IssueState, RepoRef
+from itree.traversal import build_dag, dag_from_graph_nodes
+from itree.validate import generate_doctor_report
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+SCRATCH = RepoRef(owner="dzackgarza", repo="itree-e2e-scratch")
 
 
 def load_fixture(name: str) -> dict[str, Any]:
@@ -18,6 +34,10 @@ def load_fixture(name: str) -> dict[str, Any]:
     with open(FIXTURE_DIR / name) as f:
         data: dict[str, Any] = json.load(f)
         return data
+
+
+def _no_rest(number: int) -> tuple[GithubIssue, ...]:
+    raise AssertionError(f"unexpected REST fallback for #{number}")
 
 
 class TestGithubIssueFromFixtures:
@@ -106,148 +126,118 @@ class TestGithubIssueFromFixtures:
         assert isinstance(repo, RepoRef)
 
 
-class TestListSubissuesPagination:
-    """The wide-node fallback must return ALL children, not one REST page (#15)."""
+class TestParseSubissuesPages:
+    """The wide-node fallback parser must return ALL children in order (#15)."""
 
-    CHILDREN = [
-        {
-            "id": 9000 + n,
-            "number": n,
-            "title": f"Child {n}",
-            "state": "open",
-            "html_url": f"https://github.com/testowner/testrepo/issues/{n}",
-        }
-        for n in range(1, 131)
-    ]
+    def test_slurped_pages_flatten_in_order(self) -> None:
+        # Real --slurp shape: an array of REST per-page arrays. 130 children
+        # across a full page of 100 and a remainder of 30.
+        children = [
+            {
+                "id": 9000 + n,
+                "number": n,
+                "title": f"Child {n}",
+                "state": "open",
+                "html_url": f"https://github.com/testowner/testrepo/issues/{n}",
+            }
+            for n in range(1, 131)
+        ]
+        raw = json.dumps([children[:100], children[100:]])
 
-    def _fake_gh(self, cmd: list[str]) -> str:
-        """Behave like gh api: 30 items per page unless --paginate walks them all."""
-        if "--paginate" in cmd:
-            assert "--slurp" in cmd, "paginated array responses need --slurp to stay parseable"
-            assert any("per_page=100" in part for part in cmd), "pagination should request full pages"
-            return json.dumps([self.CHILDREN[:100], self.CHILDREN[100:]])
-        return json.dumps(self.CHILDREN[:30])
-
-    def test_130_child_node_returns_all_children_in_order(self) -> None:
-        from unittest.mock import MagicMock, patch
-
-        from itree.github import GithubApi
-
-        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
-
-        def run(cmd: list[str], path: str, timeout: int) -> MagicMock:
-            proc = MagicMock()
-            proc.stdout = self._fake_gh(cmd)
-            return proc
-
-        with patch.object(GithubApi, "_run_api_command", side_effect=run):
-            children = api.list_subissues(7)
-
-        assert [c.number for c in children] == list(range(1, 131))
+        parsed = parse_subissues_pages(raw)
+        assert [c.number for c in parsed] == list(range(1, 131))
 
 
-class TestGetParentNumber:
-    """GithubApi.get_parent_number parses GraphQL Issue.parent (#15)."""
-
-    @staticmethod
-    def _api_with_payload(payload: dict) -> tuple[Any, Any]:
-        from unittest.mock import MagicMock, patch
-
-        from itree.github import GithubApi
-
-        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
-        proc = MagicMock()
-        proc.stdout = json.dumps(payload)
-        return api, patch.object(GithubApi, "_run_api_command", return_value=proc)
+class TestParseIssueParent:
+    """parse_issue_parent maps the GraphQL Issue.parent response (#15)."""
 
     def test_parented_issue_returns_parent_number(self) -> None:
-        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": {"number": 2}}}}})
-        with patcher:
-            assert api.get_parent_number(15) == 2
+        raw = json.dumps({"data": {"repository": {"issue": {"parent": {"number": 2}}}}})
+        assert parse_issue_parent(raw, "o", "r", 15) == 2
 
     def test_parentless_issue_returns_none(self) -> None:
-        api, patcher = self._api_with_payload({"data": {"repository": {"issue": {"parent": None}}}})
-        with patcher:
-            assert api.get_parent_number(1) is None
+        raw = json.dumps({"data": {"repository": {"issue": {"parent": None}}}})
+        assert parse_issue_parent(raw, "o", "r", 1) is None
 
     def test_unresolvable_issue_fails_loudly(self) -> None:
-        api, patcher = self._api_with_payload(
+        raw = json.dumps(
             {
                 "data": {"repository": {"issue": None}},
                 "errors": [{"message": "Could not resolve to an issue with the number of 999."}],
             }
         )
-        with patcher:
-            with pytest.raises(RuntimeError) as exc:
-                api.get_parent_number(999)
+        with pytest.raises(RuntimeError) as exc:
+            parse_issue_parent(raw, "o", "r", 999)
         assert "Could not resolve to an issue" in str(exc.value)
 
 
-class TestFetchRepoGraph:
-    """Tests for the paginated GraphQL fetch against a captured --slurp payload."""
+class TestParseRepoGraphPages:
+    """parse_repo_graph_pages merges slurped GraphQL pages into issue nodes."""
 
     def test_pages_merge_into_flat_node_tuple(self) -> None:
-        """fetch_repo_graph concatenates issue nodes across slurped pages."""
-        import json as json_module
-        from unittest.mock import MagicMock, patch
-
-        from itree.github import GithubApi
-
         with open(FIXTURE_DIR / "graphql_issues_pages.json") as f:
             raw = f.read()
 
-        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="testrepo"))
-        proc = MagicMock()
-        proc.stdout = raw
-        with patch.object(GithubApi, "_run_api_command", return_value=proc) as run:
-            nodes = api.fetch_repo_graph()
-
+        nodes = parse_repo_graph_pages(raw, "testowner", "testrepo")
         assert [n["number"] for n in nodes] == [1, 2, 3, 4]
-        # The command must be the paginated, slurped GraphQL call.
-        cmd = run.call_args.args[0]
-        assert cmd[:3] == ["gh", "api", "graphql"]
-        assert "--paginate" in cmd and "--slurp" in cmd
         # Sanity: the fixture is real slurp output — an array of page documents.
-        assert isinstance(json_module.loads(raw), list)
+        assert isinstance(json.loads(raw), list)
 
     def test_null_repository_raises_runtime_error_with_api_text(self) -> None:
-        """A missing/inaccessible repo fails loudly with the GraphQL error text, not a traceback (#15)."""
-        from unittest.mock import MagicMock, patch
-
-        from itree.github import GithubApi
-
-        page = {
-            "data": {"repository": None},
-            "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'testowner/gone'."}],
-        }
-        api = GithubApi(repo_ref=RepoRef(owner="testowner", repo="gone"))
-        proc = MagicMock()
-        proc.stdout = json.dumps([page])
-        with patch.object(GithubApi, "_run_api_command", return_value=proc):
-            with pytest.raises(RuntimeError) as exc:
-                api.fetch_repo_graph()
-        # The API's own error text must reach the user (containment, not exact match).
+        """A missing/inaccessible repo fails loudly with the GraphQL error text (#15)."""
+        raw = json.dumps(
+            [
+                {
+                    "data": {"repository": None},
+                    "errors": [{"type": "NOT_FOUND", "message": "Could not resolve to a Repository with the name 'testowner/gone'."}],
+                }
+            ]
+        )
+        with pytest.raises(RuntimeError) as exc:
+            parse_repo_graph_pages(raw, "testowner", "gone")
         assert "Could not resolve to a Repository" in str(exc.value)
 
     def test_closed_parent_chain_reaches_doctor_e012(self) -> None:
-        """End-to-end: the fixture's closed parent with an open child fires E012, not E010."""
-        from typing import cast
-        from unittest.mock import MagicMock
-
-        from itree.github import GithubApi
-        from itree.traversal import build_dag
-        from itree.validate import generate_doctor_report
-
+        """End-to-end over the pure transform: the fixture's closed parent with an
+        open child fires E012, not E010."""
         with open(FIXTURE_DIR / "graphql_issues_pages.json") as f:
             pages = json.load(f)
         nodes = tuple(n for page in pages for n in page["data"]["repository"]["issues"]["nodes"])
 
-        api = MagicMock(spec=GithubApi)
-        api.fetch_repo_graph.return_value = nodes
-        dag = build_dag(RepoRef(owner="testowner", repo="testrepo"), api=cast(GithubApi, api))
+        dag = dag_from_graph_nodes(RepoRef(owner="testowner", repo="testrepo"), nodes, _no_rest)
 
         report = generate_doctor_report(dag)
         codes = {f.code for f in report.findings}
         assert "E012" in codes
         assert "E010" not in codes
         assert "E011" not in codes
+
+
+class TestLiveAdapterBoundary:
+    """The gh boundary itself, end to end against the disposable repo (#24).
+
+    Anchors: #3 root ledger -> #4 milestone ledger -> #5 the open work unit.
+    """
+
+    def test_live_fetch_repo_graph_returns_the_known_issues(self) -> None:
+        api = GithubApi.from_repo_ref(SCRATCH)
+        nodes = api.fetch_repo_graph()
+        numbers = {n["number"] for n in nodes}
+        assert {3, 4, 5}.issubset(numbers)
+
+    def test_live_parent_lookup_resolves_the_work_unit_parent(self) -> None:
+        api = GithubApi.from_repo_ref(SCRATCH)
+        assert api.get_parent_number(5) == 4
+
+    def test_live_root_ledger_is_parentless(self) -> None:
+        api = GithubApi.from_repo_ref(SCRATCH)
+        assert api.get_parent_number(3) is None
+
+    def test_live_list_subissues_returns_the_milestone_children(self) -> None:
+        api = GithubApi.from_repo_ref(SCRATCH)
+        children = api.list_subissues(4)
+        assert 5 in {c.number for c in children}
+
+    def test_live_build_dag_over_the_real_boundary(self) -> None:
+        dag = build_dag(SCRATCH)
+        assert 5 in dag.children_of.get(4, ())

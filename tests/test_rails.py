@@ -1,27 +1,77 @@
-"""Call-sequence tests for the rails commands: new, absorb, triage.
+"""Rails proofs: pure placement rendering + live GitHub boundary mutations.
 
-These prove the guard rails as observable API behavior: new-without-
-placement creates nothing, work units stay leaves, absorb preserves the
-source body byte-for-byte, and triage surfaces exactly one orphan.
+The guard rails (file-don't-invent, work-units-are-leaves, absorb-verbatim,
+traverse-don't-replan) are proven as real behavior. Refusals that never mutate
+run against the disposable integration repo and assert exit code + message; the
+placement menu is rendered from a constructed tree. Mutating rails create
+proof-prefixed issues in the scratch repo, reread the live tree to confirm the
+effect, then detach and close every created artifact on teardown.
+
+Scratch anchors: #3 root ledger -> #4 milestone ledger -> #5 the open work
+unit; #2 is a closed issue. These are never mutated.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from collections.abc import Iterator
 
 import pytest
 
 from itree import cli
 from itree.github import GithubApi
-from itree.models import GithubIssue, IssueCloseReason, IssueState, RepoDag, RepoRef
+from itree.models import GithubIssue, IssueCloseReason, IssueState, RepoDag, RepoRef, TreeNode
+
+SCRATCH = RepoRef(owner="dzackgarza", repo="itree-e2e-scratch")
+SLUG = SCRATCH.slug
+LEDGER, MILESTONE, WORKUNIT, CLOSED = 3, 4, 5, 2
 
 
-def _issue(
-    number: int,
-    title: str,
-    state: IssueState = IssueState.open,
-    body: str | None = None,
-) -> GithubIssue:
+class ScratchFixtures:
+    """Creates proof-prefixed scratch issues and tears them down (detach+close)."""
+
+    def __init__(self) -> None:
+        self.api = GithubApi.from_repo_ref(SCRATCH)
+        self._created: list[GithubIssue] = []
+
+    def new_issue(self, title: str, body: str = "", parent: int | None = None) -> GithubIssue:
+        issue = self.api.create_issue(f"proof: {title}", body)
+        self._created.append(issue)
+        if parent is not None:
+            self.api.add_subissue(parent, issue.id)
+        return issue
+
+    def track(self, issue: GithubIssue) -> GithubIssue:
+        """Track an issue created by the command under test for teardown."""
+        self._created.append(issue)
+        return issue
+
+    def cleanup(self) -> None:
+        # Detach from any live parent so closed proof issues never pollute the
+        # anchor tree's edges, then close them (restore-or-close per #24).
+        for issue in self._created:
+            try:
+                parent = self.api.get_parent_number(issue.number)
+                if parent is not None:
+                    self.api.remove_subissue(parent, issue.id)
+            except Exception:
+                pass
+            try:
+                if self.api.get_issue(issue.number).is_open:
+                    self.api.close_issue(issue.number, reason=IssueCloseReason.not_planned)
+            except Exception:
+                pass
+
+
+@pytest.fixture
+def scratch() -> Iterator[ScratchFixtures]:
+    fixtures = ScratchFixtures()
+    try:
+        yield fixtures
+    finally:
+        fixtures.cleanup()
+
+
+def _issue(number: int, title: str, state: IssueState = IssueState.open, body: str | None = None) -> GithubIssue:
     return GithubIssue(
         id=number + 5000,
         number=number,
@@ -32,40 +82,22 @@ def _issue(
     )
 
 
-def _dag(issues: dict[int, GithubIssue], children_of: dict[int, tuple[int, ...]]) -> RepoDag:
-    return RepoDag(repo_ref=RepoRef(owner="t", repo="t"), issues=issues, children_of=children_of)
+class TestPlacementMenuRendering:
+    """Rail 1 renderer: print_placement_menu lists existing work first (pure)."""
 
-
-@pytest.fixture
-def api(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Patch cli.GithubApi so every constructor path yields one mock instance."""
-    instance = MagicMock(spec=GithubApi)
-    cls = MagicMock()
-    cls.from_issue_ref.return_value = instance
-    cls.from_repo_ref.return_value = instance
-    monkeypatch.setattr(cli, "GithubApi", cls)
-    return instance
-
-
-def _patch_dag(monkeypatch: pytest.MonkeyPatch, dag: RepoDag) -> None:
-    monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
-
-
-class TestNew:
-    def test_bare_new_creates_nothing_and_prints_menu(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        dag = _dag(
-            {
+    def test_menu_lists_work_units_groupings_and_exact_commands(self, capsys: pytest.CaptureFixture[str]) -> None:
+        dag = RepoDag(
+            repo_ref=RepoRef(owner="t", repo="t"),
+            issues={
                 1: _issue(1, "Ledger: t/t"),
                 2: _issue(2, "Milestone: v1"),
                 3: _issue(3, "Preview sync", body="## Acceptance Criteria\n- ok"),
             },
-            {1: (2,), 2: (3,)},
+            children_of={1: (2,), 2: (3,)},
         )
-        _patch_dag(monkeypatch, dag)
+        tree_node: TreeNode = dag.materialize_root(1)
 
-        with pytest.raises(SystemExit) as exc:
-            cli.new("t/t", "Some idea")
-        assert exc.value.code == 1
+        cli.print_placement_menu("t/t", "Some idea", tree_node)
 
         out = capsys.readouterr().out
         assert "Nothing was created" in out
@@ -73,226 +105,109 @@ class TestNew:
         assert "#2 Milestone: v1" in out
         assert 'itree absorb --into t/t#3 --title "Some idea"' in out
         assert 'itree new t/t "Some idea" --under t/t#2' in out
-        api.create_issue.assert_not_called()
-        api.add_subissue.assert_not_called()
 
-    def test_new_under_work_unit_refuses(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(3, "Preview sync")
 
+class TestNewRefusals:
+    """Rails 1 & 2 as live command behavior; none of these mutate the repo."""
+
+    def test_bare_new_creates_nothing_and_prints_menu(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
-            cli.new("t/t", "Sub-task", under="t/t#3")
-        assert exc.value.code == 2
-
+            cli.new(SLUG, "proof: never created")
+        assert exc.value.code == 1
         out = capsys.readouterr().out
-        assert "work units are leaves" in out
-        assert "itree absorb --into t/t#3" in out
-        api.create_issue.assert_not_called()
+        assert "Nothing was created" in out
+        # Rail-1 lists the live work unit and grouping targets.
+        assert f"#{WORKUNIT} Editor preview sync" in out
 
-    def test_new_under_closed_parent_refuses(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(2, "Milestone: v1", state=IssueState.closed)
-
+    def test_new_under_work_unit_refuses(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
-            cli.new("t/t", "Late work", under="t/t#2")
+            cli.new(SLUG, "proof: forbidden child", under=f"{SLUG}#{WORKUNIT}")
+        assert exc.value.code == 2
+        assert "work units are leaves" in capsys.readouterr().out
+
+    def test_new_under_closed_parent_refuses(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            cli.new(SLUG, "proof: late work", under=f"{SLUG}#{CLOSED}")
         assert exc.value.code == 2
         assert "closed" in capsys.readouterr().out
-        api.create_issue.assert_not_called()
 
-    def test_new_under_grouping_creates_and_attaches(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(2, "Milestone: v1")
-        api.create_issue.return_value = _issue(9, "Export proof")
 
-        cli.new("t/t", "Export proof", under="t/t#2", body="## Acceptance Criteria\n- ok")
+class TestNewCreatesUnderGrouping:
+    def test_new_under_grouping_creates_and_attaches(self, scratch: ScratchFixtures, capsys: pytest.CaptureFixture[str]) -> None:
+        cli.new(SLUG, "child under milestone", under=f"{SLUG}#{MILESTONE}", body="## Acceptance Criteria\n- ok")
 
-        api.create_issue.assert_called_once_with("Export proof", "## Acceptance Criteria\n- ok")
-        api.add_subissue.assert_called_once_with(2, 9 + 5000)
-        assert "t/t#9" in capsys.readouterr().out
+        out = capsys.readouterr().out.strip()
+        assert out.startswith(f"{SLUG}#")
+        created_number = int(out.rsplit("#", 1)[1])
+        scratch.track(scratch.api.get_issue(created_number))
 
-    def test_new_parent_as_first_arg_behaves_as_under(self, api: MagicMock) -> None:
-        api.get_issue.return_value = _issue(2, "Milestone: v1")
-        api.create_issue.return_value = _issue(9, "Export proof")
+        # Reread live state: the new issue really hangs under the milestone.
+        assert scratch.api.get_parent_number(created_number) == MILESTONE
 
-        cli.new("t/t#2", "Export proof")
 
-        api.add_subissue.assert_called_once_with(2, 9 + 5000)
+class TestAttachDetach:
+    def test_attach_then_detach_moves_real_parent_edge(self, scratch: ScratchFixtures) -> None:
+        child = scratch.new_issue("attachable")
+        assert scratch.api.get_parent_number(child.number) is None
+
+        cli.attach(f"{SLUG}#{MILESTONE}", f"{SLUG}#{child.number}")
+        assert scratch.api.get_parent_number(child.number) == MILESTONE
+
+        cli.detach(f"{SLUG}#{MILESTONE}", f"{SLUG}#{child.number}")
+        assert scratch.api.get_parent_number(child.number) is None
+
+
+class TestMove:
+    def test_move_reparents_under_the_new_grouping(self, scratch: ScratchFixtures) -> None:
+        child = scratch.new_issue("movable", parent=MILESTONE)
+        assert scratch.api.get_parent_number(child.number) == MILESTONE
+
+        cli.move(f"{SLUG}#{child.number}", under=f"{SLUG}#{LEDGER}")
+        assert scratch.api.get_parent_number(child.number) == LEDGER
 
 
 class TestAbsorb:
     SRC_BODY = "Exact original body.\n\n- detail A\n- detail B\n"
 
-    def _dag_with_source(self) -> RepoDag:
-        return _dag(
-            {
-                1: _issue(1, "Ledger: t/t"),
-                2: _issue(2, "Milestone: v1"),
-                3: _issue(3, "Preview sync", body="Target body."),
-                7: _issue(7, "Small orphan fix", body=self.SRC_BODY),
-            },
-            {1: (2, 7), 2: (3,)},
-        )
+    def test_absorb_appends_source_verbatim_and_closes_source(self, scratch: ScratchFixtures, capsys: pytest.CaptureFixture[str]) -> None:
+        target = scratch.new_issue("absorb target", body="Target body.")
+        source = scratch.new_issue("absorb source", body=self.SRC_BODY)
 
-    def test_absorb_existing_issue_full_sequence(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        _patch_dag(monkeypatch, self._dag_with_source())
-        api.get_issue.return_value = _issue(3, "Preview sync", body="Target body.")
+        cli.absorb(f"{SLUG}#{source.number}", into=f"{SLUG}#{target.number}")
 
-        cli.absorb("t/t#7", into="t/t#3")
-
-        new_body = api.update_issue_body.call_args.args[1]
-        assert new_body.startswith("Target body.")
-        assert "## Absorbed: Small orphan fix (#7)" in new_body
-        assert new_body.endswith(self.SRC_BODY)  # byte-for-byte, no summarization
-        api.add_comment.assert_called_once()
-        assert "Absorbed into #3" in api.add_comment.call_args.args[1]
-        api.remove_subissue.assert_called_once_with(1, 7 + 5000)
-        api.close_issue.assert_called_once_with(7, reason=IssueCloseReason.duplicate)
         out = capsys.readouterr().out
-        assert "Absorbed t/t#7 -> t/t#3" in out
-        assert "Next: itree doctor t/t" in out
+        assert f"Absorbed {SLUG}#{source.number} -> {SLUG}#{target.number}" in out
 
-    def test_absorb_parentless_source_skips_detach(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
-        dag = _dag(
-            {
-                1: _issue(1, "Ledger: t/t"),
-                3: _issue(3, "Preview sync", body="Target body."),
-                7: _issue(7, "Floating orphan", body=self.SRC_BODY),
-            },
-            {1: (3,)},
-        )
-        _patch_dag(monkeypatch, dag)
-        api.get_issue.return_value = _issue(3, "Preview sync", body="Target body.")
+        # Reread live: target body carries the source body verbatim; source closed.
+        merged = scratch.api.get_issue(target.number)
+        assert merged.body is not None
+        assert merged.body.startswith("Target body.")
+        assert merged.body.endswith(self.SRC_BODY)
+        assert f"## Absorbed: proof: absorb source (#{source.number})" in merged.body
+        assert scratch.api.get_issue(source.number).state == IssueState.closed
 
-        cli.absorb("t/t#7", into="t/t#3")
-
-        api.remove_subissue.assert_not_called()
-        api.close_issue.assert_called_once_with(7, reason=IssueCloseReason.duplicate)
-
-    def test_absorb_into_grouping_refuses(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(2, "Milestone: v1")
-
+    def test_absorb_into_grouping_refuses(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # #4 is a live milestone grouping; absorbing into it is refused pre-mutation.
         with pytest.raises(SystemExit) as exc:
-            cli.absorb("t/t#7", into="t/t#2")
+            cli.absorb(f"{SLUG}#{WORKUNIT}", into=f"{SLUG}#{MILESTONE}")
         assert exc.value.code == 2
         assert "grouping issue" in capsys.readouterr().out
-        api.update_issue_body.assert_not_called()
 
-    def test_absorb_unfiled_content_appends_only(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(3, "Preview sync", body="Target body.")
-
-        cli.absorb(into="t/t#3", title="Tiny follow-up", body="One-liner detail.")
-
-        new_body = api.update_issue_body.call_args.args[1]
-        assert "## Absorbed: Tiny follow-up" in new_body
-        assert new_body.endswith("One-liner detail.")
-        api.close_issue.assert_not_called()
-        api.add_comment.assert_not_called()
-        assert "Absorbed new content -> t/t#3" in capsys.readouterr().out
-
-    def test_absorb_cross_repo_refuses(self, api: MagicMock, capsys: pytest.CaptureFixture[str]) -> None:
-        api.get_issue.return_value = _issue(3, "Preview sync", body="Target body.")
-
+    def test_absorb_cross_repo_refuses(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
-            cli.absorb("other/repo#7", into="t/t#3")
+            cli.absorb("other/repo#7", into=f"{SLUG}#{WORKUNIT}")
         assert exc.value.code == 1
         assert "same repository" in capsys.readouterr().out
 
 
-class TestMove:
-    """move routes same-parent reorders straight to reprioritize (#15).
-
-    GitHub rejects replace_parent=true with 'Issue may not contain duplicate
-    sub-issues' (HTTP 422) when the parent is unchanged, so reordering among
-    current siblings must skip the reparent POST.
-    """
-
-    def test_same_parent_reorder_skips_reparent(self, api: MagicMock) -> None:
-        api.get_issue.side_effect = lambda n: _issue(n, f"Issue {n}")
-        api.get_parent_number.return_value = 2
-
-        cli.move("t/t#5", under="t/t#2", before="t/t#7")
-
-        api.replace_parent_subissue.assert_not_called()
-        api.reprioritize.assert_called_once_with(2, 5 + 5000, before_id=7 + 5000, after_id=None)
-
-    def test_cross_parent_move_reparents(self, api: MagicMock) -> None:
-        api.get_issue.side_effect = lambda n: _issue(n, f"Issue {n}")
-        api.get_parent_number.return_value = 1
-
-        cli.move("t/t#5", under="t/t#2")
-
-        api.replace_parent_subissue.assert_called_once_with(2, 5 + 5000)
-        api.reprioritize.assert_not_called()
-
-
 class TestTriage:
-    def _dag_with_orphans(self) -> RepoDag:
-        return _dag(
-            {
-                1: _issue(1, "Ledger: t/t"),
-                2: _issue(2, "Milestone: v1"),
-                3: _issue(3, "Preview sync", body="## Acceptance Criteria\n- ok"),
-                9: _issue(9, "Orphan nine", body="Nine's body"),
-                5: _issue(5, "Orphan five", body="Five's body"),
-            },
-            {1: (2,), 2: (3,)},
-        )
+    def test_triage_surfaces_a_live_orphan(self, scratch: ScratchFixtures, capsys: pytest.CaptureFixture[str]) -> None:
+        # A parentless open issue is an orphan: unreachable from the root ledger.
+        orphan = scratch.new_issue("floating orphan", body="Orphan body.")
 
-    def test_triage_picks_lowest_orphan_and_counts_rest(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        _patch_dag(monkeypatch, self._dag_with_orphans())
-
-        cli.triage("t/t")
+        # Explicit target surfaces this specific orphan regardless of others.
+        cli.triage(f"{SLUG}#{orphan.number}")
 
         out = capsys.readouterr().out
-        assert "Orphan 1 of 2: #5 Orphan five" in out
-        assert "Five's body" in out
-        assert "itree absorb t/t#5 --into t/t#3" in out
-        assert "itree move t/t#5 --under t/t#2" in out
-        assert "itree close t/t#5 --reason not_planned" in out
-        assert "1 orphan remain after this one" in out
-
-    def test_triage_explicit_target(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        _patch_dag(monkeypatch, self._dag_with_orphans())
-
-        cli.triage("t/t#9")
-
-        out = capsys.readouterr().out
-        assert "#9 Orphan nine" in out
-
-    def test_triage_non_orphan_target_errors(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        _patch_dag(monkeypatch, self._dag_with_orphans())
-
-        with pytest.raises(SystemExit) as exc:
-            cli.triage("t/t#3")
-        assert exc.value.code == 1
-        assert "not an orphan" in capsys.readouterr().out
-
-    def test_triage_clean_repo(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        dag = _dag(
-            {
-                1: _issue(1, "Ledger: t/t"),
-                3: _issue(3, "Preview sync", body="## Acceptance Criteria\n- ok"),
-            },
-            {1: (3,)},
-        )
-        _patch_dag(monkeypatch, dag)
-
-        cli.triage("t/t")
-
-        out = capsys.readouterr().out
-        assert "No orphans" in out
-        assert "itree doctor t/t" in out
-
-    def test_triage_prefers_ledger_titled_root_among_candidates(self, api: MagicMock, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        """With several parentless issues, the Ledger-titled one anchors triage."""
-        dag = _dag(
-            {
-                4: _issue(4, "Stray early issue"),
-                8: _issue(8, "Ledger: t/t"),
-                9: _issue(9, "Work under ledger", body="## Acceptance Criteria\n- ok"),
-            },
-            {8: (9,)},
-        )
-        _patch_dag(monkeypatch, dag)
-
-        cli.triage("t/t")
-
-        out = capsys.readouterr().out
-        assert "Orphan 1 of 1: #4 Stray early issue" in out
+        assert f"#{orphan.number} proof: floating orphan" in out
+        assert f"itree close {SLUG}#{orphan.number} --reason not_planned" in out

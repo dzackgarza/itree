@@ -86,7 +86,19 @@ class TestDoctorExplainFooter:
             body=body,
         )
 
-    def test_clean_tree_omits_explain_suggestion(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    @staticmethod
+    def _render(dag: RepoDag) -> tuple[str, int]:
+        """Rendered footer text and exit code for a constructed tree, no IO."""
+        from itree.cli import doctor_exit_code, render_doctor_report
+        from itree.metrics import AbsentCodeSize, MetricsConfig
+        from itree.validate import generate_doctor_report
+
+        config = MetricsConfig()
+        report = generate_doctor_report(dag, deferral_label=config.deferral_label)
+        out = render_doctor_report(dag.repo_ref, dag, report, config, AbsentCodeSize(reason="n/a"))
+        return out, doctor_exit_code(report)
+
+    def test_clean_tree_omits_explain_suggestion(self) -> None:
         dag = self._dag(
             {
                 1: self._issue(1, "Ledger: t/t"),
@@ -94,14 +106,11 @@ class TestDoctorExplainFooter:
             },
             {1: (2,)},
         )
-        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
+        out, code = self._render(dag)
+        assert code == 0
+        assert "--explain" not in out
 
-        with pytest.raises(SystemExit) as exc:
-            doctor("t/t")
-        assert exc.value.code == 0
-        assert "--explain" not in capsys.readouterr().out
-
-    def test_error_tree_suggests_a_present_code(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_error_tree_suggests_a_present_code(self) -> None:
         dag = self._dag(
             {
                 1: self._issue(1, "Ledger: Root 1"),
@@ -109,12 +118,8 @@ class TestDoctorExplainFooter:
             },
             {},
         )
-        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
-
-        with pytest.raises(SystemExit) as exc:
-            doctor("t/t")
-        assert exc.value.code == 2
-        out = capsys.readouterr().out
+        out, code = self._render(dag)
+        assert code == 2
         assert "--explain E002" in out
         assert "--explain E010" not in out
 
@@ -218,3 +223,35 @@ class TestCLICommandStructure:
         )
         assert result.returncode != 0
         assert "either --before or --after" in result.stderr or "either --before or --after" in result.stdout
+
+
+class TestLiveReadCommands:
+    """Read-only command glue proven end to end against the disposable repo (#24).
+
+    These exercise the full build_dag -> pure-helper -> render path against real
+    GitHub, so they fail if the fetch boundary, traversal, or rendering breaks.
+    The scratch tree's structural anchors are fixed: #3 root ledger ->
+    #4 milestone ledger -> #5 the sole open work unit.
+    """
+
+    SCRATCH = "dzackgarza/itree-e2e-scratch"
+
+    def test_next_names_the_open_work_unit(self, capsys: pytest.CaptureFixture[str]) -> None:
+        cli.next(self.SCRATCH)
+        assert "#5 Editor preview sync" in capsys.readouterr().out
+
+    def test_doctor_reads_the_live_tree_without_structural_errors(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exc:
+            doctor(self.SCRATCH)
+        # No structural errors and a real fetch: exit 0 (ok) or 1 (warnings),
+        # never 2 (E-code) or 3 (fetch/auth failure).
+        assert exc.value.code in (0, 1)
+        out = capsys.readouterr().out
+        assert "#3 Ledger: dzackgarza/itree-e2e-scratch" in out
+        assert "Next work unit: #5" in out
+        assert "errors: 0" in out
+
+    def test_tree_renders_the_live_hierarchy(self, capsys: pytest.CaptureFixture[str]) -> None:
+        cli.tree(self.SCRATCH)
+        out = capsys.readouterr().out
+        assert "#3" in out and "#4" in out and "#5" in out
