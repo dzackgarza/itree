@@ -172,7 +172,7 @@ class TestCLICommandStructure:
             "doctor",
         }
         assert expected.issubset(command_names)
-        for retired in ("validate", "root", "milestone", "work-unit", "add"):
+        for retired in ("validate", "root", "work-unit", "add"):
             assert retired not in command_names
 
     def test_machine_output_flag_is_json_everywhere(self) -> None:

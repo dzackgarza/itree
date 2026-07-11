@@ -49,8 +49,11 @@ alias itree='uvx --from git+https://github.com/dzackgarza/itree itree'
 # One root ledger defines the boundary of a problem domain.
 itree init owner/repo "Ledger: Project Alpha"
 
-# Grouping issues order work; work units are PR-sized leaves under them.
-itree new owner/repo "Milestone: v1" --under owner/repo#1
+# One command creates the native GitHub Milestone and its grouping ledger.
+itree milestone owner/repo "v1" --under owner/repo#1
+# => owner/repo#2 milestone=1
+
+# Work units are PR-sized leaves under grouping issues.
 itree new owner/repo "Editor preview sync" --under owner/repo#2
 itree new owner/repo "Export command proof" --under owner/repo#2
 
@@ -117,10 +120,34 @@ owner/project-alpha
 | --- | --- | --- |
 | `init` | Create the root ledger issue | `itree init owner/repo "Ledger: ..."` |
 | `new` | File an issue with guided placement | `itree new owner/repo "Title" --under owner/repo#2` |
+| `milestone` | Create a GitHub Milestone and matching tree ledger | `itree milestone owner/repo "v1" --under owner/repo#1` |
 | `absorb` | Merge an issue into a work unit, verbatim | `itree absorb owner/repo#31 --into owner/repo#14` |
 | `attach` | Attach an existing issue | `itree attach owner/repo#1 owner/repo#5` |
 | `detach` | Detach from parent | `itree detach owner/repo#1 owner/repo#5` |
 | `move` | Reparent / reorder an issue | `itree move owner/repo#5 --under owner/repo#3` |
+
+### Milestone orchestration
+
+`milestone` keeps GitHub's release grouping and `itree` traversal grouping in sync:
+
+```bash
+itree milestone owner/repo "v1" \
+  --under owner/repo#1 \
+  --body "Ship v1." \
+  --issues owner/repo#8 owner/repo#13
+# owner/repo#21 milestone=4
+```
+
+`--under` is mandatory before any write.
+Without it, the command creates nothing, lists existing milestone ledgers and valid grouping targets, prints an exact placed invocation, and exits nonzero.
+
+With placement supplied, one preflight rejects malformed tree state, exact milestone or ledger title collisions, invalid parents, duplicate or invalid leaves, and cycle risks.
+Only then does the command create the GitHub Milestone, create and attach `Milestone: v1`, assign its milestone, and move each supplied work unit beneath it in argument order with the same assignment.
+Parented work units use replace-parent semantics; parentless work units use attach semantics.
+
+GitHub does not offer a cross-resource transaction.
+After writes begin, `milestone` stops on the first rejected or indeterminate operation, performs no rollback or later operation, and reports the confirmed prefix, current outcome, untouched suffix, and preflight-recorded prior work-unit state.
+Recovery starts by rereading live GitHub state.
 
 ### Query
 
