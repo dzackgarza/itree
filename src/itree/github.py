@@ -108,10 +108,17 @@ def list_repos(owner: str, *, timeout: int = 60) -> tuple[RepoRef, ...]:
         raise RuntimeError(f"gh repo list timed out after {timeout}s for {owner}") from e
     if proc.returncode != 0:
         raise RuntimeError(f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}")
-    repos: list[dict] = json.loads(proc.stdout)
-    # gh returns issues=null when a repo has issues disabled; such a repo has
-    # no open issues to scan, so skip it rather than crash on subscripting None.
-    return tuple(RepoRef(owner=owner, repo=r["name"]) for r in repos if r["issues"] is not None and r["issues"]["totalCount"] > 0)
+    return issue_bearing_repos(owner, json.loads(proc.stdout))
+
+
+def issue_bearing_repos(owner: str, payload: list[dict]) -> tuple[RepoRef, ...]:
+    """Keep only the payload repos that have at least one open issue.
+
+    Pure filter over the ``gh repo list --json name,issues`` shape. gh returns
+    ``issues=null`` when a repo has issues disabled; such a repo has no open
+    issues to scan, so skip it rather than crash on subscripting None.
+    """
+    return tuple(RepoRef(owner=owner, repo=r["name"]) for r in payload if r["issues"] is not None and r["issues"]["totalCount"] > 0)
 
 
 def _graphql_error_text(payload: dict) -> str:
@@ -124,6 +131,59 @@ def _graphql_error_text(payload: dict) -> str:
     if not errors:
         return "no error details in response"
     return "; ".join(str(err["message"]) for err in errors)
+
+
+def _graphql_data(document: dict, identity: str) -> dict:
+    """Return the ``data`` envelope of a GraphQL response document.
+
+    A successful GraphQL response carries a top-level ``data`` object; an absent
+    or null ``data`` is a failed/malformed document (typically an ``errors``-only
+    envelope). Assert that envelope invariant once here — dumping the offending
+    document — so callers subscript the guaranteed keys of ``data`` directly.
+    """
+    data = document.get("data")
+    assert isinstance(data, dict), f"gh api graphql: no data envelope for {identity}; document was {document!r}"
+    return data
+
+
+def parse_subissues_pages(raw: str) -> tuple[GithubIssue, ...]:
+    """Parse ``--slurp`` sub-issue pages (an array of REST page arrays).
+
+    Pure counterpart to ``list_subissues``: flattens every page in order so
+    >100-child parents keep all their children.
+    """
+    pages: list[list[dict]] = json.loads(raw)
+    return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
+
+
+def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
+    """Parse ``--slurp`` GraphQL pages into a flat tuple of issue nodes.
+
+    Pure counterpart to ``fetch_repo_graph``. A ``repository: null`` page means
+    the repo is missing or inaccessible; surface the API's own error text.
+    """
+    pages: list[dict] = json.loads(raw)
+    nodes: list[dict] = []
+    for page in pages:
+        repository = _graphql_data(page, f"{owner}/{repo}")["repository"]
+        if repository is None:
+            raise RuntimeError(f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}")
+        nodes.extend(repository["issues"]["nodes"])
+    return tuple(nodes)
+
+
+def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> int | None:
+    """Parse the GraphQL ``Issue.parent`` response into a parent number or None.
+
+    Pure counterpart to ``get_parent_number``. A null repository or issue means
+    the reference could not be resolved and fails loudly.
+    """
+    payload: dict = json.loads(raw)
+    repository = _graphql_data(payload, f"{owner}/{repo}#{number}")["repository"]
+    if repository is None or repository["issue"] is None:
+        raise RuntimeError(f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}")
+    parent = repository["issue"]["parent"]
+    return None if parent is None else int(parent["number"])
 
 
 class GithubApi(BaseModel):
@@ -469,8 +529,7 @@ class GithubApi(BaseModel):
         path = f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues?per_page=100"
         cmd = ["gh", "api", "--paginate", "--slurp", path]
         proc = self._run_api_command(cmd, path, timeout=120)
-        pages: list[list[dict]] = json.loads(proc.stdout)
-        return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
+        return parse_subissues_pages(proc.stdout)
 
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
@@ -493,14 +552,7 @@ class GithubApi(BaseModel):
             f"name={self.repo}",
         ]
         proc = self._run_api_command(cmd, "graphql", timeout=120)
-        pages: list[dict] = json.loads(proc.stdout)
-        nodes: list[dict] = []
-        for page in pages:
-            repository = page["data"]["repository"]
-            if repository is None:
-                raise RuntimeError(f"gh api graphql returned no repository for {self.owner}/{self.repo}: {_graphql_error_text(page)}")
-            nodes.extend(repository["issues"]["nodes"])
-        return tuple(nodes)
+        return parse_repo_graph_pages(proc.stdout, self.owner, self.repo)
 
     def get_parent_number(self, number: int) -> int | None:
         """Return the issue's current parent number via GraphQL Issue.parent, or None."""
@@ -518,12 +570,7 @@ class GithubApi(BaseModel):
             f"number={number}",
         ]
         proc = self._run_api_command(cmd, "graphql", timeout=30)
-        payload: dict = json.loads(proc.stdout)
-        repository = payload["data"]["repository"]
-        if repository is None or repository["issue"] is None:
-            raise RuntimeError(f"gh api graphql could not resolve {self.owner}/{self.repo}#{number}: {_graphql_error_text(payload)}")
-        parent = repository["issue"]["parent"]
-        return None if parent is None else int(parent["number"])
+        return parse_issue_parent(proc.stdout, self.owner, self.repo, number)
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""
@@ -556,10 +603,15 @@ class GithubApi(BaseModel):
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
     def remove_subissue(self, parent_number: int, child_id: int) -> None:
-        """Detach a child issue from its parent's sub-issues."""
+        """Detach a child issue from its parent's sub-issues.
+
+        The removal endpoint is singular ``/sub_issue`` (unlike the plural
+        ``/sub_issues`` used to list and add); the plural path 404s. This was
+        only caught once the detach/absorb proofs exercised the live boundary.
+        """
         self._exec(
             "DELETE",
-            f"repos/{self.owner}/{self.repo}/issues/{parent_number}/sub_issues",
+            f"repos/{self.owner}/{self.repo}/issues/{parent_number}/sub_issue",
             fields={"sub_issue_id": str(child_id)},
         )
 

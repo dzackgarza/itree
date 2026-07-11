@@ -149,35 +149,34 @@ class TestPredicates:
 
 
 class TestDoctorIntegration:
-    """Q findings render in their own section and never change the exit code (#7)."""
+    """Q findings render in their own section and never change the exit code (#7).
 
-    def test_q_findings_render_without_changing_exit_code(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        from itree import cli
+    The doctor command splits into a pure renderer + exit-code helper over a
+    real report; these prove that layer directly with constructed trees, so no
+    production boundary is stubbed.
+    """
+
+    def test_q_findings_render_without_changing_exit_code(self) -> None:
+        from itree.cli import doctor_exit_code, render_doctor_report
 
         dag = _grouped_dag(3)  # otherwise-clean tree
-        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
-        monkeypatch.setattr(cli, "load_config", lambda: MetricsConfig(max_open_work_units=1))
+        config = MetricsConfig(max_open_work_units=1)
+        report = generate_doctor_report(dag, deferral_label=config.deferral_label)
+        out = render_doctor_report(dag.repo_ref, dag, report, config, AbsentCodeSize(reason="n/a"))
 
-        with pytest.raises(SystemExit) as exc:
-            cli.doctor("t/t")
-
-        assert exc.value.code == 0  # Q001 fires below, yet status stays ok
-        out = capsys.readouterr().out
+        assert doctor_exit_code(report) == 0  # Q001 fires below, yet status stays ok
         assert "Structure questions:" in out
         assert "Q001" in out
 
-    def test_clean_tree_renders_empty_structure_questions(self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        from itree import cli
+    def test_clean_tree_renders_empty_structure_questions(self) -> None:
+        from itree.cli import doctor_exit_code, render_doctor_report
 
         dag = _grouped_dag(2)
-        monkeypatch.setattr(cli, "build_dag", lambda *args, **kwargs: dag)
-        monkeypatch.setattr(cli, "load_config", lambda: MetricsConfig())
+        config = MetricsConfig()
+        report = generate_doctor_report(dag, deferral_label=config.deferral_label)
+        out = render_doctor_report(dag.repo_ref, dag, report, config, AbsentCodeSize(reason="n/a"))
 
-        with pytest.raises(SystemExit) as exc:
-            cli.doctor("t/t")
-
-        assert exc.value.code == 0
-        out = capsys.readouterr().out
+        assert doctor_exit_code(report) == 0
         assert "Structure questions:" in out
         assert "Q001" not in out and "Q002" not in out and "Q003" not in out
 

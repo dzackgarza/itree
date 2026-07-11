@@ -13,7 +13,7 @@ import importlib.resources
 import json
 import shlex
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -22,13 +22,14 @@ from typing import Annotated
 from cyclopts import App, Parameter
 
 from .github import GithubApi, list_repos
-from .metrics import load_config, measure_code_size, structure_questions
+from .metrics import CodeSizeEvidence, MetricsConfig, load_config, measure_code_size, structure_questions
 from .milestone import execute_milestone, preflight_milestone
 from .models import (
     AssignedPriorMilestone,
     AttachRequest,
     CreateMilestoneRequest,
     DetachRequest,
+    DoctorReport,
     FindingSeverity,
     GithubIssue,
     IssueCloseReason,
@@ -909,6 +910,96 @@ def triage(
         print(f"Last orphan. Afterwards run: itree doctor {slug}")
 
 
+def render_doctor_report(
+    repo_ref: RepoRef,
+    dag: RepoDag,
+    report: DoctorReport,
+    config: MetricsConfig,
+    code_size: CodeSizeEvidence,
+) -> str:
+    """Render the human doctor report as text (the pure presentation layer).
+
+    Given the already-computed DAG, report, config, and code-size evidence,
+    this is IO-free, so it is proven directly against constructed trees.
+    """
+    lines: list[str] = []
+    status_str = "OK" if report.status == "ok" else "NOT OK"
+    lines.append(f"{repo_ref.slug} issue tree: {status_str}\n")
+
+    if report.root.kind == "present":
+        root_ref = report.root.ref
+        issue_title = dag.issues[root_ref.number].title
+        lines.append("Root ledger:")
+        lines.append(f"  #{root_ref.number} {issue_title}\n")
+    else:
+        lines.append("Root ledger:")
+        lines.append("  None\n")
+
+    lines.append("Traversal:")
+    if report.next_issue.kind == "present":
+        next_ref = report.next_issue.ref
+        next_title = dag.issues[next_ref.number].title
+        lines.append(f"  Next work unit: #{next_ref.number} {next_title}")
+        lines.append(f"  Agent instruction: work from issue #{next_ref.number}; keep planning state on that issue.")
+        lines.append("  Open the PR when implementation starts; synthesize its body from the issue.")
+        lines.append("  Keep implementation tasks in the issue body or issue comments.")
+    else:
+        lines.append("  Next work unit: None")
+        lines.append("  Agent instruction: No open work units found.")
+    lines.append("")
+
+    m = report.metrics
+    lines.append("Summary:")
+    lines.append(f"  errors: {m.errors}")
+    lines.append(f"  warnings: {m.warnings}")
+    lines.append(f"  open issues reachable from root: {m.open_issues_reachable_from_root}")
+    lines.append(f"  open issues outside root: {m.open_issues_outside_root}")
+    lines.append(f"  open work units: {m.open_work_units}")
+    lines.append(f"  work units: {m.work_units}")
+    lines.append(f"  max depth: {m.max_depth} / 8")
+    if report.root.kind == "present":
+        tree_node = dag.materialize_root(report.root.ref.number)
+        next_node = first_open_work_unit(tree_node)
+        lines.append(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
+    lines.append("")
+
+    lines.append("Findings:")
+    if not report.findings or (len(report.findings) == 1 and report.findings[0].code == "I001"):
+        lines.append("  (none)")
+    else:
+        for f in report.findings:
+            # Format to only display standard code summary
+            lines.append(f"  {f.code}: {len(f.evidence)} {f.title.replace('_', ' ')}")
+    lines.append("")
+
+    # Advisory Q-codes: rendered here, never part of the exit status.
+    q_findings = structure_questions(dag, report, config, code_size)
+    lines.append("Structure questions:")
+    if not q_findings:
+        lines.append("  (none)")
+    else:
+        for q in q_findings:
+            for ev in q.evidence:
+                lines.append(f"  {q.code}: {ev}")
+    lines.append("")
+
+    lines.append("Run:")
+    if any(f.code in ("E010", "E011") for f in report.findings):
+        lines.append(f"  itree triage {repo_ref.slug}")
+    # Suggest --explain only for a code actually present in the findings.
+    non_info_findings = [f for f in report.findings if f.severity != "info"]
+    if non_info_findings:
+        lines.append(f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}")
+    lines.append(f"  itree tree {repo_ref.slug}")
+    lines.append(f"  itree doctor {repo_ref.slug} --json")
+    return "\n".join(lines)
+
+
+def doctor_exit_code(report: DoctorReport) -> int:
+    """Map a doctor report status to its process exit code (non-strict)."""
+    return {"error": 2, "warning": 1, "ok": 0}[report.status]
+
+
 @app.command(group="Diagnostic")
 def doctor(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
@@ -946,86 +1037,49 @@ def doctor(
     if as_json:
         print(report.model_dump_json(indent=2))
     else:
-        status_str = "OK" if report.status == "ok" else "NOT OK"
-        print(f"{repo_ref.slug} issue tree: {status_str}\n")
+        code_size = measure_code_size(repo_ref.slug, Path.cwd())
+        print(render_doctor_report(repo_ref, dag, report, config, code_size))
 
-        if report.root.kind == "present":
-            root_ref = report.root.ref
-            issue_title = dag.issues[root_ref.number].title
-            print("Root ledger:")
-            print(f"  #{root_ref.number} {issue_title}\n")
-        else:
-            print("Root ledger:")
-            print("  None\n")
+    exit_code = doctor_exit_code(report)
+    # --strict escalates a warning-only tree to a hard failure.
+    if strict and report.status == "warning":
+        exit_code = 2
+    sys.exit(exit_code)
 
-        print("Traversal:")
-        if report.next_issue.kind == "present":
-            next_ref = report.next_issue.ref
-            next_title = dag.issues[next_ref.number].title
-            print(f"  Next work unit: #{next_ref.number} {next_title}")
-            print(f"  Agent instruction: work from issue #{next_ref.number}; keep planning state on that issue.")
-            print("  Open the PR when implementation starts; synthesize its body from the issue.")
-            print("  Keep implementation tasks in the issue body or issue comments.")
-        else:
-            print("  Next work unit: None")
-            print("  Agent instruction: No open work units found.")
-        print()
 
-        m = report.metrics
-        print("Summary:")
-        print(f"  errors: {m.errors}")
-        print(f"  warnings: {m.warnings}")
-        print(f"  open issues reachable from root: {m.open_issues_reachable_from_root}")
-        print(f"  open issues outside root: {m.open_issues_outside_root}")
-        print(f"  open work units: {m.open_work_units}")
-        print(f"  work units: {m.work_units}")
-        print(f"  max depth: {m.max_depth} / 8")
-        if report.root.kind == "present":
-            tree_node = dag.materialize_root(report.root.ref.number)
-            next_node = first_open_work_unit(tree_node)
-            print(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
-        print()
+def collect_repo_healths(
+    repos: Sequence[RepoRef],
+    build: Callable[[RepoRef], RepoDag],
+    deferral_label: str,
+) -> tuple[list[RepoHealth], list[tuple[str, str]]]:
+    """Fetch and condense each repo's health, isolating per-repo failures.
 
-        print("Findings:")
-        if not report.findings or (len(report.findings) == 1 and report.findings[0].code == "I001"):
-            print("  (none)")
-        else:
-            for f in report.findings:
-                # Format to only display standard code summary
-                print(f"  {f.code}: {len(f.evidence)} {f.title.replace('_', ' ')}")
-        print()
+    ``build`` is the DAG builder (``build_dag`` in production); injecting it
+    keeps this orchestration provable with a real builder over constructed
+    trees. A repo whose build raises becomes a ``(slug, message)`` fetch error
+    rather than aborting the whole scan. The owner's repo order is preserved.
+    """
 
-        # Advisory Q-codes: rendered here, never part of the exit status.
-        q_findings = structure_questions(dag, report, config, measure_code_size(repo_ref.slug, Path.cwd()))
-        print("Structure questions:")
-        if not q_findings:
-            print("  (none)")
-        else:
-            for q in q_findings:
-                for ev in q.evidence:
-                    print(f"  {q.code}: {ev}")
-        print()
+    def health_of(repo_ref: RepoRef) -> RepoHealth | tuple[str, str]:
+        try:
+            return repo_health(build(repo_ref), deferral_label=deferral_label)
+        except Exception as e:
+            return (repo_ref.slug, str(e))
 
-        print("Run:")
-        if any(f.code in ("E010", "E011") for f in report.findings):
-            print(f"  itree triage {repo_ref.slug}")
-        # Suggest --explain only for a code actually present in the findings.
-        non_info_findings = [f for f in report.findings if f.severity != "info"]
-        if non_info_findings:
-            print(f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}")
-        print(f"  itree tree {repo_ref.slug}")
-        print(f"  itree doctor {repo_ref.slug} --json")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(health_of, repos))
 
-    # Handle exit code based on report status
-    if report.status == "error":
-        sys.exit(2)
-    elif report.status == "warning":
-        if strict:
-            sys.exit(2)
-        else:
-            sys.exit(1)
-    else:
-        sys.exit(0)
+    healths = [r for r in results if isinstance(r, RepoHealth)]
+    fetch_errors: list[tuple[str, str]] = [r for r in results if isinstance(r, tuple)]
+    return healths, fetch_errors
+
+
+def scan_payload(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) -> dict:
+    """Machine-readable scan result (the pure --json shape)."""
+    return {
+        "repos": [h.model_dump() for h in healths],
+        "errors": [{"repo": slug, "message": msg} for slug, msg in fetch_errors],
+    }
 
 
 @app.command(group="Diagnostic")
@@ -1052,31 +1106,10 @@ def scan(
     # Read config once at the command boundary (mirrors doctor), then apply the
     # same deferral_label to every scanned repo.
     deferral_label = load_config().deferral_label
-
-    # Each repo is an independent, IO-bound gh round-trip; fetch them
-    # concurrently and keep the owner's repo order in the output.
-    def health_of(repo_ref: RepoRef) -> RepoHealth | tuple[str, str]:
-        try:
-            return repo_health(build_dag(repo_ref), deferral_label=deferral_label)
-        except Exception as e:
-            return (repo_ref.slug, str(e))
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(health_of, repos))
-
-    healths = [r for r in results if isinstance(r, RepoHealth)]
-    fetch_errors: list[tuple[str, str]] = [r for r in results if isinstance(r, tuple)]
+    healths, fetch_errors = collect_repo_healths(repos, build_dag, deferral_label)
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "repos": [h.model_dump() for h in healths],
-                    "errors": [{"repo": slug, "message": msg} for slug, msg in fetch_errors],
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(scan_payload(healths, fetch_errors), indent=2))
         return
 
     print(render_scan(healths, fetch_errors))
