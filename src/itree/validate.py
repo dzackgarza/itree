@@ -237,8 +237,16 @@ def is_root_ledger(title: str) -> bool:
     return title.lower().startswith("ledger:")
 
 
+def is_roadmap_issue(title: str) -> bool:
+    return title.lower().startswith("roadmap:")
+
+
+def is_phase_issue(title: str) -> bool:
+    return title.lower().startswith("phase:")
+
+
 def is_grouping_issue(title: str) -> bool:
-    return is_root_ledger(title) or parse_milestone_ledger_name(title) is not None or is_backlog_ledger(title)
+    return is_root_ledger(title) or parse_milestone_ledger_name(title) is not None or is_backlog_ledger(title) or is_roadmap_issue(title) or is_phase_issue(title)
 
 
 def lacks_acceptance_criteria(body: str | None) -> bool:

@@ -225,3 +225,73 @@ class TestPathTo:
         path = root.path_to(46)
         assert path is not None
         assert [n.issue.number for n in path] == [42, 46]
+
+
+# ---------------------------------------------------------------------------
+# first_open_work_unit — grouping-aware traversal
+# ---------------------------------------------------------------------------
+
+
+class TestFirstOpenWorkUnit:
+    """first_open_work_unit skips all documented grouping title forms and
+    returns the first open non-grouping descendant."""
+
+    def _work_unit(self, number: int) -> TreeNode:
+        return TreeNode(
+            issue=_issue(
+                number,
+                title=f"Implement thing #{number}",
+            ),
+            children=(),
+        )
+
+    def test_roadmap_parent_is_skipped(self) -> None:
+        """A Roadmap: parent is a grouping issue; traversal surfaces the child work unit."""
+        from itree.validate import first_open_work_unit
+
+        root = TreeNode(
+            issue=_issue(1, title="Ledger: Root"),
+            children=(
+                TreeNode(
+                    issue=_issue(2, title="Roadmap: Extension-owned PDF reading"),
+                    children=(self._work_unit(3),),
+                ),
+            ),
+        )
+        result = first_open_work_unit(root)
+        assert result is not None
+        assert result.issue.number == 3
+
+    def test_phase_parent_is_skipped(self) -> None:
+        """A Phase: parent is a grouping issue; traversal surfaces the child work unit."""
+        from itree.validate import first_open_work_unit
+
+        root = TreeNode(
+            issue=_issue(1, title="Ledger: Root"),
+            children=(
+                TreeNode(
+                    issue=_issue(2, title="Phase: 1 - Core Infrastructure"),
+                    children=(self._work_unit(3),),
+                ),
+            ),
+        )
+        result = first_open_work_unit(root)
+        assert result is not None
+        assert result.issue.number == 3
+
+    def test_milestone_parent_is_skipped(self) -> None:
+        """Existing Milestone: grouping behaviour is preserved."""
+        from itree.validate import first_open_work_unit
+
+        root = TreeNode(
+            issue=_issue(1, title="Ledger: Root"),
+            children=(
+                TreeNode(
+                    issue=_issue(2, title="Milestone: v2"),
+                    children=(self._work_unit(3),),
+                ),
+            ),
+        )
+        result = first_open_work_unit(root)
+        assert result is not None
+        assert result.issue.number == 3

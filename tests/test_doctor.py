@@ -264,6 +264,46 @@ def test_doctor_does_not_require_singleton_marker() -> None:
     assert all(f.code != "W030" for f in report.findings)
 
 
+def test_doctor_roadmap_parent_with_child_does_not_trigger_e015() -> None:
+    """A Roadmap: parent with an open child work unit is a grouping issue, not a work unit; E015 must not fire."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Roadmap: Extension-owned PDF reading and navigation"),
+            3: _issue(
+                3,
+                "Implement PDF page rendering",
+                body="## Acceptance Criteria\n- PDF pages render correctly at the boundary.",
+            ),
+        },
+        children_of={1: (2,), 2: (3,)},
+    )
+    report = generate_doctor_report(dag)
+    assert all(f.code != "E015" for f in report.findings)
+    assert _present_number(report.next_issue) == 3
+
+
+def test_doctor_phase_parent_with_child_does_not_trigger_e015() -> None:
+    """A Phase: parent with an open child work unit is a grouping issue, not a work unit; E015 must not fire."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Phase: 1 - Core Infrastructure"),
+            3: _issue(
+                3,
+                "Set up database schema",
+                body="## Acceptance Criteria\n- Schema is proven at the migration boundary.",
+            ),
+        },
+        children_of={1: (2,), 2: (3,)},
+    )
+    report = generate_doctor_report(dag)
+    assert all(f.code != "E015" for f in report.findings)
+    assert _present_number(report.next_issue) == 3
+
+
 def test_doctor_report_dead_open_grouping() -> None:
     """WARNING W030 is triggered for an open grouping issue with no open descendants."""
     dag = RepoDag(
