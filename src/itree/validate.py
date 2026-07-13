@@ -340,26 +340,18 @@ def lacks_acceptance_criteria(body: str | None) -> bool:
 def first_open_work_unit(root: TreeNode, dag: RepoDag | None = None) -> TreeNode | None:
     """Find the first open work-unit leaf in preorder, optionally filtering by readiness.
 
-    When ``dag`` is provided, leaves are filtered by native dependency readiness:
-    a leaf is eligible only when it and every reachable grouping ancestor have
-    no open ``blocked_by`` blocker.  Preorder remains the deterministic
-    tie-breaker; this function returns exactly one work unit or ``None``.
+    When ``dag`` is provided, delegates to ``first_ready_work_unit`` which
+    filters by native dependency readiness: a leaf is eligible only when it
+    and every reachable grouping ancestor have no open ``blocked_by`` blocker.
+    Preorder remains the deterministic tie-breaker.
 
     When ``dag`` is ``None``, behavior is unchanged from the original pure-preorder
     selection (backwards-compatible for callers that do not yet pass the DAG).
     """
     if dag is not None:
-        from .readiness import ReadinessState, compute_readiness
+        from .readiness import first_ready_work_unit
 
-        for node in root.preorder():
-            if not node.issue.is_open:
-                continue
-            if is_grouping_issue(node.issue.title):
-                continue
-            result = compute_readiness(dag, node.issue.number)
-            if result.state == ReadinessState.ready:
-                return node
-        return None
+        return first_ready_work_unit(root, dag)
 
     for node in root.preorder():
         if not node.issue.is_open:

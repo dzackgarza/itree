@@ -81,21 +81,34 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
     """
     issue = dag.issues.get(issue_number)
     if issue is None:
-        return ReadinessResult(state=ReadinessState.blocked, open_blockers=(), blocked_ancestors=())
+        return ReadinessResult(
+            state=ReadinessState.blocked, open_blockers=(), blocked_ancestors=()
+        )
 
     # Direct blockers: check if any are open.
-    direct_blockers: tuple[int, ...] = dag.dependencies[issue_number] if issue_number in dag.dependencies else ()
-    open_blockers = tuple(b for b in direct_blockers if b in dag.issues and dag.issues[b].is_open)
+    direct_blockers: tuple[int, ...] = (
+        dag.dependencies[issue_number] if issue_number in dag.dependencies else ()
+    )
+    open_blockers = tuple(
+        b for b in direct_blockers if b in dag.issues and dag.issues[b].is_open
+    )
 
     # Grouping ancestors with open blockers.
+    # Guard against malformed cyclic parentage with a visited set.
     blocked_ancestors: list[int] = []
+    visited: set[int] = {issue_number}
     ancestor = dag.parent_of.get(issue_number)
-    while ancestor is not None:
+    while ancestor is not None and ancestor not in visited:
+        visited.add(ancestor)
         ancestor_issue = dag.issues.get(ancestor)
         if ancestor_issue is None:
             break
-        ancestor_blockers: tuple[int, ...] = dag.dependencies[ancestor] if ancestor in dag.dependencies else ()
-        ancestor_open_blockers = [b for b in ancestor_blockers if b in dag.issues and dag.issues[b].is_open]
+        ancestor_blockers: tuple[int, ...] = (
+            dag.dependencies[ancestor] if ancestor in dag.dependencies else ()
+        )
+        ancestor_open_blockers = [
+            b for b in ancestor_blockers if b in dag.issues and dag.issues[b].is_open
+        ]
         if ancestor_open_blockers:
             blocked_ancestors.append(ancestor)
         ancestor = dag.parent_of.get(ancestor)
@@ -125,6 +138,14 @@ def detect_dependency_errors(dag: RepoDag) -> list[DependencyError]:
         for blocker in blockers:
             if blocker in dag.issues:
                 dep_graph.add_edge(issue_num, blocker)
+            else:
+                # Blocker absent from issues: deleted or inaccessible.
+                errors.append(
+                    DependencyError(
+                        kind=DependencyErrorKind.deleted_blocker,
+                        witness=(issue_num, blocker),
+                    )
+                )
 
     if not nx.is_directed_acyclic_graph(dep_graph):
         for cycle in nx.simple_cycles(dep_graph):

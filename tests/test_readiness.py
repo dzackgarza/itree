@@ -11,7 +11,6 @@ The pure functions in ``readiness.py`` consume an already-built ``RepoDag``
 
 from __future__ import annotations
 
-from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 from itree.readiness import (
     DependencyErrorKind,
     ReadinessState,
@@ -19,6 +18,8 @@ from itree.readiness import (
     detect_dependency_errors,
     first_ready_work_unit,
 )
+
+from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 
 
 def _repo_ref() -> RepoRef:
@@ -191,31 +192,29 @@ def test_dependency_cycle_detected_with_witness() -> None:
     assert {2, 3} <= witness_set
 
 
-def test_deleted_blocker_not_treated_as_satisfied() -> None:
-    """A blocker that is absent from the issues dict is diagnosed, not silently satisfied.
+def test_deleted_blocker_detected_as_error() -> None:
+    """A blocker absent from the issues dict is diagnosed as a deleted_blocker error.
 
-    The dag_from_graph_nodes transform already drops unknown blockers, but
+    The dag_from_graph_nodes transform drops unknown blockers at fetch time, but
     detect_dependency_errors must also guard against the case where a blocker
-    issue was deleted after the DAG was built.  We simulate this by checking
-    that a dependency on an issue that exists but is not open is handled
-    correctly (closed = satisfied), while a dependency pointing to a number
-    not in the issues dict would have been dropped by the builder and is not
-    re-introduced.
-
-    This test verifies the positive case: a closed blocker is satisfied.
+    issue was deleted after the DAG was built (a stale dependency edge). A
+    RepoDag constructed directly with a dependency on a number not in issues
+    exercises this path.
     """
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(2, "Was blocked"),
-            3: _issue(3, "Closed blocker", state=IssueState.closed),
+            2: _issue(2, "Issue with deleted blocker"),
         },
-        children_of={1: (2, 3)},
-        dependencies={2: (3,)},
+        children_of={1: (2,)},
+        dependencies={2: (999,)},  # 999 is not in issues
     )
-    result = compute_readiness(dag, 2)
-    assert result.state == ReadinessState.ready
+    errors = detect_dependency_errors(dag)
+    assert len(errors) == 1
+    assert errors[0].kind == DependencyErrorKind.deleted_blocker
+    assert 2 in errors[0].witness
+    assert 999 in errors[0].witness
 
 
 # ---------------------------------------------------------------------------
