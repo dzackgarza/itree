@@ -42,7 +42,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
           totalCount
           nodes { number }
         }
-        blockedBy(first: 50) {
+        blockedBy(first: 100) {
           totalCount
           nodes { number }
         }

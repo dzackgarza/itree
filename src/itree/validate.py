@@ -125,14 +125,14 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "maintenance": ERROR_MAINTENANCE,
     },
     "E014": {
-        "title": "dependency_cycle",
+        "title": "dependency_errors",
         "severity": "error",
         "ideal_model": (
             "Native blocked_by edges express valid hard prerequisites; "
             "preorder is the deterministic tie-breaker among ready work. "
             "Only dependency cycles are structural errors."
         ),
-        "meaning": "A dependency cycle exists in the native blocked_by graph. The cycle prevents any of the involved issues from becoming ready.",
+        "meaning": "The native blocked_by graph contains a dependency cycle or references a deleted or inaccessible blocker. These errors prevent the affected issues from becoming ready.",
         "remediation": [
             "A. Break the cycle by removing one blocked_by edge using the GitHub UI or API.",
             "B. Restructure the issues so the dependency relation is acyclic.",
@@ -269,8 +269,12 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
     }
     # Preserve dependencies that reference absent blockers so
     # detect_dependency_errors can diagnose them as deleted_blocker.
-    # Drop only dependencies where the blocked issue itself is a PR.
-    dependencies = {issue: blockers for issue, blockers in dag.dependencies.items() if issue in issues}
+    # Drop dependencies where the blocked issue or a known blocker is a PR.
+    dependencies = {
+        issue: tuple(b for b in blockers if b not in dag.issues or not dag.issues[b].is_pull_request)
+        for issue, blockers in dag.dependencies.items()
+        if issue in issues
+    }
     return RepoDag(
         repo_ref=dag.repo_ref,
         issues=issues,
