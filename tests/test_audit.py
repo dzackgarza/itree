@@ -89,7 +89,9 @@ def test_work_unit_without_grouping_title_is_accepted() -> None:
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(2, "Implement feature X", body="Acceptance criteria: done when X works."),
+            2: _issue(
+                2, "Implement feature X", body="Acceptance criteria: done when X works."
+            ),
         },
         children_of={1: (2,)},
     )
@@ -202,7 +204,9 @@ def test_obligation_transfer_leaves_undischarged() -> None:
                 2,
                 "Original implementation",
                 state=IssueState.closed,
-                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."),
+                body=(
+                    "Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."
+                ),
             ),
             3: _issue(3, "Actual implementation", state=IssueState.open),
         },
@@ -245,7 +249,9 @@ def test_audit_cannot_discharge_implementation_obligation() -> None:
                 2,
                 "Audit of feature X",
                 state=IssueState.closed,
-                body=("Acceptance Criteria: feature X implemented.\n\nAudit found gaps. Implementation routed to #3."),
+                body=(
+                    "Acceptance Criteria: feature X implemented.\n\nAudit found gaps. Implementation routed to #3."
+                ),
             ),
             3: _issue(3, "Implement feature X", state=IssueState.open),
         },
@@ -334,7 +340,9 @@ def test_closed_broad_scope_audit_revalidation_on_new_owner() -> None:
                 2,
                 "Broad audit of subsystem",
                 state=IssueState.closed,
-                body=("Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."),
+                body=(
+                    "Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."
+                ),
             ),
             3: _issue(3, "New case family owner", state=IssueState.open),
         },
@@ -358,3 +366,117 @@ def test_no_completion_findings_on_clean_tree() -> None:
     )
     findings = audit_completion_contracts(dag)
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Integration: audit findings appear in generate_doctor_report
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_report_includes_e016_false_green_closure() -> None:
+    """generate_doctor_report includes E016 when a false-green closure is detected."""
+    from itree.validate import generate_doctor_report
+
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Original implementation",
+                state=IssueState.closed,
+                body=(
+                    "Acceptance Criteria: done when feature X is implemented.\n\n"
+                    "Implementation moved to #3."
+                ),
+            ),
+            3: _issue(3, "Actual implementation", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+        dependencies={3: (2,)},
+    )
+    report = generate_doctor_report(dag)
+    e016 = [f for f in report.findings if f.code == "E016"]
+    assert len(e016) == 1
+    assert e016[0].severity == "error"
+
+
+def test_doctor_report_includes_w061_decomposition_label() -> None:
+    """generate_doctor_report includes W061 when decomposition_label is configured."""
+    from itree.validate import generate_doctor_report
+
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Work unit", labels=("needs-decomposition",)),
+        },
+        children_of={1: (2,)},
+    )
+    report = generate_doctor_report(dag, decomposition_label="needs-decomposition")
+    w061 = [f for f in report.findings if f.code == "W061"]
+    assert len(w061) == 1
+
+
+def test_doctor_report_includes_w062_derived_state_label() -> None:
+    """generate_doctor_report includes W062 when derived_state_labels are configured."""
+    from itree.validate import generate_doctor_report
+
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Work unit", labels=("blocked",)),
+        },
+        children_of={1: (2,)},
+    )
+    report = generate_doctor_report(dag, derived_state_labels=("blocked",))
+    w062 = [f for f in report.findings if f.code == "W062"]
+    assert len(w062) == 1
+
+
+def test_doctor_report_includes_q004_audit_revalidation() -> None:
+    """generate_doctor_report includes Q004 for closed broad-scope audit with new owner."""
+    from itree.validate import generate_doctor_report
+
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Broad audit",
+                state=IssueState.closed,
+                body=(
+                    "Acceptance Criteria: all of subsystem verified.\n\n"
+                    "Audit complete. New owner: #3 for future cases."
+                ),
+            ),
+            3: _issue(3, "New case family owner", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+    )
+    report = generate_doctor_report(dag)
+    q004 = [f for f in report.findings if f.code == "Q004"]
+    assert len(q004) == 1
+    assert q004[0].severity == "question"
+
+
+def test_doctor_report_clean_tree_has_no_audit_findings() -> None:
+    """A clean tree produces no completion-contract audit findings in the doctor report."""
+    from itree.validate import generate_doctor_report
+
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Implement feature X", body="Done when X works."),
+            3: _issue(3, "Milestone: v1"),
+            4: _issue(4, "Implement feature Y", body="Done when Y works."),
+        },
+        children_of={1: (3,), 3: (2, 4)},
+    )
+    report = generate_doctor_report(dag)
+    audit_codes = {"E016", "E017", "W060", "W061", "W062", "Q004"}
+    audit_findings = [f for f in report.findings if f.code in audit_codes]
+    assert audit_findings == []

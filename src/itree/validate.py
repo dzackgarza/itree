@@ -272,9 +272,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "false_green_closure",
         "severity": "error",
         "ideal_model": (
-            "Closing an issue discharges its implementation obligation. "
-            "Moving implementation to a later issue transfers the unresolved "
-            "obligation; it never discharges it."
+            "Closing an issue discharges its implementation obligation. Moving implementation to a later issue transfers the unresolved obligation; it never discharges it."
         ),
         "meaning": (
             "A closed issue transferred an implementation obligation to a later "
@@ -283,9 +281,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         ),
         "remediation": [
             "A. Reopen the closed issue until the implementation obligation is discharged.",
-            "B. If the transfer is legitimate, update the original issue's acceptance "
-            "criteria to reflect the transfer and keep the issue open until the "
-            "target issue closes.",
+            "B. If the transfer is legitimate, update the original issue's acceptance criteria to reflect the transfer and keep the issue open until the target issue closes.",
         ],
         "maintenance": ERROR_MAINTENANCE,
     },
@@ -293,8 +289,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "no_executable_descendants",
         "severity": "error",
         "ideal_model": (
-            "A grouping referenced by an active completion contract leads to "
-            "executable work units before the contract counts it as implemented."
+            "A grouping referenced by an active completion contract leads to executable work units before the contract counts it as implemented."
         ),
         "meaning": (
             "A grouping issue with no work-unit descendants is required by a "
@@ -303,10 +298,8 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         ),
         "remediation": [
             "A. Decompose the grouping into executable work units.",
-            "B. If the grouping is an intentional deferred shelf, label it with "
-            "your configured deferral label.",
-            "C. Remove the reference from the contract if the grouping is no "
-            "longer needed.",
+            "B. If the grouping is an intentional deferred shelf, label it with your configured deferral label.",
+            "C. Remove the reference from the contract if the grouping is no longer needed.",
         ],
         "maintenance": ERROR_MAINTENANCE,
     },
@@ -314,17 +307,14 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "role_contradiction",
         "severity": "warning",
         "ideal_model": (
-            "A grouping issue's structural role and its body declaration agree: "
-            "groupings group, work units implement."
+            "A grouping issue's structural role and its body declaration agree: groupings group, work units implement."
         ),
         "meaning": (
-            "A grouping issue's body declares it a work-unit leaf, contradicting "
-            "its structural role as a grouping."
+            "A grouping issue's body declares it a work-unit leaf, contradicting its structural role as a grouping."
         ),
         "remediation": [
             "A. Remove the work-unit leaf declaration from the grouping issue body.",
-            "B. If the issue is truly a work unit, convert it from a grouping title "
-            "to a plain work-unit title.",
+            "B. If the issue is truly a work unit, convert it from a grouping title to a plain work-unit title.",
         ],
         "maintenance": WARNING_MAINTENANCE,
     },
@@ -332,8 +322,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "decomposition_label_on_work_unit",
         "severity": "warning",
         "ideal_model": (
-            "The configured decomposition label marks groupings that need "
-            "breakdown, not work-unit leaves that cannot receive children."
+            "The configured decomposition label marks groupings that need breakdown, not work-unit leaves that cannot receive children."
         ),
         "meaning": (
             "A work-unit leaf carries the configured decomposition label. "
@@ -342,8 +331,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         ),
         "remediation": [
             "A. Remove the decomposition label from the work-unit leaf.",
-            "B. If the issue genuinely needs decomposition, convert it from a "
-            "work-unit title to a grouping title first.",
+            "B. If the issue genuinely needs decomposition, convert it from a work-unit title to a grouping title first.",
         ],
         "maintenance": WARNING_MAINTENANCE,
     },
@@ -351,8 +339,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "derived_state_label",
         "severity": "warning",
         "ideal_model": (
-            "Labels express domain categories and workflow state, not derived "
-            "readiness or role state that the tool computes from the graph."
+            "Labels express domain categories and workflow state, not derived readiness or role state that the tool computes from the graph."
         ),
         "meaning": (
             "An issue carries a configured derived-state label. The tool derives "
@@ -360,10 +347,8 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "label can drift from the structural truth."
         ),
         "remediation": [
-            "A. Remove the derived-state label; let the tool compute readiness "
-            "and role from the graph.",
-            "B. If the label serves a workflow purpose outside the tool's scope, "
-            "remove it from derived_state_labels in config.",
+            "A. Remove the derived-state label; let the tool compute readiness and role from the graph.",
+            "B. If the label serves a workflow purpose outside the tool's scope, remove it from derived_state_labels in config.",
         ],
         "maintenance": WARNING_MAINTENANCE,
     },
@@ -371,9 +356,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "title": "audit_revalidation",
         "severity": "question",
         "meaning": (
-            "A closed broad-scope audit declared a later owner for future cases. "
-            "The previously closed audit may need revalidation when the new owner "
-            "lands new case families."
+            "A closed broad-scope audit declared a later owner for future cases. The previously closed audit may need revalidation when the new owner lands new case families."
         ),
         "remediation": [
             "1. Review the closed audit's conclusions against the new case family.",
@@ -527,7 +510,10 @@ def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
 
 
 def generate_doctor_report(
-    dag: RepoDag, deferral_label: str = "deferred"
+    dag: RepoDag,
+    deferral_label: str = "deferred",
+    decomposition_label: str = "",
+    derived_state_labels: tuple[str, ...] = (),
 ) -> DoctorReport:
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
@@ -982,6 +968,58 @@ def generate_doctor_report(
         if next_node:
             next_issue = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
             next_issue_ref = PresentReportRef(ref=next_issue)
+
+    # Completion-contract audit: detect false-green closure, non-monotone
+    # completion, role contradictions, and label conflicts.  These run
+    # on the full DAG regardless of tree acyclicity — a cyclic parentage
+    # graph does not prevent body-based transfer detection.
+    from .audit import (
+        audit_completion_contracts,
+        detect_label_conflicts,
+        detect_role_contradictions,
+    )
+
+    audit_findings: list[Finding] = []
+    for cf in detect_role_contradictions(dag):
+        details = DIAGNOSTIC_CATALOG[cf.code]
+        audit_findings.append(
+            Finding(
+                code=cf.code,
+                severity=details["severity"],
+                title=details["title"],
+                evidence=list(cf.evidence),
+                meaning=details["meaning"],
+                remediation=details["remediation"],
+            )
+        )
+
+    for cf in detect_label_conflicts(dag, decomposition_label, derived_state_labels):
+        details = DIAGNOSTIC_CATALOG[cf.code]
+        audit_findings.append(
+            Finding(
+                code=cf.code,
+                severity=details["severity"],
+                title=details["title"],
+                evidence=list(cf.evidence),
+                meaning=details["meaning"],
+                remediation=details["remediation"],
+            )
+        )
+
+    for cf in audit_completion_contracts(dag, deferral_label):
+        details = DIAGNOSTIC_CATALOG[cf.code]
+        audit_findings.append(
+            Finding(
+                code=cf.code,
+                severity=details["severity"],
+                title=details["title"],
+                evidence=list(cf.evidence),
+                meaning=details["meaning"],
+                remediation=details["remediation"],
+            )
+        )
+
+    findings_list.extend(audit_findings)
 
     # Determine status
     errors_count = sum(1 for f in findings_list if f.severity == "error")
