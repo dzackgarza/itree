@@ -53,7 +53,7 @@ DONE              no E/W finding, no work units       stop, or itree new for gen
 Severity controls maintenance timing, not whether work is possible.
 An error requires a synchronous maintenance handoff before *dependent* work continues; a warning lets substantive work continue while maintenance runs asynchronously.
 The maintenance agent is always the escape hatch.
-It rereads live state, records the remediation ledger entry, repairs or routes the issue, and returns an evidence-backed disposition without substituting tree repair for substantive work.
+It rereads live state, appends its remediation ledger entry as a comment on the root ledger issue, repairs or routes the issue, and returns an evidence-backed disposition without substituting tree repair for substantive work.
 
 ## The four rails
 
@@ -159,7 +159,7 @@ Recovery always begins with a live GitHub and tree reread.
 
 Every error and warning in `itree doctor` protects an explicit ideal tree model, reports the observed deviation, and supplies a repair route.
 Use `itree doctor OWNER/REPO --explain CODE` for that policy and dispatch the shipped `issue-itree-maintenance` prompt.
-Its remediation ledger entry records the code, affected live objects, selected repair, dispatch timing, before/after evidence, and the substantive work unit that must remain in progress.
+The root ledger issue holds an append-only maintenance ledger: add one `## itree maintenance ledger` comment for each handled finding with the code, affected live objects, ideal model, selected repair, dispatch timing, before/after evidence, disposition, and substantive work unit that remains in progress.
 
 ## Proportionality doctrine
 

@@ -72,7 +72,7 @@ class TestPrintDiagnostic:
         print_diagnostic("W040")
         out = capsys.readouterr().out
         assert "Maintenance: dispatch issue-itree-maintenance asynchronously" in out
-        assert "remediation ledger entry" in out
+        assert "root ledger's remediation ledger comment" in out
 
     def test_every_error_and_warning_has_a_model_and_maintenance_route(self) -> None:
         """Every actionable doctor finding teaches its protected model and handoff."""
@@ -243,6 +243,8 @@ class TestCLICommandStructure:
         out = capsys.readouterr().out
         assert "Reread the live GitHub issue tree" in out
         assert "remediation ledger entry" in out
+        assert "append-only maintenance ledger" in out
+        assert "gh issue comment OWNER/REPO#ROOT" in out
         assert "Preserve the current substantive work unit" in out
 
     def test_move_cli_rejects_both_before_and_after(self) -> None:

@@ -205,6 +205,7 @@ It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings
 Use `itree doctor owner/repo --explain CODE` for the meaning and repair routes of any finding code.
 Warnings dispatch `issue-itree-maintenance` asynchronously while substantive work continues.
 Errors dispatch it synchronously before dependent work continues; the maintenance agent is the escape hatch, not an absolute work stop.
+For each handled finding, it appends one evidence-backed `## itree maintenance ledger` comment to the root ledger issue; `itree help maintenance` supplies the exact command and fields.
 The shipped prompt is available through `itree help maintenance`.
 
 ## Development
