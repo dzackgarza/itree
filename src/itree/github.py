@@ -104,17 +104,11 @@ def list_repos(owner: str, *, timeout: int = 60) -> tuple[RepoRef, ...]:
         "name,issues",
     ]
     try:
-        proc = subprocess.run(
-            cmd, text=True, capture_output=True, check=False, timeout=timeout
-        )
+        proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"gh repo list timed out after {timeout}s for {owner}"
-        ) from e
+        raise RuntimeError(f"gh repo list timed out after {timeout}s for {owner}") from e
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}"
-        )
+        raise RuntimeError(f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}")
     return issue_bearing_repos(owner, json.loads(proc.stdout))
 
 
@@ -125,11 +119,7 @@ def issue_bearing_repos(owner: str, payload: list[dict]) -> tuple[RepoRef, ...]:
     ``issues=null`` when a repo has issues disabled; such a repo has no open
     issues to scan, so skip it rather than crash on subscripting None.
     """
-    return tuple(
-        RepoRef(owner=owner, repo=r["name"])
-        for r in payload
-        if r["issues"] is not None and r["issues"]["totalCount"] > 0
-    )
+    return tuple(RepoRef(owner=owner, repo=r["name"]) for r in payload if r["issues"] is not None and r["issues"]["totalCount"] > 0)
 
 
 def _graphql_error_text(payload: dict) -> str:
@@ -153,9 +143,7 @@ def _graphql_data(document: dict, identity: str) -> dict:
     document — so callers subscript the guaranteed keys of ``data`` directly.
     """
     data = document.get("data")
-    assert isinstance(data, dict), (
-        f"gh api graphql: no data envelope for {identity}; document was {document!r}"
-    )
+    assert isinstance(data, dict), f"gh api graphql: no data envelope for {identity}; document was {document!r}"
     return data
 
 
@@ -180,9 +168,7 @@ def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
     for page in pages:
         repository = _graphql_data(page, f"{owner}/{repo}")["repository"]
         if repository is None:
-            raise RuntimeError(
-                f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}"
-            )
+            raise RuntimeError(f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}")
         nodes.extend(repository["issues"]["nodes"])
     return tuple(nodes)
 
@@ -196,9 +182,7 @@ def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> int | No
     payload: dict = json.loads(raw)
     repository = _graphql_data(payload, f"{owner}/{repo}#{number}")["repository"]
     if repository is None or repository["issue"] is None:
-        raise RuntimeError(
-            f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}"
-        )
+        raise RuntimeError(f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}")
     parent = repository["issue"]["parent"]
     return None if parent is None else int(parent["number"])
 
@@ -257,9 +241,7 @@ class GithubApi(BaseModel):
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            proc = subprocess.run(
-                cmd, text=True, capture_output=True, check=False, timeout=timeout
-            )
+            proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"gh api timed out after {timeout}s: {path}") from e
 
@@ -290,18 +272,14 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(
-                        f"gh mutation timed out after invocation; path={path}; timeout={timeout}s; reread live GitHub state"
-                    ),
+                    detail=(f"gh mutation timed out after invocation; path={path}; timeout={timeout}s; reread live GitHub state"),
                 )
             ) from error
         except KeyboardInterrupt as error:
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(
-                        f"gh mutation was interrupted after invocation; path={path}; reread live GitHub state"
-                    ),
+                    detail=(f"gh mutation was interrupted after invocation; path={path}; reread live GitHub state"),
                 )
             ) from error
 
@@ -370,9 +348,7 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(
-                        f"gh mutation returned an unusable issue response after invocation; response_length={len(response)}; reread live GitHub state"
-                    ),
+                    detail=(f"gh mutation returned an unusable issue response after invocation; response_length={len(response)}; reread live GitHub state"),
                 )
             ) from error
 
@@ -387,9 +363,7 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(
-                        f"gh mutation returned an unusable milestone response after invocation; response_length={len(response)}; reread live GitHub state"
-                    ),
+                    detail=(f"gh mutation returned an unusable milestone response after invocation; response_length={len(response)}; reread live GitHub state"),
                 )
             ) from error
 
@@ -398,9 +372,7 @@ class GithubApi(BaseModel):
         path = f"repos/{self.owner}/{self.repo}/milestones?state=all&per_page=100"
         cmd = ["gh", "api", "--paginate", "--slurp", path]
         proc = self._run_api_command(cmd, path, timeout=120)
-        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_json(
-            proc.stdout
-        )
+        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_json(proc.stdout)
         return tuple(milestone for page in pages for milestone in page)
 
     def create_planned_milestone(
@@ -596,9 +568,7 @@ class GithubApi(BaseModel):
                 assert len(blockers) == blocked_by["totalCount"], (
                     f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{node['number']}: expected {blocked_by['totalCount']}, fetched {len(blockers)}"
                 )
-                blocked_by["nodes"] = [
-                    {"number": blocker.number} for blocker in blockers
-                ]
+                blocked_by["nodes"] = [{"number": blocker.number} for blocker in blockers]
         return nodes
 
     def get_parent_number(self, number: int) -> int | None:
