@@ -160,8 +160,8 @@ def test_doctor_report_closed_parent_with_open_descendants() -> None:
     assert "#2" in findings[0].evidence[0]
 
 
-def test_doctor_report_dependency_edges_present() -> None:
-    """ERROR E014 is triggered when GitHub blocked/blocking relations exist."""
+def test_doctor_report_acyclic_dependencies_accepted() -> None:
+    """Valid acyclic blocked_by edges are accepted; no E014 is emitted."""
     dag = RepoDag(
         repo_ref=_repo_ref(),
         issues={
@@ -173,10 +173,29 @@ def test_doctor_report_dependency_edges_present() -> None:
         dependencies={2: (3,)},
     )
     report = generate_doctor_report(dag)
-    assert report.status == "error"
+    e014_findings = [f for f in report.findings if f.code == "E014"]
+    assert len(e014_findings) == 0
+
+
+def test_doctor_report_dependency_cycle_detected() -> None:
+    """E014 is emitted only for dependency cycles, with the witness path."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "A"),
+            3: _issue(3, "B"),
+        },
+        children_of={1: (2, 3)},
+        dependencies={2: (3,), 3: (2,)},
+    )
+    report = generate_doctor_report(dag)
     findings = [f for f in report.findings if f.code == "E014"]
     assert len(findings) == 1
-    assert "blocked by" in findings[0].evidence[0]
+    assert "cycle" in findings[0].evidence[0].lower()
+    # Witness must contain both cycle members
+    assert "#2" in findings[0].evidence[0]
+    assert "#3" in findings[0].evidence[0]
 
 
 def test_doctor_report_depth_near_limit() -> None:

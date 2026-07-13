@@ -7,7 +7,7 @@ work unit decomposed into child issues should be obvious in one screen.
 
 from __future__ import annotations
 
-from .models import RepoHealth, TreeNode
+from .models import RepoDag, RepoHealth, TreeNode
 from .validate import is_grouping_issue
 
 # A parent with more than MAX_CHILDREN_SHOWN visible children renders the
@@ -92,11 +92,20 @@ def render_scan(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) 
     return "\n".join(lines)
 
 
-def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count: int = 0) -> str:
+def render_tree(
+    root: TreeNode,
+    *,
+    next_number: int | None = None,
+    hidden_count: int = 0,
+    dag: RepoDag | None = None,
+) -> str:
     """Render exactly the given tree as annotated ASCII with a trailing shape line.
 
     Visibility filtering is not done here: pass an already-pruned tree and the
     count of nodes it dropped as hidden_count (see prune_closed).
+
+    When ``dag`` is provided, blocked issues are annotated with their open
+    direct blockers.
     """
     lines: list[str] = []
     seen: set[int] = set()
@@ -112,6 +121,16 @@ def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count:
             parts.append("!E013: duplicate")
         elif node.issue.is_open and not is_grouping_issue(node.issue.title) and any(child.issue.is_open for child in node.children):
             parts.append("!E015: has child issues")
+        # Readiness annotation: show open blockers when dag is available
+        if dag is not None and node.issue.is_open:
+            from .readiness import ReadinessState, compute_readiness
+
+            readiness = compute_readiness(dag, node.issue.number)
+            if readiness.state == ReadinessState.blocked:
+                blockers = [f"#{b}" for b in readiness.open_blockers]
+                blockers.extend(f"ancestor #{a}" for a in readiness.blocked_ancestors)
+                if blockers:
+                    parts.append(f"[blocked by {', '.join(blockers)}]")
         lines.append(f"{prefix}{connector}{'  '.join(parts)}")
         if duplicate:
             return

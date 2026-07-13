@@ -22,7 +22,13 @@ from typing import Annotated
 from cyclopts import App, Parameter
 
 from .github import GithubApi, list_repos
-from .metrics import CodeSizeEvidence, MetricsConfig, load_config, measure_code_size, structure_questions
+from .metrics import (
+    CodeSizeEvidence,
+    MetricsConfig,
+    load_config,
+    measure_code_size,
+    structure_questions,
+)
 from .milestone import execute_milestone, preflight_milestone
 from .models import (
     AssignedPriorMilestone,
@@ -383,7 +389,10 @@ def print_milestone_failure(failure: MilestoneCreationFailed) -> None:
 
 @app.command(group="Structural")
 def new(
-    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N")],
+    target: Annotated[
+        str,
+        Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N"),
+    ],
     title: Annotated[str, Parameter(help="Title for the new issue")],
     *,
     under: Annotated[str | None, Parameter(help="Grouping issue to attach under, as OWNER/REPO#N")] = None,
@@ -673,7 +682,12 @@ def move(
         if req.before is not None or req.after is not None:
             before_id = api.get_issue(req.before.number).id if req.before is not None else None
             after_id = api.get_issue(req.after.number).id if req.after is not None else None
-            api.reprioritize(req.parent.number, child_issue.id, before_id=before_id, after_id=after_id)
+            api.reprioritize(
+                req.parent.number,
+                child_issue.id,
+                before_id=before_id,
+                after_id=after_id,
+            )
         print(req.child.slug)
     except Exception as e:
         print(f"Error: {e}")
@@ -739,18 +753,18 @@ def tree(
         print(json.dumps(tree_node.model_dump(), indent=2))
         return
 
-    next_node = first_open_work_unit(tree_node)
+    next_node = first_open_work_unit(tree_node, dag)
     next_number = next_node.issue.number if next_node else None
 
     if show_all:
-        print(render_tree(tree_node, next_number=next_number, hidden_count=0))
+        print(render_tree(tree_node, next_number=next_number, hidden_count=0, dag=dag))
         return
 
     pruned, hidden_count = prune_closed(tree_node)
     if pruned is None:
         print(f"Root ledger #{root_num} is closed; nothing open to render. Run: itree doctor {repo_ref.slug}")
         sys.exit(1)
-    print(render_tree(pruned, next_number=next_number, hidden_count=hidden_count))
+    print(render_tree(pruned, next_number=next_number, hidden_count=hidden_count, dag=dag))
 
 
 @app.command(group="Query")
@@ -772,17 +786,37 @@ def next(
         print(f"Error: {e}")
         sys.exit(3)
 
-    node = first_open_work_unit(tree_node)
+    node = first_open_work_unit(tree_node, dag)
 
     if as_json:
         print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
     else:
         if node is None:
-            print("No open work units found")
+            from .readiness import ReadinessState, compute_readiness
+
+            blocked_work_units = []
+            for candidate in tree_node.preorder():
+                if not candidate.issue.is_open or is_grouping_issue(candidate.issue.title) or candidate.children:
+                    continue
+                readiness = compute_readiness(dag, candidate.issue.number)
+                if readiness.state == ReadinessState.blocked:
+                    blocked_work_units.append((candidate, readiness))
+
+            if not blocked_work_units:
+                print("No open work units found")
+                return
+
+            print("No ready work units found. Blocked open work units:")
+            for candidate, readiness in blocked_work_units:
+                blockers = [f"#{blocker}" for blocker in readiness.open_blockers]
+                blockers.extend(f"ancestor #{ancestor}" for ancestor in readiness.blocked_ancestors)
+                print(f"  #{candidate.issue.number} {candidate.issue.title}")
+                print(f"    Blocked by: {', '.join(blockers)}")
             return
 
         print("Next work unit:")
         print(f"  #{node.issue.number} {node.issue.title}\n")
+
         print("Instruction:")
         print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")
         print("  Open the PR when implementation starts; synthesize its body from the issue.")
@@ -859,7 +893,10 @@ def triage_root(dag: RepoDag) -> int:
 
 @app.command(group="Diagnostic")
 def triage(
-    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or a specific orphan as OWNER/REPO#N")],
+    target: Annotated[
+        str,
+        Parameter(help="Repository as OWNER/REPO, or a specific orphan as OWNER/REPO#N"),
+    ],
     *,
     as_json: Annotated[bool, Parameter(name="--json")] = False,
 ) -> None:
@@ -1000,7 +1037,7 @@ def render_doctor_report(
     lines.append(f"  max depth: {m.max_depth} / 8")
     if report.root.kind == "present":
         tree_node = dag.materialize_root(report.root.ref.number)
-        next_node = first_open_work_unit(tree_node)
+        next_node = first_open_work_unit(tree_node, dag)
         lines.append(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
     lines.append("")
 

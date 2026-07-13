@@ -42,7 +42,8 @@ query($owner: String!, $name: String!, $endCursor: String) {
           totalCount
           nodes { number }
         }
-        blockedBy(first: 50) {
+        blockedBy(first: 100) {
+          totalCount
           nodes { number }
         }
       }
@@ -531,6 +532,13 @@ class GithubApi(BaseModel):
         proc = self._run_api_command(cmd, path, timeout=120)
         return parse_subissues_pages(proc.stdout)
 
+    def list_blocked_by(self, number: int) -> tuple[GithubIssue, ...]:
+        """List ALL native blockers of an issue, following REST pagination."""
+        path = f"repos/{self.owner}/{self.repo}/issues/{number}/dependencies/blocked_by?per_page=100"
+        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        proc = self._run_api_command(cmd, path, timeout=120)
+        return parse_subissues_pages(proc.stdout)
+
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
 
@@ -552,7 +560,16 @@ class GithubApi(BaseModel):
             f"name={self.repo}",
         ]
         proc = self._run_api_command(cmd, "graphql", timeout=120)
-        return parse_repo_graph_pages(proc.stdout, self.owner, self.repo)
+        nodes = parse_repo_graph_pages(proc.stdout, self.owner, self.repo)
+        for node in nodes:
+            blocked_by = node["blockedBy"]
+            if blocked_by["totalCount"] > len(blocked_by["nodes"]):
+                blockers = self.list_blocked_by(node["number"])
+                assert len(blockers) == blocked_by["totalCount"], (
+                    f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{node['number']}: expected {blocked_by['totalCount']}, fetched {len(blockers)}"
+                )
+                blocked_by["nodes"] = [{"number": blocker.number} for blocker in blockers]
+        return nodes
 
     def get_parent_number(self, number: int) -> int | None:
         """Return the issue's current parent number via GraphQL Issue.parent, or None."""
