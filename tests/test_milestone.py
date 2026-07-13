@@ -240,6 +240,28 @@ def test_preflight_rejects_a_work_unit_as_parent() -> None:
     assert result.references == ("owner/repo#3",)
 
 
+@pytest.mark.xfail(strict=True, reason="itree#39: Backlog is incorrectly accepted as a milestone-ledger parent")
+def test_preflight_rejects_backlog_parent_before_an_effect_plan_exists() -> None:
+    """A release ledger and Backlog are sibling branches of the root ledger."""
+    from itree.milestone import preflight_milestone
+
+    dag = RepoDag(
+        repo_ref=RepoRef(owner="owner", repo="repo"),
+        issues={
+            1: _issue(1, "Ledger: owner/repo"),
+            2: _issue(2, "Backlog"),
+            3: _issue(3, "Release work unit"),
+        },
+        children_of={1: (2, 3)},
+    )
+
+    result = preflight_milestone(_request(2, (3,)), dag, ())
+
+    assert isinstance(result, models.MilestonePreflightRejected)
+    assert result.kind is models.MilestonePreflightErrorKind.parent_invalid
+    assert result.references == ("owner/repo#2", "owner/repo#1")
+
+
 def test_preflight_rejects_exact_ledger_title_collision_in_any_issue_state() -> None:
     """A closed issue still reserves the exact derived ledger title."""
     from itree.milestone import preflight_milestone
