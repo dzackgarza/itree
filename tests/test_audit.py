@@ -519,3 +519,73 @@ def test_metrics_config_accepts_derived_state_labels() -> None:
         {"derived_state_labels": ["blocked", "in-progress"]}
     )
     assert config.derived_state_labels == ("blocked", "in-progress")
+
+
+# ---------------------------------------------------------------------------
+# --explain: all new codes produce meaningful diagnostic text
+# ---------------------------------------------------------------------------
+
+
+def test_explain_e016_in_catalog() -> None:
+    """E016 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["E016"]
+    assert details["severity"] == "error"
+    assert "ideal_model" in details
+    assert details["meaning"]
+    assert details["remediation"]
+
+
+def test_explain_e017_in_catalog() -> None:
+    """E017 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["E017"]
+    assert details["severity"] == "error"
+    assert "ideal_model" in details
+    assert details["meaning"]
+    assert details["remediation"]
+
+
+def test_explain_w060_in_catalog() -> None:
+    """W060 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["W060"]
+    assert details["severity"] == "warning"
+    assert "ideal_model" in details
+    assert details["meaning"]
+    assert details["remediation"]
+
+
+def test_explain_w061_in_catalog() -> None:
+    """W061 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["W061"]
+    assert details["severity"] == "warning"
+    assert "ideal_model" in details
+    assert details["meaning"]
+    assert details["remediation"]
+
+
+def test_explain_w062_in_catalog() -> None:
+    """W062 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["W062"]
+    assert details["severity"] == "warning"
+    assert "ideal_model" in details
+    assert details["meaning"]
+    assert details["remediation"]
+
+
+def test_explain_q004_in_catalog() -> None:
+    """Q004 is in DIAGNOSTIC_CATALOG with required fields for --explain."""
+    from itree.validate import DIAGNOSTIC_CATALOG
+
+    details = DIAGNOSTIC_CATALOG["Q004"]
+    assert details["severity"] == "question"
+    assert details["meaning"]
+    assert details["remediation"]
