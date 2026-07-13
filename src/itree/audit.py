@@ -22,8 +22,11 @@ from .validate import is_grouping_issue, lacks_acceptance_criteria
 
 # Pattern for issue references in bodies: #N where N is a positive integer.
 # Won't match markdown headers (# at line start) because those are followed
-# by whitespace, not digits.
-_ISSUE_REF_PATTERN = re.compile(r"#([1-9]\d*)")
+# by whitespace, not digits.  Negative lookbehind for "/" and word characters
+# prevents matching the #N inside a qualified cross-repo reference such as
+# owner/repo#N, so a local issue with the same number is not falsely treated
+# as a transfer target (Spec F).
+_ISSUE_REF_PATTERN = re.compile(r"(?<![/\w])#([1-9]\d*)")
 
 # Transfer language indicating an implementation obligation was moved
 # to another issue rather than discharged.
@@ -54,10 +57,23 @@ class CompletionFinding(BaseModel):
 
 
 def _parse_issue_refs(body: str | None) -> tuple[int, ...]:
-    """Extract issue numbers referenced in an issue body via #N pattern."""
+    """Extract issue numbers referenced in an issue body via #N pattern.
+
+    Each referenced number appears exactly once in the result, preserving
+    order of first appearance (Spec A).  Qualified cross-repo references
+    such as ``owner/repo#N`` do not match: the leading ``/`` is excluded
+    by the regex's negative lookbehind (Spec F).
+    """
     if not body:
         return ()
-    return tuple(int(m.group(1)) for m in _ISSUE_REF_PATTERN.finditer(body))
+    seen: set[int] = set()
+    out: list[int] = []
+    for m in _ISSUE_REF_PATTERN.finditer(body):
+        n = int(m.group(1))
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return tuple(out)
 
 
 def _children_of(dag: RepoDag, number: int) -> tuple[int, ...]:
@@ -89,6 +105,30 @@ def _body_contains_any(body: str | None, keywords: tuple[str, ...]) -> bool:
         return False
     body_lower = body.lower()
     return any(kw in body_lower for kw in keywords)
+
+
+def _refs_on_transfer_lines(body: str | None) -> tuple[int, ...]:
+    """Extract issue refs only from lines containing a transfer keyword (Spec D).
+
+    A body that says "Moved to #3. See also #5 for context" must treat only
+    #3 as a transfer target, not #5.  We split the body into lines and, for
+    each line whose lower-cased text contains any transfer keyword, extract
+    refs from that line only.  Refs are deduplicated by first appearance.
+    """
+    if not body:
+        return ()
+    seen: set[int] = set()
+    out: list[int] = []
+    for line in body.splitlines():
+        line_lower = line.lower()
+        if not any(kw in line_lower for kw in _TRANSFER_KEYWORDS):
+            continue
+        for m in _ISSUE_REF_PATTERN.finditer(line):
+            n = int(m.group(1))
+            if n not in seen:
+                seen.add(n)
+                out.append(n)
+    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +191,10 @@ def detect_label_conflicts(
                 # of whether it has children yet — the label marks it as
                 # needing decomposition, which is its intended use on a grouping.
                 continue
+            # W061 fires only on actual leaves (Spec G).  An issue with
+            # children is not a leaf — E015 covers that decomposition case.
+            if _children_of(dag, number):
+                continue
             labels_lower = {label.casefold() for label in issue.labels}
             if decomp_lower in labels_lower:
                 findings.append(
@@ -208,10 +252,14 @@ def audit_completion_contracts(
     """
     findings: list[CompletionFinding] = []
 
-    # Build reverse reference map: issue N -> issues that reference N in body
+    # Build reverse reference map: issue N -> issues that reference N in body.
+    # Skip self-references (Spec B): an issue referencing itself creates a
+    # self-contract that makes E017 report an issue as "required by: itself."
     ref_map: dict[int, list[int]] = {}
     for number, issue in sorted(dag.issues.items()):
         for ref in _parse_issue_refs(issue.body):
+            if ref == number:
+                continue
             if ref in ref_map:
                 ref_map[ref].append(number)
             else:
@@ -227,7 +275,11 @@ def audit_completion_contracts(
             continue
         if not _body_contains_any(issue.body, _TRANSFER_KEYWORDS):
             continue
-        refs = _parse_issue_refs(issue.body)
+        # Only refs on the same line as a transfer keyword are transfer
+        # targets (Spec D).  A ref on an unrelated line ("See also #5 for
+        # context") is not a transfer even when the body contains a
+        # transfer keyword elsewhere.
+        refs = _refs_on_transfer_lines(issue.body)
         open_targets = [r for r in refs if r in dag.issues and dag.issues[r].is_open]
         if open_targets:
             chain = " -> ".join(f"#{n}" for n in [number, *open_targets])
@@ -255,13 +307,18 @@ def audit_completion_contracts(
         if deferral_lower in labels_lower:
             continue
         if number in ref_map:
-            referrers = ref_map[number]
+            # Only open referrers carry an active completion contract (Spec C).
+            # If every referrer is closed, no active contract requires this
+            # grouping and E017 must not fire.
+            open_referrers = [r for r in ref_map[number] if r in dag.issues and dag.issues[r].is_open]
+            if not open_referrers:
+                continue
             findings.append(
                 CompletionFinding(
                     code="E017",
                     issue_numbers=(number,),
                     evidence=(
-                        f'#{number} "{issue.title}" is a grouping with no work-unit descendants but is required by: {", ".join(f"#{r}" for r in referrers)}',
+                        f'#{number} "{issue.title}" is a grouping with no work-unit descendants but is required by: {", ".join(f"#{r}" for r in open_referrers)}',
                         "traversal will never execute the required implementation through this grouping",
                     ),
                 )
@@ -272,6 +329,11 @@ def audit_completion_contracts(
         if issue.is_open:
             continue
         if not _body_contains_any(issue.body, _NEW_OWNER_KEYWORDS):
+            continue
+        # Q004 targets closed broad-scope audits, not ordinary ownership
+        # handoffs (Spec E).  Require an audit-related keyword in the body
+        # or "audit" in the title.
+        if not _body_contains_any(issue.body, _AUDIT_ONLY_KEYWORDS) and "audit" not in issue.title.lower():
             continue
         refs = _parse_issue_refs(issue.body)
         open_targets = [r for r in refs if r in dag.issues and dag.issues[r].is_open]

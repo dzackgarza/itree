@@ -89,9 +89,7 @@ def test_work_unit_without_grouping_title_is_accepted() -> None:
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(
-                2, "Implement feature X", body="Acceptance criteria: done when X works."
-            ),
+            2: _issue(2, "Implement feature X", body="Acceptance criteria: done when X works."),
         },
         children_of={1: (2,)},
     )
@@ -204,9 +202,7 @@ def test_obligation_transfer_leaves_undischarged() -> None:
                 2,
                 "Original implementation",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."
-                ),
+                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."),
             ),
             3: _issue(3, "Actual implementation", state=IssueState.open),
         },
@@ -249,9 +245,7 @@ def test_audit_cannot_discharge_implementation_obligation() -> None:
                 2,
                 "Audit of feature X",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: feature X implemented.\n\nAudit found gaps. Implementation routed to #3."
-                ),
+                body=("Acceptance Criteria: feature X implemented.\n\nAudit found gaps. Implementation routed to #3."),
             ),
             3: _issue(3, "Implement feature X", state=IssueState.open),
         },
@@ -340,9 +334,7 @@ def test_closed_broad_scope_audit_revalidation_on_new_owner() -> None:
                 2,
                 "Broad audit of subsystem",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."
-                ),
+                body=("Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."),
             ),
             3: _issue(3, "New case family owner", state=IssueState.open),
         },
@@ -385,9 +377,7 @@ def test_doctor_report_includes_e016_false_green_closure() -> None:
                 2,
                 "Original implementation",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."
-                ),
+                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."),
             ),
             3: _issue(3, "Actual implementation", state=IssueState.open),
         },
@@ -446,9 +436,7 @@ def test_doctor_report_includes_q004_audit_revalidation() -> None:
                 2,
                 "Broad audit",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."
-                ),
+                body=("Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."),
             ),
             3: _issue(3, "New case family owner", state=IssueState.open),
         },
@@ -505,9 +493,7 @@ def test_metrics_config_accepts_decomposition_label() -> None:
     """MetricsConfig accepts decomposition_label from config data."""
     from itree.metrics import MetricsConfig
 
-    config = MetricsConfig.model_validate(
-        {"decomposition_label": "needs-decomposition"}
-    )
+    config = MetricsConfig.model_validate({"decomposition_label": "needs-decomposition"})
     assert config.decomposition_label == "needs-decomposition"
 
 
@@ -515,9 +501,7 @@ def test_metrics_config_accepts_derived_state_labels() -> None:
     """MetricsConfig accepts derived_state_labels from config data."""
     from itree.metrics import MetricsConfig
 
-    config = MetricsConfig.model_validate(
-        {"derived_state_labels": ["blocked", "in-progress"]}
-    )
+    config = MetricsConfig.model_validate({"derived_state_labels": ["blocked", "in-progress"]})
     assert config.derived_state_labels == ("blocked", "in-progress")
 
 
@@ -589,3 +573,253 @@ def test_explain_q004_in_catalog() -> None:
     assert details["severity"] == "question"
     assert details["meaning"]
     assert details["remediation"]
+
+
+# ---------------------------------------------------------------------------
+# Spec A: _parse_issue_refs deduplicates issue references
+# ---------------------------------------------------------------------------
+
+
+def test_parse_issue_refs_dedupes_repeated_refs() -> None:
+    """An issue body containing #3 twice yields (3,) not (3, 3) (Spec A)."""
+    from itree.audit import _parse_issue_refs
+
+    result = _parse_issue_refs("See #3 and #3 again, plus #3 once more.")
+    assert result == (3,)
+
+
+def test_parse_issue_refs_preserves_order_of_first_appearance() -> None:
+    """Deduplicated refs preserve the order of first appearance (Spec A)."""
+    from itree.audit import _parse_issue_refs
+
+    result = _parse_issue_refs("first #5 then #3 then #5 again then #3 again")
+    assert result == (5, 3)
+
+
+# ---------------------------------------------------------------------------
+# Spec B: ref_map skips self-references (no E017 self-contract)
+# ---------------------------------------------------------------------------
+
+
+def test_self_reference_does_not_create_e017_self_contract() -> None:
+    """A grouping issue referencing itself in its body does not produce E017 (Spec B)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: v1", body="Tracks #2 itself for completion."),
+        },
+        children_of={1: (2,)},
+    )
+    findings = audit_completion_contracts(dag)
+    assert all(f.code != "E017" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# Spec C: E017 filters referrers to open issues
+# ---------------------------------------------------------------------------
+
+
+def test_e017_does_not_fire_when_referrer_is_closed() -> None:
+    """A grouping with no work-unit descendants referenced only by a closed issue does not produce E017 (Spec C)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Release: v1",
+                state=IssueState.closed,
+                body="Requires #3 to be complete.",
+            ),
+            3: _issue(3, "Milestone: deferred feature"),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    assert all(f.code != "E017" for f in findings)
+
+
+def test_e017_fires_when_referrer_is_open() -> None:
+    """A grouping with no work-unit descendants referenced by an open issue produces E017 (Spec C positive case)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Release: v1", body="Requires #3 to be complete."),
+            3: _issue(3, "Milestone: deferred feature"),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    e017 = [f for f in findings if f.code == "E017"]
+    assert e017
+    assert 3 in e017[0].issue_numbers
+
+
+# ---------------------------------------------------------------------------
+# Spec D: E016 only includes refs on the same line as a transfer keyword
+# ---------------------------------------------------------------------------
+
+
+def test_e016_excludes_refs_on_non_transfer_lines() -> None:
+    """A ref on a non-transfer line is not a transfer target (Spec D)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Original implementation",
+                state=IssueState.closed,
+                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3.\n\nSee also #5 for context."),
+            ),
+            3: _issue(3, "Actual implementation", state=IssueState.open),
+            5: _issue(5, "Context issue", state=IssueState.open),
+        },
+        children_of={1: (2, 3, 5)},
+    )
+    findings = audit_completion_contracts(dag)
+    e016 = [f for f in findings if f.code == "E016"]
+    assert e016
+    evidence_text = " ".join(e016[0].evidence)
+    assert "#3" in evidence_text
+    assert "#5" not in evidence_text
+
+
+# ---------------------------------------------------------------------------
+# Spec E: Q004 only fires on audit-type issues
+# ---------------------------------------------------------------------------
+
+
+def test_q004_does_not_fire_on_non_audit_new_owner_handoff() -> None:
+    """A closed non-audit issue with 'new owner' in body does not produce Q004 (Spec E)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Ownership handoff",
+                state=IssueState.closed,
+                body=("Acceptance Criteria: feature X implemented.\n\nNew owner: #3 for future cases."),
+            ),
+            3: _issue(3, "New owner issue", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    assert all(f.code != "Q004" for f in findings)
+
+
+def test_q004_fires_on_audit_with_new_owner() -> None:
+    """A closed audit issue with both audit keyword and new-owner keyword produces Q004 (Spec E positive)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Audit of subsystem",
+                state=IssueState.closed,
+                body=("Acceptance Criteria: all of subsystem verified.\n\nThis is an audit-only task. New owner: #3 for future cases."),
+            ),
+            3: _issue(3, "New case family owner", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    q004 = [f for f in findings if f.code == "Q004"]
+    assert q004
+    assert 2 in q004[0].issue_numbers
+
+
+def test_q004_fires_when_title_contains_audit() -> None:
+    """A closed issue with 'audit' in title and new-owner keyword in body produces Q004 (Spec E title path)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Broad audit of subsystem",
+                state=IssueState.closed,
+                body=("Acceptance Criteria: all of subsystem verified.\n\nNew owner: #3 for future cases."),
+            ),
+            3: _issue(3, "New case family owner", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    q004 = [f for f in findings if f.code == "Q004"]
+    assert q004
+
+
+# ---------------------------------------------------------------------------
+# Spec F: qualified references are parsed as external (not local)
+# ---------------------------------------------------------------------------
+
+
+def test_qualified_cross_repo_ref_not_matched_as_local() -> None:
+    """A qualified ref dzackgarza/research#3 does not match local #3 (Spec F)."""
+    from itree.audit import _parse_issue_refs
+
+    result = _parse_issue_refs("See dzackgarza/research#3 for the cross-repo work.")
+    assert 3 not in result
+
+
+def test_e016_excludes_qualified_cross_repo_ref() -> None:
+    """A closed issue with a qualified cross-repo ref does not include local #3 as a transfer target (Spec F)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(
+                2,
+                "Original implementation",
+                state=IssueState.closed,
+                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to dzackgarza/research#3."),
+            ),
+            3: _issue(3, "Local issue 3", state=IssueState.open),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = audit_completion_contracts(dag)
+    e016 = [f for f in findings if f.code == "E016"]
+    assert not e016
+
+
+# ---------------------------------------------------------------------------
+# Spec G: W061 only fires on actual leaves (no children)
+# ---------------------------------------------------------------------------
+
+
+def test_w061_does_not_fire_on_issue_with_children() -> None:
+    """A non-grouping issue with the decomposition label but WITH children does not produce W061 (Spec G)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Implement feature X", labels=("needs-decomposition",)),
+            3: _issue(3, "Child work unit"),
+        },
+        children_of={1: (2,), 2: (3,)},
+    )
+    findings = detect_label_conflicts(dag, decomposition_label="needs-decomposition")
+    assert all(f.code != "W061" for f in findings)
+
+
+def test_w061_fires_on_issue_with_no_children() -> None:
+    """A non-grouping issue with the decomposition label and NO children produces W061 (Spec G positive)."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Implement feature X", labels=("needs-decomposition",)),
+        },
+        children_of={1: (2,)},
+    )
+    findings = detect_label_conflicts(dag, decomposition_label="needs-decomposition")
+    w061 = [f for f in findings if f.code == "W061"]
+    assert w061
+    assert 2 in w061[0].issue_numbers
