@@ -792,19 +792,30 @@ def next(
         print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
     else:
         if node is None:
-            print("No open work units found")
+            from .readiness import ReadinessState, compute_readiness
+
+            blocked_work_units = []
+            for candidate in tree_node.preorder():
+                if not candidate.issue.is_open or is_grouping_issue(candidate.issue.title) or candidate.children:
+                    continue
+                readiness = compute_readiness(dag, candidate.issue.number)
+                if readiness.state == ReadinessState.blocked:
+                    blocked_work_units.append((candidate, readiness))
+
+            if not blocked_work_units:
+                print("No open work units found")
+                return
+
+            print("No ready work units found. Blocked open work units:")
+            for candidate, readiness in blocked_work_units:
+                blockers = [f"#{blocker}" for blocker in readiness.open_blockers]
+                blockers.extend(f"ancestor #{ancestor}" for ancestor in readiness.blocked_ancestors)
+                print(f"  #{candidate.issue.number} {candidate.issue.title}")
+                print(f"    Blocked by: {', '.join(blockers)}")
             return
 
         print("Next work unit:")
         print(f"  #{node.issue.number} {node.issue.title}\n")
-
-        # Show direct blockers if any are present (readiness context)
-        from .readiness import compute_readiness
-
-        readiness = compute_readiness(dag, node.issue.number)
-        if readiness.open_blockers:
-            blockers_str = ", ".join(f"#{b}" for b in readiness.open_blockers)
-            print(f"  Blocked by: {blockers_str}\n")
 
         print("Instruction:")
         print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")

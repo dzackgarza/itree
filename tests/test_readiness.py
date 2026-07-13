@@ -19,6 +19,7 @@ from itree.readiness import (
     detect_dependency_errors,
     first_ready_work_unit,
 )
+from itree.validate import generate_doctor_report
 
 
 def _repo_ref() -> RepoRef:
@@ -93,6 +94,20 @@ def test_closed_blocker_makes_issue_ready() -> None:
     assert result.open_blockers == ()
 
 
+def test_closed_issue_is_blocked_even_without_dependencies() -> None:
+    """A completed issue can never re-enter the ready work queue."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Closed work unit", state=IssueState.closed),
+        },
+        children_of={1: (2,)},
+    )
+    result = compute_readiness(dag, 2)
+    assert result.state == ReadinessState.blocked
+
+
 def test_blocked_grouping_ancestor_blocks_descendant() -> None:
     """A grouping ancestor with an open blocker makes all descendants unready."""
     dag = RepoDag(
@@ -109,6 +124,39 @@ def test_blocked_grouping_ancestor_blocks_descendant() -> None:
     result = compute_readiness(dag, 3)
     assert result.state == ReadinessState.blocked
     assert 2 in result.blocked_ancestors
+
+
+def test_closed_grouping_ancestor_blocks_descendant() -> None:
+    """A closed grouping ancestor prevents descendants from becoming ready."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: closed", state=IssueState.closed),
+            3: _issue(3, "Open descendant"),
+        },
+        children_of={1: (2,), 2: (3,)},
+    )
+    result = compute_readiness(dag, 3)
+    assert result.state == ReadinessState.blocked
+    assert result.blocked_ancestors == (2,)
+
+
+def test_missing_ancestor_blocker_blocks_descendant() -> None:
+    """An unreadable ancestor blocker remains an unsatisfied prerequisite."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: blocked"),
+            3: _issue(3, "Open descendant"),
+        },
+        children_of={1: (2,), 2: (3,)},
+        dependencies={2: (999,)},
+    )
+    result = compute_readiness(dag, 3)
+    assert result.state == ReadinessState.blocked
+    assert result.blocked_ancestors == (2,)
 
 
 def test_forward_preorder_dependency_is_valid() -> None:
@@ -217,6 +265,38 @@ def test_deleted_blocker_detected_as_error() -> None:
     readiness = compute_readiness(dag, 2)
     assert readiness.state == ReadinessState.blocked
     assert readiness.open_blockers == (999,)
+
+
+def test_doctor_reports_deleted_blocker_as_e014_evidence() -> None:
+    """E014 names deleted or inaccessible blockers instead of dropping them."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Issue with deleted blocker"),
+        },
+        children_of={1: (2,)},
+        dependencies={2: (999,)},
+    )
+    findings = [finding for finding in generate_doctor_report(dag).findings if finding.code == "E014"]
+    assert len(findings) == 1
+    assert findings[0].evidence == ["deleted/inaccessible blocker: #999 referenced from #2"]
+
+
+def test_doctor_reports_parentage_and_dependency_cycles_independently() -> None:
+    """E003 cannot suppress an independent E014 dependency-cycle finding."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "A"),
+            3: _issue(3, "B"),
+        },
+        children_of={1: (2,), 2: (3,), 3: (2,)},
+        dependencies={2: (3,), 3: (2,)},
+    )
+    codes = {finding.code for finding in generate_doctor_report(dag).findings}
+    assert {"E003", "E014"} <= codes
 
 
 # ---------------------------------------------------------------------------

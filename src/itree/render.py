@@ -126,9 +126,11 @@ def render_tree(
             from .readiness import ReadinessState, compute_readiness
 
             readiness = compute_readiness(dag, node.issue.number)
-            if readiness.state == ReadinessState.blocked and readiness.open_blockers:
-                blockers_str = ", ".join(f"#{b}" for b in readiness.open_blockers)
-                parts.append(f"[blocked by {blockers_str}]")
+            if readiness.state == ReadinessState.blocked:
+                blockers = [f"#{b}" for b in readiness.open_blockers]
+                blockers.extend(f"ancestor #{a}" for a in readiness.blocked_ancestors)
+                if blockers:
+                    parts.append(f"[blocked by {', '.join(blockers)}]")
         lines.append(f"{prefix}{connector}{'  '.join(parts)}")
         if duplicate:
             return

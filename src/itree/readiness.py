@@ -94,12 +94,12 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
         if ancestor_issue is None:
             break
         ancestor_blockers: tuple[int, ...] = dag.dependencies[ancestor] if ancestor in dag.dependencies else ()
-        ancestor_open_blockers = [b for b in ancestor_blockers if b in dag.issues and dag.issues[b].is_open]
-        if ancestor_open_blockers:
+        ancestor_open_blockers = [b for b in ancestor_blockers if b not in dag.issues or dag.issues[b].is_open]
+        if not ancestor_issue.is_open or ancestor_open_blockers:
             blocked_ancestors.append(ancestor)
         ancestor = dag.parent_of.get(ancestor)
 
-    if open_blockers or blocked_ancestors:
+    if not issue.is_open or open_blockers or blocked_ancestors:
         return ReadinessResult(
             state=ReadinessState.blocked,
             open_blockers=open_blockers,
