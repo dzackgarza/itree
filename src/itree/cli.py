@@ -318,15 +318,13 @@ def print_milestone_placement(
     milestone_ledgers = tuple(
         issue for number, issue in sorted(dag.issues.items()) if number in reachable and issue.is_open and issue.title.casefold().startswith("milestone:")
     )
-    grouping_targets = tuple(issue for number, issue in sorted(dag.issues.items()) if number in reachable and issue.is_open and is_grouping_issue(issue.title))
-
     print("Nothing was created. --under is required before milestone mutation.\n")
     print("Existing milestone ledgers:")
     print(issue_lines(milestone_ledgers))
-    print("\nValid grouping targets:")
-    print(issue_lines(grouping_targets))
+    print("\nRoot ledger target:")
+    print(issue_lines(roots))
 
-    target = grouping_targets[0]
+    target = roots[0]
     command = [
         "itree",
         "milestone",
