@@ -386,8 +386,7 @@ def test_doctor_report_includes_e016_false_green_closure() -> None:
                 "Original implementation",
                 state=IssueState.closed,
                 body=(
-                    "Acceptance Criteria: done when feature X is implemented.\n\n"
-                    "Implementation moved to #3."
+                    "Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."
                 ),
             ),
             3: _issue(3, "Actual implementation", state=IssueState.open),
@@ -448,8 +447,7 @@ def test_doctor_report_includes_q004_audit_revalidation() -> None:
                 "Broad audit",
                 state=IssueState.closed,
                 body=(
-                    "Acceptance Criteria: all of subsystem verified.\n\n"
-                    "Audit complete. New owner: #3 for future cases."
+                    "Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."
                 ),
             ),
             3: _issue(3, "New case family owner", state=IssueState.open),
@@ -480,3 +478,44 @@ def test_doctor_report_clean_tree_has_no_audit_findings() -> None:
     audit_codes = {"E016", "E017", "W060", "W061", "W062", "Q004"}
     audit_findings = [f for f in report.findings if f.code in audit_codes]
     assert audit_findings == []
+
+
+# ---------------------------------------------------------------------------
+# Config support: decomposition_label and derived_state_labels
+# ---------------------------------------------------------------------------
+
+
+def test_metrics_config_has_decomposition_label() -> None:
+    """MetricsConfig includes decomposition_label with empty default."""
+    from itree.metrics import MetricsConfig
+
+    config = MetricsConfig()
+    assert config.decomposition_label == ""
+
+
+def test_metrics_config_has_derived_state_labels() -> None:
+    """MetricsConfig includes derived_state_labels with empty tuple default."""
+    from itree.metrics import MetricsConfig
+
+    config = MetricsConfig()
+    assert config.derived_state_labels == ()
+
+
+def test_metrics_config_accepts_decomposition_label() -> None:
+    """MetricsConfig accepts decomposition_label from config data."""
+    from itree.metrics import MetricsConfig
+
+    config = MetricsConfig.model_validate(
+        {"decomposition_label": "needs-decomposition"}
+    )
+    assert config.decomposition_label == "needs-decomposition"
+
+
+def test_metrics_config_accepts_derived_state_labels() -> None:
+    """MetricsConfig accepts derived_state_labels from config data."""
+    from itree.metrics import MetricsConfig
+
+    config = MetricsConfig.model_validate(
+        {"derived_state_labels": ["blocked", "in-progress"]}
+    )
+    assert config.derived_state_labels == ("blocked", "in-progress")

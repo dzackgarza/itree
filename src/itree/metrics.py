@@ -32,6 +32,8 @@ class MetricsConfig(BaseModel):
     flat_children_ratio: float = 0.5
     flat_min_children: int = 6
     deferral_label: str = "deferred"
+    decomposition_label: str = ""
+    derived_state_labels: tuple[str, ...] = ()
 
 
 class PresentCodeSize(BaseModel):
@@ -78,7 +80,12 @@ def measure_code_size(slug: str, cwd: Path) -> CodeSizeEvidence:
         return AbsentCodeSize(reason=f"no local checkout of {slug} at {cwd}")
     if shutil.which("scc") is None:
         return AbsentCodeSize(reason="scc is not installed")
-    scc = subprocess.run(["scc", "--format", "json", str(cwd)], capture_output=True, text=True, check=True)
+    scc = subprocess.run(
+        ["scc", "--format", "json", str(cwd)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     return PresentCodeSize(total_loc=parse_scc_total(scc.stdout))
 
 
@@ -96,7 +103,9 @@ def structure_questions(
         findings.append(
             _q_finding(
                 "Q001",
-                [f"{open_work_units} open work units exceed max_open_work_units={config.max_open_work_units}"],
+                [
+                    f"{open_work_units} open work units exceed max_open_work_units={config.max_open_work_units}"
+                ],
             )
         )
 
@@ -106,19 +115,29 @@ def structure_questions(
             findings.append(
                 _q_finding(
                     "Q002",
-                    [f"{open_work_units} open work units against {code_size.total_loc} LOC supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"],
+                    [
+                        f"{open_work_units} open work units against {code_size.total_loc} LOC supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"
+                    ],
                 )
             )
 
     if report.root.kind == "present":
         root_num = report.root.ref.number
         open_children = [c for c in dag.children_of[root_num] if dag.issues[c].is_open]
-        open_reachable = report.metrics.open_issues_reachable_from_root - 1  # minus the root itself
-        if len(open_children) >= config.flat_min_children and open_reachable > 0 and len(open_children) / open_reachable >= config.flat_children_ratio:
+        open_reachable = (
+            report.metrics.open_issues_reachable_from_root - 1
+        )  # minus the root itself
+        if (
+            len(open_children) >= config.flat_min_children
+            and open_reachable > 0
+            and len(open_children) / open_reachable >= config.flat_children_ratio
+        ):
             findings.append(
                 _q_finding(
                     "Q003",
-                    [f"{len(open_children)} of {open_reachable} open issues hang directly off root #{root_num} (>= flat_children_ratio={config.flat_children_ratio})"],
+                    [
+                        f"{len(open_children)} of {open_reachable} open issues hang directly off root #{root_num} (>= flat_children_ratio={config.flat_children_ratio})"
+                    ],
                 )
             )
 
