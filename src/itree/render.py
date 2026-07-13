@@ -76,7 +76,9 @@ def render_scan(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) 
             nxt = f"next #{h.next_work_unit.ref.number}"
         else:
             nxt = "next none"
-        lines.append(f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {nxt}")
+        lines.append(
+            f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {nxt}"
+        )
     for slug, message in fetch_errors:
         lines.append(f"{slug:<{width}}  ERROR: {message}")
 
@@ -119,7 +121,11 @@ def render_tree(
             parts.append("<- next")
         if duplicate:
             parts.append("!E013: duplicate")
-        elif node.issue.is_open and not is_grouping_issue(node.issue.title) and any(child.issue.is_open for child in node.children):
+        elif (
+            node.issue.is_open
+            and not is_grouping_issue(node.issue.title)
+            and any(child.issue.is_open for child in node.children)
+        ):
             parts.append("!E015: has child issues")
         # Readiness annotation: show open blockers when dag is available
         if dag is not None and node.issue.is_open:
@@ -142,7 +148,11 @@ def render_tree(
             shown = children[:TRUNCATE_HEAD]
             overflow = children[TRUNCATE_HEAD:]
 
-        child_prefix = "" if node is root else prefix + ("    " if connector.startswith("└") else "│   ")
+        child_prefix = (
+            ""
+            if node is root
+            else prefix + ("    " if connector.startswith("└") else "│   ")
+        )
         for i, child in enumerate(shown):
             last = i == len(shown) - 1 and not overflow
             walk(child, child_prefix, "└── " if last else "├── ")
@@ -154,6 +164,8 @@ def render_tree(
 
     if hidden_count:
         lines.append("")
-        lines.append(f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)")
+        lines.append(
+            f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)"
+        )
     lines.append(shape_summary(root, next_number))
     return "\n".join(lines)
