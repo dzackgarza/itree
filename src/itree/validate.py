@@ -31,7 +31,9 @@ class DiagnosticDetails(TypedDict):
 
 
 WARNING_MAINTENANCE = [
-    "dispatch issue-itree-maintenance asynchronously; append this finding code and the selected repair to the root ledger's remediation ledger comment, then continue substantive work.",
+    "dispatch issue-itree-maintenance asynchronously; "
+    "append this finding code and the selected repair to the root ledger's remediation ledger comment, "
+    "then continue substantive work.",
 ]
 ERROR_MAINTENANCE = [
     "dispatch issue-itree-maintenance now; "
@@ -58,7 +60,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "ideal_model": "The unique parentless traversal anchor is titled `Ledger: ...` so agents can identify its role without inference.",
         "meaning": "The unique root of the tree is not a ledger (its title does not start with 'Ledger:').",
-        "remediation": ["1. Rename the root issue title so it starts with 'Ledger:', e.g., 'Ledger: OWNER/REPO'"],
+        "remediation": [
+            "1. Rename the root issue title so it starts with 'Ledger:', e.g., 'Ledger: OWNER/REPO'"
+        ],
         "maintenance": ERROR_MAINTENANCE,
     },
     "E002": {
@@ -77,7 +81,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "ideal_model": "Parentage is an acyclic rooted ordered tree, so preorder traversal has one deterministic meaning.",
         "meaning": "A circular dependency exists in the issue hierarchy. Cycles break the poset and prevent traversal.",
-        "remediation": ["A. Detach one of the edges in the cycle using `itree detach` to break the loop."],
+        "remediation": [
+            "A. Detach one of the edges in the cycle using `itree detach` to break the loop."
+        ],
         "maintenance": ERROR_MAINTENANCE,
     },
     "E010": {
@@ -108,7 +114,10 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "ideal_model": "Open work remains beneath open grouping ancestors so traversal never hides live work behind a closed node.",
         "meaning": "Traversal may skip live work. Reopen the parent or move the descendants.",
-        "remediation": ["A. Reopen the parent issue.", "B. Move or detach the open children so they are attached under an open parent."],
+        "remediation": [
+            "A. Reopen the parent issue.",
+            "B. Move or detach the open children so they are attached under an open parent.",
+        ],
         "maintenance": ERROR_MAINTENANCE,
     },
     "E013": {
@@ -116,15 +125,20 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "error",
         "ideal_model": "Every reachable issue has exactly one parent, preserving a tree rather than a DAG.",
         "meaning": "Tree invariant is violated: a node has multiple parents in the DAG.",
-        "remediation": ["A. Detach the issue from one of its multiple parents so it only appears once."],
+        "remediation": [
+            "A. Detach the issue from one of its multiple parents so it only appears once."
+        ],
         "maintenance": ERROR_MAINTENANCE,
     },
     "E014": {
-        "title": "dependency_edges_present",
+        "title": "dependency_cycle",
         "severity": "error",
-        "ideal_model": "Preorder tree position, not a separate dependency graph, expresses the repository's execution order.",
-        "meaning": "This model does not use DAG scheduling. Move blockers earlier in preorder or make the blocker its own ordered work-unit issue.",
-        "remediation": ["A. Remove the blocked_by dependency using the GitHub UI or API.", "B. Reorder the issues in the tree so the blocker appears earlier in preorder."],
+        "ideal_model": "Native blocked_by edges express valid hard prerequisites; preorder is the deterministic tie-breaker among ready work. Only dependency cycles are structural errors.",
+        "meaning": "A dependency cycle exists in the native blocked_by graph. The cycle prevents any of the involved issues from becoming ready.",
+        "remediation": [
+            "A. Break the cycle by removing one blocked_by edge using the GitHub UI or API.",
+            "B. Restructure the issues so the dependency relation is acyclic.",
+        ],
         "maintenance": ERROR_MAINTENANCE,
     },
     "W030": {
@@ -200,7 +214,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "warning",
         "ideal_model": "Every PR-sized work unit carries its own explicit completion and proof boundary in the issue body.",
         "meaning": "A work-unit issue should not make agents infer completion semantics. Add explicit done criteria to the issue itself.",
-        "remediation": ['A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'],
+        "remediation": [
+            'A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'
+        ],
         "maintenance": WARNING_MAINTENANCE,
     },
     "Q001": {
@@ -249,7 +265,11 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
 
 def issue_only_dag(dag: RepoDag) -> RepoDag:
     """Return the repository issue DAG with GitHub pull request records removed."""
-    issues = {number: issue for number, issue in dag.issues.items() if not issue.is_pull_request}
+    issues = {
+        number: issue
+        for number, issue in dag.issues.items()
+        if not issue.is_pull_request
+    }
     children_of = {
         parent: tuple(child for child in children if child in issues)
         for parent, children in dag.children_of.items()
@@ -292,17 +312,51 @@ def is_phase_issue(title: str) -> bool:
 
 
 def is_grouping_issue(title: str) -> bool:
-    return is_root_ledger(title) or parse_milestone_ledger_name(title) is not None or is_backlog_ledger(title) or is_roadmap_issue(title) or is_phase_issue(title)
+    return (
+        is_root_ledger(title)
+        or parse_milestone_ledger_name(title) is not None
+        or is_backlog_ledger(title)
+        or is_roadmap_issue(title)
+        or is_phase_issue(title)
+    )
 
 
 def lacks_acceptance_criteria(body: str | None) -> bool:
     if not body:
         return True
     body_lower = body.lower()
-    return not ("done when" in body_lower or "done criteria" in body_lower or "acceptance criteria" in body_lower or "acceptance" in body_lower)
+    return not (
+        "done when" in body_lower
+        or "done criteria" in body_lower
+        or "acceptance criteria" in body_lower
+        or "acceptance" in body_lower
+    )
 
 
-def first_open_work_unit(root: TreeNode) -> TreeNode | None:
+def first_open_work_unit(root: TreeNode, dag: RepoDag | None = None) -> TreeNode | None:
+    """Find the first open work-unit leaf in preorder, optionally filtering by readiness.
+
+    When ``dag`` is provided, leaves are filtered by native dependency readiness:
+    a leaf is eligible only when it and every reachable grouping ancestor have
+    no open ``blocked_by`` blocker.  Preorder remains the deterministic
+    tie-breaker; this function returns exactly one work unit or ``None``.
+
+    When ``dag`` is ``None``, behavior is unchanged from the original pure-preorder
+    selection (backwards-compatible for callers that do not yet pass the DAG).
+    """
+    if dag is not None:
+        from .readiness import ReadinessState, compute_readiness
+
+        for node in root.preorder():
+            if not node.issue.is_open:
+                continue
+            if is_grouping_issue(node.issue.title):
+                continue
+            result = compute_readiness(dag, node.issue.number)
+            if result.state == ReadinessState.ready:
+                return node
+        return None
+
     for node in root.preorder():
         if not node.issue.is_open:
             continue
@@ -352,7 +406,9 @@ def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
     )
 
 
-def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> DoctorReport:
+def generate_doctor_report(
+    dag: RepoDag, deferral_label: str = "deferred"
+) -> DoctorReport:
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
 
@@ -368,7 +424,10 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
     if not is_acyclic:
         f_details = DIAGNOSTIC_CATALOG["E003"]
         cycles = list(nx.simple_cycles(G))
-        evidence = [f"dependency cycle: {' -> '.join(f'#{num}' for num in cycle)}" for cycle in cycles]
+        evidence = [
+            f"dependency cycle: {' -> '.join(f'#{num}' for num in cycle)}"
+            for cycle in cycles
+        ]
         findings_list.append(
             Finding(
                 code="E003",
@@ -433,7 +492,9 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
                     code="E004",
                     severity="error",
                     title=f_details["title"],
-                    evidence=[f"Root issue #{root_num} \"{root_issue.title}\" title must start with 'Ledger:'"],
+                    evidence=[
+                        f"Root issue #{root_num} \"{root_issue.title}\" title must start with 'Ledger:'"
+                    ],
                     meaning=f_details["meaning"],
                     remediation=f_details["remediation"],
                 )
@@ -483,7 +544,9 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
 
         if parentless_non_root:
             f_details = DIAGNOSTIC_CATALOG["E011"]
-            evidence = [f'#{num} "{dag.issues[num].title}"' for num in parentless_non_root]
+            evidence = [
+                f'#{num} "{dag.issues[num].title}"' for num in parentless_non_root
+            ]
             findings_list.append(
                 Finding(
                     code="E011",
@@ -499,7 +562,9 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         multiple_parents = [num for num in sorted(reachable) if G.in_degree(num) > 1]
         if multiple_parents:
             f_details = DIAGNOSTIC_CATALOG["E013"]
-            evidence = [f"issue #{num} has multiple parent edges" for num in multiple_parents]
+            evidence = [
+                f"issue #{num} has multiple parent edges" for num in multiple_parents
+            ]
             findings_list.append(
                 Finding(
                     code="E013",
@@ -534,7 +599,10 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
 
         if closed_with_open_descendants:
             f_details = DIAGNOSTIC_CATALOG["E012"]
-            evidence = [f"closed #{p_num} hides open descendants: {', '.join(f'#{c}' for c in kids)}" for p_num, kids in closed_with_open_descendants]
+            evidence = [
+                f"closed #{p_num} hides open descendants: {', '.join(f'#{c}' for c in kids)}"
+                for p_num, kids in closed_with_open_descendants
+            ]
             findings_list.append(
                 Finding(
                     code="E012",
@@ -546,25 +614,28 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
                 )
             )
 
-        # E014: dependency edges present
-        dependency_issues = []
-        for num, blockers in sorted(dag.dependencies.items()):
-            if blockers:
-                dependency_issues.append((num, blockers))
+        # E014: dependency cycle detection (valid acyclic dependencies are accepted)
+        from .readiness import detect_dependency_errors
 
-        if dependency_issues:
+        dep_errors = detect_dependency_errors(dag)
+        if dep_errors:
             f_details = DIAGNOSTIC_CATALOG["E014"]
-            evidence = [f"issue #{num} blocked by: {', '.join(f'#{b}' for b in blockers)}" for num, blockers in dependency_issues]
-            findings_list.append(
-                Finding(
-                    code="E014",
-                    severity="error",
-                    title=f_details["title"],
-                    evidence=evidence,
-                    meaning=f_details["meaning"],
-                    remediation=f_details["remediation"],
+            evidence = [
+                f"dependency cycle: {' -> '.join(f'#{n}' for n in err.witness)}"
+                for err in dep_errors
+                if err.kind.value == "cycle"
+            ]
+            if evidence:
+                findings_list.append(
+                    Finding(
+                        code="E014",
+                        severity="error",
+                        title=f_details["title"],
+                        evidence=evidence,
+                        meaning=f_details["meaning"],
+                        remediation=f_details["remediation"],
+                    )
                 )
-            )
 
         # Max depth check
         max_depth = 0
@@ -615,11 +686,21 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         dead_groupings = []
         deferred_groupings = []
         for node in tree_nodes[1:]:
-            if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
-                if deferral_label.casefold() in {label.casefold() for label in node.issue.labels}:
-                    deferred_groupings.append(f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown')
+            if (
+                node.issue.is_open
+                and is_grouping_issue(node.issue.title)
+                and not any(d.issue.is_open for d in node.descendants())
+            ):
+                if deferral_label.casefold() in {
+                    label.casefold() for label in node.issue.labels
+                }:
+                    deferred_groupings.append(
+                        f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown'
+                    )
                 else:
-                    dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
+                    dead_groupings.append(
+                        f'#{node.issue.number} "{node.issue.title}" has no open descendants'
+                    )
 
         if dead_groupings:
             f_details = DIAGNOSTIC_CATALOG["W030"]
@@ -656,7 +737,10 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         missing_milestones = sorted(active_milestones - milestone_ledger_names)
         if missing_milestones:
             f_details = DIAGNOSTIC_CATALOG["W041"]
-            evidence = [f'milestone "{m}" is active but has no ledger child' for m in missing_milestones]
+            evidence = [
+                f'milestone "{m}" is active but has no ledger child'
+                for m in missing_milestones
+            ]
             findings_list.append(
                 Finding(
                     code="W041",
@@ -674,16 +758,35 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
             m_name = parse_milestone_ledger_name(ml_node.issue.title)
             for desc in ml_node.descendants():
                 if desc.issue.milestone is None or desc.issue.milestone.title != m_name:
-                    mismatch_issues.append((desc.issue.number, desc.issue.title, m_name, desc.issue.milestone.title if desc.issue.milestone else "None"))
+                    mismatch_issues.append(
+                        (
+                            desc.issue.number,
+                            desc.issue.title,
+                            m_name,
+                            desc.issue.milestone.title
+                            if desc.issue.milestone
+                            else "None",
+                        )
+                    )
 
         for bl_node in backlog_ledgers_in_tree:
             for desc in bl_node.descendants():
                 if desc.issue.milestone is not None:
-                    mismatch_issues.append((desc.issue.number, desc.issue.title, "None", desc.issue.milestone.title))
+                    mismatch_issues.append(
+                        (
+                            desc.issue.number,
+                            desc.issue.title,
+                            "None",
+                            desc.issue.milestone.title,
+                        )
+                    )
 
         if mismatch_issues:
             f_details = DIAGNOSTIC_CATALOG["W040"]
-            evidence = [f'#{num} "{title}" expected milestone {expected}, got {actual}' for num, title, expected, actual in mismatch_issues]
+            evidence = [
+                f'#{num} "{title}" expected milestone {expected}, got {actual}'
+                for num, title, expected, actual in mismatch_issues
+            ]
             findings_list.append(
                 Finding(
                     code="W040",
@@ -700,8 +803,12 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         for wu in sorted(work_unit_nodes, key=lambda w: w.issue.number):
             child_issues = [child for child in wu.children if child.issue.is_open]
             if child_issues:
-                child_refs = ", ".join(f"#{child.issue.number}" for child in child_issues)
-                decomposed_work_units.append(f"work unit #{wu.issue.number} has child issues: {child_refs}")
+                child_refs = ", ".join(
+                    f"#{child.issue.number}" for child in child_issues
+                )
+                decomposed_work_units.append(
+                    f"work unit #{wu.issue.number} has child issues: {child_refs}"
+                )
 
         if decomposed_work_units:
             f_details = DIAGNOSTIC_CATALOG["E015"]
@@ -722,7 +829,9 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
 
         for work_unit in sorted(work_unit_nodes, key=lambda w: w.issue.number):
             if lacks_acceptance_criteria(work_unit.issue.body):
-                missing_ac_findings.append(f"work unit #{work_unit.issue.number} lacks acceptance criteria")
+                missing_ac_findings.append(
+                    f"work unit #{work_unit.issue.number} lacks acceptance criteria"
+                )
 
         if missing_ac_findings:
             f_details = DIAGNOSTIC_CATALOG["W050"]
@@ -744,7 +853,7 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         work_unit_count = len(work_unit_nodes)
         max_depth_count = max_depth + 1
 
-        next_node = first_open_work_unit(tree_node)
+        next_node = first_open_work_unit(tree_node, dag)
         if next_node:
             next_issue = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
             next_issue_ref = PresentReportRef(ref=next_issue)
@@ -782,7 +891,11 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
             )
         )
 
-    report_root = PresentReportRef(ref=root_ref) if root_ref is not None else AbsentReportRef(reason="no_root_ledger")
+    report_root = (
+        PresentReportRef(ref=root_ref)
+        if root_ref is not None
+        else AbsentReportRef(reason="no_root_ledger")
+    )
     return DoctorReport(
         repo=dag.slug,
         status=status,

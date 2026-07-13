@@ -7,7 +7,7 @@ work unit decomposed into child issues should be obvious in one screen.
 
 from __future__ import annotations
 
-from .models import RepoHealth, TreeNode
+from .models import RepoDag, RepoHealth, TreeNode
 from .validate import is_grouping_issue
 
 # A parent with more than MAX_CHILDREN_SHOWN visible children renders the
@@ -76,7 +76,9 @@ def render_scan(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) 
             nxt = f"next #{h.next_work_unit.ref.number}"
         else:
             nxt = "next none"
-        lines.append(f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {nxt}")
+        lines.append(
+            f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {nxt}"
+        )
     for slug, message in fetch_errors:
         lines.append(f"{slug:<{width}}  ERROR: {message}")
 
@@ -92,11 +94,20 @@ def render_scan(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) 
     return "\n".join(lines)
 
 
-def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count: int = 0) -> str:
+def render_tree(
+    root: TreeNode,
+    *,
+    next_number: int | None = None,
+    hidden_count: int = 0,
+    dag: RepoDag | None = None,
+) -> str:
     """Render exactly the given tree as annotated ASCII with a trailing shape line.
 
     Visibility filtering is not done here: pass an already-pruned tree and the
     count of nodes it dropped as hidden_count (see prune_closed).
+
+    When ``dag`` is provided, blocked issues are annotated with their open
+    direct blockers.
     """
     lines: list[str] = []
     seen: set[int] = set()
@@ -110,8 +121,20 @@ def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count:
             parts.append("<- next")
         if duplicate:
             parts.append("!E013: duplicate")
-        elif node.issue.is_open and not is_grouping_issue(node.issue.title) and any(child.issue.is_open for child in node.children):
+        elif (
+            node.issue.is_open
+            and not is_grouping_issue(node.issue.title)
+            and any(child.issue.is_open for child in node.children)
+        ):
             parts.append("!E015: has child issues")
+        # Readiness annotation: show open blockers when dag is available
+        if dag is not None and node.issue.is_open:
+            from .readiness import ReadinessState, compute_readiness
+
+            readiness = compute_readiness(dag, node.issue.number)
+            if readiness.state == ReadinessState.blocked and readiness.open_blockers:
+                blockers_str = ", ".join(f"#{b}" for b in readiness.open_blockers)
+                parts.append(f"[blocked by {blockers_str}]")
         lines.append(f"{prefix}{connector}{'  '.join(parts)}")
         if duplicate:
             return
@@ -123,7 +146,11 @@ def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count:
             shown = children[:TRUNCATE_HEAD]
             overflow = children[TRUNCATE_HEAD:]
 
-        child_prefix = "" if node is root else prefix + ("    " if connector.startswith("└") else "│   ")
+        child_prefix = (
+            ""
+            if node is root
+            else prefix + ("    " if connector.startswith("└") else "│   ")
+        )
         for i, child in enumerate(shown):
             last = i == len(shown) - 1 and not overflow
             walk(child, child_prefix, "└── " if last else "├── ")
@@ -135,6 +162,8 @@ def render_tree(root: TreeNode, *, next_number: int | None = None, hidden_count:
 
     if hidden_count:
         lines.append("")
-        lines.append(f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)")
+        lines.append(
+            f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)"
+        )
     lines.append(shape_summary(root, next_number))
     return "\n".join(lines)

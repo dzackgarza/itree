@@ -22,7 +22,13 @@ from typing import Annotated
 from cyclopts import App, Parameter
 
 from .github import GithubApi, list_repos
-from .metrics import CodeSizeEvidence, MetricsConfig, load_config, measure_code_size, structure_questions
+from .metrics import (
+    CodeSizeEvidence,
+    MetricsConfig,
+    load_config,
+    measure_code_size,
+    structure_questions,
+)
 from .milestone import execute_milestone, preflight_milestone
 from .models import (
     AssignedPriorMilestone,
@@ -47,7 +53,7 @@ from .models import (
     TreeNode,
     WorkUnitMilestoneEffect,
 )
-from .render import prune_closed, render_scan, render_tree, shape_summary
+from .render import prune_closed, render_scan, render_tree
 from .traversal import build_dag
 from .validate import (
     DIAGNOSTIC_CATALOG,
@@ -164,7 +170,9 @@ def get_repo_root(repo: str) -> tuple[RepoRef, int]:
         print_diagnostic("E001")
         sys.exit(2)
     if len(candidates) > 1:
-        print_diagnostic("E002", evidence=[f"#{c}  {dag.issues[c].title}" for c in candidates])
+        print_diagnostic(
+            "E002", evidence=[f"#{c}  {dag.issues[c].title}" for c in candidates]
+        )
         sys.exit(2)
     return repo_ref, candidates[0]
 
@@ -185,7 +193,11 @@ def help_model() -> None:
     # Read lazily and as UTF-8: the doc holds non-ASCII (e.g. U+2026), and the
     # read stays inside this command so a packaging regression degrades only
     # `help model`, never every import of itree.cli.
-    doc = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
+    doc = (
+        importlib.resources.files("itree")
+        .joinpath("WORKFLOWS.md")
+        .read_text(encoding="utf-8")
+    )
     print(doc, end="")
 
 
@@ -198,7 +210,11 @@ def help_milestone() -> None:
 @help_app.command(name="maintenance")
 def help_maintenance() -> None:
     """Print the shipped issue-itree-maintenance agent prompt."""
-    prompt = importlib.resources.files("itree").joinpath("ISSUE_ITREE_MAINTENANCE.md").read_text(encoding="utf-8")
+    prompt = (
+        importlib.resources.files("itree")
+        .joinpath("ISSUE_ITREE_MAINTENANCE.md")
+        .read_text(encoding="utf-8")
+    )
     print(prompt, end="")
 
 
@@ -250,7 +266,11 @@ def candidate_sections(tree_node: TreeNode) -> tuple[list[TreeNode], list[TreeNo
 
 
 def candidate_lines(nodes: list[TreeNode]) -> str:
-    return "\n".join(f"  #{node.issue.number} {node.issue.title}" for node in nodes) if nodes else "  (none)"
+    return (
+        "\n".join(f"  #{node.issue.number} {node.issue.title}" for node in nodes)
+        if nodes
+        else "  (none)"
+    )
 
 
 def example_grouping_number(groupings: list[TreeNode], root: TreeNode) -> str:
@@ -275,7 +295,9 @@ def print_placement_menu(slug: str, title: str, tree_node: TreeNode) -> None:
     print()
     if work_units:
         print("Less than one PR of work -> absorb it into a work unit:")
-        print(f'  itree absorb --into {slug}#{work_units[0].issue.number} --title "{title}" --body "..."')
+        print(
+            f'  itree absorb --into {slug}#{work_units[0].issue.number} --title "{title}" --body "..."'
+        )
     grouping_number = example_grouping_number(groupings, tree_node)
     print("A full PR-sized unit (independently valuable, reviewable, own")
     print("acceptance criteria) -> create it under a grouping issue:")
@@ -297,7 +319,11 @@ def reachable_issue_numbers(dag: RepoDag, root_number: int) -> set[int]:
 
 def issue_lines(issues: Sequence[GithubIssue]) -> str:
     """Render numbered issues for non-mutating milestone placement guidance."""
-    return "\n".join(f"  #{issue.number} {issue.title}" for issue in issues) if issues else "  (none)"
+    return (
+        "\n".join(f"  #{issue.number} {issue.title}" for issue in issues)
+        if issues
+        else "  (none)"
+    )
 
 
 def print_milestone_placement(
@@ -308,15 +334,23 @@ def print_milestone_placement(
     issues: Sequence[str],
 ) -> None:
     """Render the required, write-incapable response when ``--under`` is absent."""
-    roots = tuple(issue for issue in dag.roots if issue.is_open and is_root_ledger(issue.title))
+    roots = tuple(
+        issue for issue in dag.roots if issue.is_open and is_root_ledger(issue.title)
+    )
     if len(roots) != 1:
-        print("Refusing before mutation: the repository does not have one open root ledger.")
+        print(
+            "Refusing before mutation: the repository does not have one open root ledger."
+        )
         print(issue_lines(roots))
         sys.exit(2)
 
     reachable = reachable_issue_numbers(dag, roots[0].number)
     milestone_ledgers = tuple(
-        issue for number, issue in sorted(dag.issues.items()) if number in reachable and issue.is_open and issue.title.casefold().startswith("milestone:")
+        issue
+        for number, issue in sorted(dag.issues.items())
+        if number in reachable
+        and issue.is_open
+        and issue.title.casefold().startswith("milestone:")
     )
     print("Nothing was created. --under is required before milestone mutation.\n")
     print("Existing milestone ledgers:")
@@ -372,23 +406,40 @@ def print_milestone_failure(failure: MilestoneCreationFailed) -> None:
     if failure.progress.work_units:
         for work_unit in failure.progress.work_units:
             prior_placement = work_unit.prior_placement
-            parent = f"parent=#{prior_placement.parent_number} position={prior_placement.position}" if isinstance(prior_placement, ParentedPriorPlacement) else "parentless"
+            parent = (
+                f"parent=#{prior_placement.parent_number} position={prior_placement.position}"
+                if isinstance(prior_placement, ParentedPriorPlacement)
+                else "parentless"
+            )
             prior_milestone = work_unit.prior_milestone
-            milestone = f"assigned title={prior_milestone.title!r}" if isinstance(prior_milestone, AssignedPriorMilestone) else "unassigned"
+            milestone = (
+                f"assigned title={prior_milestone.title!r}"
+                if isinstance(prior_milestone, AssignedPriorMilestone)
+                else "unassigned"
+            )
             print(f"    {work_unit.ref.slug} {parent} milestone={milestone}")
     else:
         print("    (none)")
-    print("Recovery: reread the live GitHub milestone, issue tree, and assignments before acting.")
+    print(
+        "Recovery: reread the live GitHub milestone, issue tree, and assignments before acting."
+    )
 
 
 @app.command(group="Structural")
 def new(
-    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N")],
+    target: Annotated[
+        str,
+        Parameter(help="Repository as OWNER/REPO, or grouping parent as OWNER/REPO#N"),
+    ],
     title: Annotated[str, Parameter(help="Title for the new issue")],
     *,
-    under: Annotated[str | None, Parameter(help="Grouping issue to attach under, as OWNER/REPO#N")] = None,
+    under: Annotated[
+        str | None, Parameter(help="Grouping issue to attach under, as OWNER/REPO#N")
+    ] = None,
     body: Annotated[str, Parameter(help="Issue body in Markdown")] = "",
-    body_file: Annotated[str | None, Parameter(help="Read the issue body from a file")] = None,
+    body_file: Annotated[
+        str | None, Parameter(help="Read the issue body from a file")
+    ] = None,
 ) -> None:
     """File a new issue into the tree, with guided placement.
 
@@ -423,10 +474,14 @@ def new(
         sys.exit(3)
 
     if not parent_issue.is_open:
-        print(f"Refusing: #{parent_ref.number} is closed. Attach new work under an open grouping issue.")
+        print(
+            f"Refusing: #{parent_ref.number} is closed. Attach new work under an open grouping issue."
+        )
         sys.exit(2)
     if not is_grouping_issue(parent_issue.title):
-        print(f'Refusing: #{parent_ref.number} "{parent_issue.title}" is a work unit, and work units are leaves.')
+        print(
+            f'Refusing: #{parent_ref.number} "{parent_issue.title}" is a work unit, and work units are leaves.'
+        )
         print("Implementation tasks belong in the work-unit issue body or comments.")
         print("If this item is part of that work unit, absorb it instead:")
         print(f'  itree absorb --into {parent_ref.slug} --title "{title}" --body "..."')
@@ -515,17 +570,25 @@ def milestone(
         print_milestone_failure(result)
         sys.exit(3)
 
-    print(f"{request.repo_ref.slug}#{result.ledger.number} milestone={result.milestone.number}")
+    print(
+        f"{request.repo_ref.slug}#{result.ledger.number} milestone={result.milestone.number}"
+    )
 
 
 @app.command(group="Structural")
 def absorb(
-    source: Annotated[str | None, Parameter(help="Existing issue to absorb, as OWNER/REPO#N")] = None,
+    source: Annotated[
+        str | None, Parameter(help="Existing issue to absorb, as OWNER/REPO#N")
+    ] = None,
     *,
     into: Annotated[str, Parameter(help="Target work-unit issue as OWNER/REPO#N")],
-    title: Annotated[str | None, Parameter(help="Title for not-yet-filed content (no source issue)")] = None,
+    title: Annotated[
+        str | None, Parameter(help="Title for not-yet-filed content (no source issue)")
+    ] = None,
     body: Annotated[str, Parameter(help="Body for not-yet-filed content")] = "",
-    body_file: Annotated[str | None, Parameter(help="Read the content body from a file")] = None,
+    body_file: Annotated[
+        str | None, Parameter(help="Read the content body from a file")
+    ] = None,
 ) -> None:
     """Merge an issue (or not-yet-filed content) into a work unit, verbatim.
 
@@ -547,7 +610,9 @@ def absorb(
         sys.exit(3)
 
     if is_grouping_issue(target_issue.title):
-        print(f'Refusing: #{target_ref.number} "{target_issue.title}" is a grouping issue.')
+        print(
+            f'Refusing: #{target_ref.number} "{target_issue.title}" is a grouping issue.'
+        )
         print("Absorb into a work unit, not a ledger.")
         sys.exit(2)
     if not target_issue.is_open:
@@ -565,13 +630,17 @@ def absorb(
             sys.exit(1)
         try:
             dag = build_dag(target_ref.repo_ref)
-            source_issue = dag.issues.get(source_ref.number) or api.get_issue(source_ref.number)
+            source_issue = dag.issues.get(source_ref.number) or api.get_issue(
+                source_ref.number
+            )
             section = (
                 f"\n\n## Absorbed: {source_issue.title} (#{source_issue.number})\n\n"
                 f"_Absorbed verbatim from #{source_issue.number} on {today}. Original: {source_issue.html_url}_\n\n"
                 f"{source_issue.body or '(no body)'}"
             )
-            api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
+            api.update_issue_body(
+                target_ref.number, (target_issue.body or "") + section
+            )
             api.add_comment(
                 source_ref.number,
                 f"Absorbed into #{target_ref.number}; content preserved verbatim there.",
@@ -591,7 +660,9 @@ def absorb(
         content = read_body(body, body_file)
         section = f"\n\n## Absorbed: {title}\n\n_Recorded {today}; absorbed at filing time, no separate issue created._\n\n{content or '(no body)'}"
         try:
-            api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
+            api.update_issue_body(
+                target_ref.number, (target_issue.body or "") + section
+            )
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(3)
@@ -648,8 +719,12 @@ def move(
     child: str,
     under: Annotated[str, Parameter(name=["under", "--under"])],
     *,
-    before: Annotated[str | None, Parameter(help="Place before sibling OWNER/REPO#N")] = None,
-    after: Annotated[str | None, Parameter(help="Place after sibling OWNER/REPO#N")] = None,
+    before: Annotated[
+        str | None, Parameter(help="Place before sibling OWNER/REPO#N")
+    ] = None,
+    after: Annotated[
+        str | None, Parameter(help="Place after sibling OWNER/REPO#N")
+    ] = None,
 ) -> None:
     """Move issue under new parent, optionally positioned relative to siblings.
 
@@ -671,9 +746,18 @@ def move(
         if api.get_parent_number(req.child.number) != req.parent.number:
             api.replace_parent_subissue(req.parent.number, child_issue.id)
         if req.before is not None or req.after is not None:
-            before_id = api.get_issue(req.before.number).id if req.before is not None else None
-            after_id = api.get_issue(req.after.number).id if req.after is not None else None
-            api.reprioritize(req.parent.number, child_issue.id, before_id=before_id, after_id=after_id)
+            before_id = (
+                api.get_issue(req.before.number).id if req.before is not None else None
+            )
+            after_id = (
+                api.get_issue(req.after.number).id if req.after is not None else None
+            )
+            api.reprioritize(
+                req.parent.number,
+                child_issue.id,
+                before_id=before_id,
+                after_id=after_id,
+            )
         print(req.child.slug)
     except Exception as e:
         print(f"Error: {e}")
@@ -682,7 +766,9 @@ def move(
 
 @app.command(group="Query")
 def children(
-    target: Annotated[str, Parameter(help="Issue or repository root as OWNER/REPO#N or OWNER/REPO")],
+    target: Annotated[
+        str, Parameter(help="Issue or repository root as OWNER/REPO#N or OWNER/REPO")
+    ],
     *,
     recursive: Annotated[bool, Parameter()] = False,
     as_json: Annotated[bool, Parameter(name="--json")] = False,
@@ -718,7 +804,9 @@ def tree(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
     as_json: Annotated[bool, Parameter(name="--json")] = False,
-    show_all: Annotated[bool, Parameter(name="--all", help="Also show closed issues")] = False,
+    show_all: Annotated[
+        bool, Parameter(name="--all", help="Also show closed issues")
+    ] = False,
 ) -> None:
     """Render the repository's ordered issue tree with role annotations.
 
@@ -739,18 +827,22 @@ def tree(
         print(json.dumps(tree_node.model_dump(), indent=2))
         return
 
-    next_node = first_open_work_unit(tree_node)
+    next_node = first_open_work_unit(tree_node, dag)
     next_number = next_node.issue.number if next_node else None
 
     if show_all:
-        print(render_tree(tree_node, next_number=next_number, hidden_count=0))
+        print(render_tree(tree_node, next_number=next_number, hidden_count=0, dag=dag))
         return
 
     pruned, hidden_count = prune_closed(tree_node)
     if pruned is None:
-        print(f"Root ledger #{root_num} is closed; nothing open to render. Run: itree doctor {repo_ref.slug}")
+        print(
+            f"Root ledger #{root_num} is closed; nothing open to render. Run: itree doctor {repo_ref.slug}"
+        )
         sys.exit(1)
-    print(render_tree(pruned, next_number=next_number, hidden_count=hidden_count))
+    print(
+        render_tree(pruned, next_number=next_number, hidden_count=hidden_count, dag=dag)
+    )
 
 
 @app.command(group="Query")
@@ -772,7 +864,7 @@ def next(
         print(f"Error: {e}")
         sys.exit(3)
 
-    node = first_open_work_unit(tree_node)
+    node = first_open_work_unit(tree_node, dag)
 
     if as_json:
         print("{}" if node is None else json.dumps(node.issue.model_dump(), indent=2))
@@ -783,9 +875,22 @@ def next(
 
         print("Next work unit:")
         print(f"  #{node.issue.number} {node.issue.title}\n")
+
+        # Show direct blockers if any are present (readiness context)
+        from .readiness import compute_readiness
+
+        readiness = compute_readiness(dag, node.issue.number)
+        if readiness.open_blockers:
+            blockers_str = ", ".join(f"#{b}" for b in readiness.open_blockers)
+            print(f"  Blocked by: {blockers_str}\n")
+
         print("Instruction:")
-        print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")
-        print("  Open the PR when implementation starts; synthesize its body from the issue.")
+        print(
+            f"  Work from issue #{node.issue.number}; keep planning state on that issue."
+        )
+        print(
+            "  Open the PR when implementation starts; synthesize its body from the issue."
+        )
         print("  Keep implementation tasks in the issue body or issue comments.")
 
 
@@ -811,7 +916,11 @@ def path(
 
     path_nodes = tree_node.path_to(issue_ref.number)
     if as_json:
-        print("[]" if path_nodes is None else json.dumps([n.issue.model_dump() for n in path_nodes], indent=2))
+        print(
+            "[]"
+            if path_nodes is None
+            else json.dumps([n.issue.model_dump() for n in path_nodes], indent=2)
+        )
     else:
         if path_nodes is None:
             print(f"Issue #{issue_ref.number} not found")
@@ -824,7 +933,9 @@ def path(
 def close(
     issue: Annotated[str, Parameter(help="Issue to close as OWNER/REPO#N")],
     *,
-    comment: Annotated[str | None, Parameter(help="Comment to post when closing")] = None,
+    comment: Annotated[
+        str | None, Parameter(help="Comment to post when closing")
+    ] = None,
     reason: Annotated[
         IssueCloseReason,
         Parameter(help="Reason for closing: completed, not_planned, or reopened"),
@@ -859,7 +970,12 @@ def triage_root(dag: RepoDag) -> int:
 
 @app.command(group="Diagnostic")
 def triage(
-    target: Annotated[str, Parameter(help="Repository as OWNER/REPO, or a specific orphan as OWNER/REPO#N")],
+    target: Annotated[
+        str,
+        Parameter(
+            help="Repository as OWNER/REPO, or a specific orphan as OWNER/REPO#N"
+        ),
+    ],
     *,
     as_json: Annotated[bool, Parameter(name="--json")] = False,
 ) -> None:
@@ -888,7 +1004,11 @@ def triage(
     root_num = triage_root(dag)
     reachable: set[int] = set()
     dag._collect_reachable(root_num, reachable)
-    orphans = [n for n, issue in sorted(dag.issues.items()) if issue.is_open and n not in reachable]
+    orphans = [
+        n
+        for n, issue in sorted(dag.issues.items())
+        if issue.is_open and n not in reachable
+    ]
     tree_node = dag.materialize_root(root_num)
 
     if as_json:
@@ -946,7 +1066,9 @@ def triage(
     print(f"    itree close {slug}#{current} --reason not_planned")
     print()
     if remaining:
-        print(f"{remaining} orphan{'s' if remaining != 1 else ''} remain after this one. Re-run: itree triage {slug}")
+        print(
+            f"{remaining} orphan{'s' if remaining != 1 else ''} remain after this one. Re-run: itree triage {slug}"
+        )
     else:
         print(f"Last orphan. Afterwards run: itree doctor {slug}")
 
@@ -981,8 +1103,12 @@ def render_doctor_report(
         next_ref = report.next_issue.ref
         next_title = dag.issues[next_ref.number].title
         lines.append(f"  Next work unit: #{next_ref.number} {next_title}")
-        lines.append(f"  Agent instruction: work from issue #{next_ref.number}; keep planning state on that issue.")
-        lines.append("  Open the PR when implementation starts; synthesize its body from the issue.")
+        lines.append(
+            f"  Agent instruction: work from issue #{next_ref.number}; keep planning state on that issue."
+        )
+        lines.append(
+            "  Open the PR when implementation starts; synthesize its body from the issue."
+        )
         lines.append("  Keep implementation tasks in the issue body or issue comments.")
     else:
         lines.append("  Next work unit: None")
@@ -993,19 +1119,25 @@ def render_doctor_report(
     lines.append("Summary:")
     lines.append(f"  errors: {m.errors}")
     lines.append(f"  warnings: {m.warnings}")
-    lines.append(f"  open issues reachable from root: {m.open_issues_reachable_from_root}")
+    lines.append(
+        f"  open issues reachable from root: {m.open_issues_reachable_from_root}"
+    )
     lines.append(f"  open issues outside root: {m.open_issues_outside_root}")
     lines.append(f"  open work units: {m.open_work_units}")
     lines.append(f"  work units: {m.work_units}")
     lines.append(f"  max depth: {m.max_depth} / 8")
     if report.root.kind == "present":
         tree_node = dag.materialize_root(report.root.ref.number)
-        next_node = first_open_work_unit(tree_node)
-        lines.append(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
+        next_node = first_open_work_unit(tree_node, dag)
+        lines.append(
+            f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}"
+        )
     lines.append("")
 
     lines.append("Findings:")
-    if not report.findings or (len(report.findings) == 1 and report.findings[0].code == "I001"):
+    if not report.findings or (
+        len(report.findings) == 1 and report.findings[0].code == "I001"
+    ):
         lines.append("  (none)")
     else:
         for f in report.findings:
@@ -1034,7 +1166,9 @@ def render_doctor_report(
     # Suggest --explain only for a code actually present in the findings.
     non_info_findings = [f for f in report.findings if f.severity != "info"]
     if non_info_findings:
-        lines.append(f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}")
+        lines.append(
+            f"  itree doctor {repo_ref.slug} --explain {non_info_findings[0].code}"
+        )
     lines.append(f"  itree tree {repo_ref.slug}")
     lines.append(f"  itree doctor {repo_ref.slug} --json")
     return "\n".join(lines)
@@ -1050,7 +1184,9 @@ def doctor(
     repo: Annotated[str, Parameter(help="Repository as OWNER/REPO")],
     *,
     as_json: Annotated[bool, Parameter(name="--json")] = False,
-    explain: Annotated[str | None, Parameter(help="Explain the remediation of a diagnostic code")] = None,
+    explain: Annotated[
+        str | None, Parameter(help="Explain the remediation of a diagnostic code")
+    ] = None,
     strict: Annotated[bool, Parameter(help="Treat warnings as errors")] = False,
 ) -> None:
     """Scan the full repo issue DAG and report structure."""
@@ -1113,7 +1249,9 @@ def collect_repo_healths(
     return healths, fetch_errors
 
 
-def scan_payload(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) -> dict:
+def scan_payload(
+    healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]
+) -> dict:
     """Machine-readable scan result (the pure --json shape)."""
     return {
         "repos": [h.model_dump() for h in healths],
