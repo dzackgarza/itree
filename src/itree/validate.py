@@ -133,7 +133,11 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "E014": {
         "title": "dependency_cycle",
         "severity": "error",
-        "ideal_model": "Native blocked_by edges express valid hard prerequisites; preorder is the deterministic tie-breaker among ready work. Only dependency cycles are structural errors.",
+        "ideal_model": (
+            "Native blocked_by edges express valid hard prerequisites; "
+            "preorder is the deterministic tie-breaker among ready work. "
+            "Only dependency cycles are structural errors."
+        ),
         "meaning": "A dependency cycle exists in the native blocked_by graph. The cycle prevents any of the involved issues from becoming ready.",
         "remediation": [
             "A. Break the cycle by removing one blocked_by edge using the GitHub UI or API.",

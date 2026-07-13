@@ -53,7 +53,7 @@ from .models import (
     TreeNode,
     WorkUnitMilestoneEffect,
 )
-from .render import prune_closed, render_scan, render_tree
+from .render import prune_closed, render_scan, render_tree, shape_summary
 from .traversal import build_dag
 from .validate import (
     DIAGNOSTIC_CATALOG,
