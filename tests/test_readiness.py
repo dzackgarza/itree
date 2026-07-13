@@ -214,6 +214,9 @@ def test_deleted_blocker_detected_as_error() -> None:
     assert errors[0].kind == DependencyErrorKind.deleted_blocker
     assert 2 in errors[0].witness
     assert 999 in errors[0].witness
+    readiness = compute_readiness(dag, 2)
+    assert readiness.state == ReadinessState.blocked
+    assert readiness.open_blockers == (999,)
 
 
 # ---------------------------------------------------------------------------

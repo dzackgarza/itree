@@ -37,7 +37,6 @@ class ReadinessState(StrEnum):
 class DependencyErrorKind(StrEnum):
     cycle = "cycle"
     deleted_blocker = "deleted_blocker"
-    inaccessible_blocker = "inaccessible_blocker"
 
 
 class ReadinessResult(BaseModel):
@@ -83,17 +82,14 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
     if issue is None:
         return ReadinessResult(state=ReadinessState.blocked, open_blockers=(), blocked_ancestors=())
 
-    # Direct blockers: check if any are open.
+    # Direct blockers: absent blockers are unreadable and therefore unsatisfied.
     direct_blockers: tuple[int, ...] = dag.dependencies[issue_number] if issue_number in dag.dependencies else ()
-    open_blockers = tuple(b for b in direct_blockers if b in dag.issues and dag.issues[b].is_open)
+    open_blockers = tuple(b for b in direct_blockers if b not in dag.issues or dag.issues[b].is_open)
 
     # Grouping ancestors with open blockers.
-    # Guard against malformed cyclic parentage with a visited set.
     blocked_ancestors: list[int] = []
-    visited: set[int] = {issue_number}
     ancestor = dag.parent_of.get(issue_number)
-    while ancestor is not None and ancestor not in visited:
-        visited.add(ancestor)
+    while ancestor is not None:
         ancestor_issue = dag.issues.get(ancestor)
         if ancestor_issue is None:
             break
