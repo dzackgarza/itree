@@ -209,6 +209,35 @@ class TestScratchFixtureCleanup:
         assert fixtures.api.get_issue(created.number).state is IssueState.closed
 
 
+class TestMilestoneRefusals:
+    def test_backlog_parent_rejects_before_live_github_mutation(self, scratch: ScratchFixtures, capsys: pytest.CaptureFixture[str]) -> None:
+        """A rejected Backlog parent leaves live milestone, issue, and edge state unchanged."""
+        backlog = scratch.track(scratch.api.create_issue("Backlog", "Unscoped work."))
+        scratch.api.add_subissue(LEDGER, backlog.id)
+        work_unit = scratch.new_issue("milestone parent rejection", parent=LEDGER)
+        title = f"proof backlog parent rejection {backlog.number}"
+        before_milestones = tuple((milestone.number, milestone.title.value) for milestone in scratch.api.list_milestones())
+        before_parents = {
+            backlog.number: scratch.api.get_parent_number(backlog.number),
+            work_unit.number: scratch.api.get_parent_number(work_unit.number),
+        }
+
+        with pytest.raises(SystemExit) as exit_status:
+            cli.milestone(
+                SLUG,
+                title,
+                under=f"{SLUG}#{backlog.number}",
+                issues=[f"{SLUG}#{work_unit.number}"],
+            )
+
+        assert exit_status.value.code == 2
+        assert "parent_invalid" in capsys.readouterr().out
+        assert tuple((milestone.number, milestone.title.value) for milestone in scratch.api.list_milestones()) == before_milestones
+        assert scratch.api.get_parent_number(backlog.number) == before_parents[backlog.number]
+        assert scratch.api.get_parent_number(work_unit.number) == before_parents[work_unit.number]
+        assert all(issue["title"] != f"Milestone: {title}" for issue in scratch.api.fetch_repo_graph())
+
+
 class TestNewRefusals:
     """Rails 1 & 2 as live command behavior; none of these mutate the repo."""
 
