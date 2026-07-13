@@ -49,17 +49,11 @@ class ScratchFixtures:
         # Detach from any live parent so closed proof issues never pollute the
         # anchor tree's edges, then close them (restore-or-close per #24).
         for issue in self._created:
-            try:
-                parent = self.api.get_parent_number(issue.number)
-                if parent is not None:
-                    self.api.remove_subissue(parent, issue.id)
-            except Exception:
-                pass
-            try:
-                if self.api.get_issue(issue.number).is_open:
-                    self.api.close_issue(issue.number, reason=IssueCloseReason.not_planned)
-            except Exception:
-                pass
+            parent = self.api.get_parent_number(issue.number)
+            if parent is not None:
+                self.api.remove_subissue(parent, issue.id)
+            if self.api.get_issue(issue.number).is_open:
+                self.api.close_issue(issue.number, reason=IssueCloseReason.not_planned)
 
 
 @pytest.fixture

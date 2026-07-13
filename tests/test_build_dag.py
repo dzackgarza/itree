@@ -161,6 +161,6 @@ def test_live_build_dag_reads_the_disposable_repo_tree() -> None:
     # #3 root ledger -> #4 milestone ledger -> #5 work unit.
     assert dag.issues[3].title == "Ledger: dzackgarza/itree-e2e-scratch"
     assert dag.issues[3].is_open
-    assert 5 in dag.children_of.get(4, ())
+    assert 5 in dag.children_of[4]
     tree = dag.materialize_root(3)
     assert 4 in [c.issue.number for c in tree.children]
