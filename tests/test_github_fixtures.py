@@ -272,4 +272,4 @@ class TestLiveAdapterBoundary:
 
     def test_live_build_dag_over_the_real_boundary(self) -> None:
         dag = build_dag(SCRATCH)
-        assert 5 in dag.children_of.get(4, ())
+        assert 5 in dag.children_of[4]

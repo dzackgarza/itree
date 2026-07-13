@@ -13,17 +13,58 @@ unit; #2 is a closed issue. These are never mutated.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import shlex
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
+from functools import partial
+from types import TracebackType
+from typing import Literal
 
 import pytest
 
 from itree import cli
 from itree.github import GithubApi
-from itree.models import GithubIssue, IssueCloseReason, IssueState, RepoDag, RepoRef, TreeNode
+from itree.milestone import preflight_milestone
+from itree.models import CreateMilestoneRequest, GithubIssue, IssueCloseReason, IssueRef, IssueState, MilestoneTitle, RepoDag, RepoRef, TreeNode, ValidatedMilestonePlan
 
 SCRATCH = RepoRef(owner="dzackgarza", repo="itree-e2e-scratch")
 SLUG = SCRATCH.slug
 LEDGER, MILESTONE, WORKUNIT, CLOSED = 3, 4, 5, 2
+
+
+class FixtureCleanupFailure(RuntimeError):
+    """A live fixture cleanup operation failed for one tracked issue."""
+
+    def __init__(self, issue_number: int, operation: str) -> None:
+        self.issue_number = issue_number
+        self.operation = operation
+        super().__init__(f"cleanup {operation} failed for issue #{issue_number}")
+
+
+class CleanupOperation:
+    """Attach an issue and operation to a cleanup failure without suppressing it."""
+
+    def __init__(self, issue_number: int, operation: str, action: Callable[[], None]) -> None:
+        self.issue_number = issue_number
+        self.operation = operation
+        self.action = action
+
+    def __call__(self) -> None:
+        with self:
+            self.action()
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
+        if exc_value is not None:
+            raise FixtureCleanupFailure(self.issue_number, self.operation) from exc_value
+        return False
 
 
 class ScratchFixtures:
@@ -48,18 +89,21 @@ class ScratchFixtures:
     def cleanup(self) -> None:
         # Detach from any live parent so closed proof issues never pollute the
         # anchor tree's edges, then close them (restore-or-close per #24).
-        for issue in self._created:
-            try:
-                parent = self.api.get_parent_number(issue.number)
-                if parent is not None:
-                    self.api.remove_subissue(parent, issue.id)
-            except Exception:
-                pass
-            try:
-                if self.api.get_issue(issue.number).is_open:
-                    self.api.close_issue(issue.number, reason=IssueCloseReason.not_planned)
-            except Exception:
-                pass
+        # ExitStack completes every callback even when an earlier one raises;
+        # each wrapper retains the failed issue and cleanup operation.
+        with ExitStack() as cleanup:
+            for issue in reversed(self._created):
+                cleanup.callback(CleanupOperation(issue.number, "close", partial(self._close_issue, issue)))
+                cleanup.callback(CleanupOperation(issue.number, "detach", partial(self._detach_issue, issue)))
+
+    def _detach_issue(self, issue: GithubIssue) -> None:
+        parent = self.api.get_parent_number(issue.number)
+        if parent is not None:
+            self.api.remove_subissue(parent, issue.id)
+
+    def _close_issue(self, issue: GithubIssue) -> None:
+        if self.api.get_issue(issue.number).is_open:
+            self.api.close_issue(issue.number, reason=IssueCloseReason.not_planned)
 
 
 @pytest.fixture
@@ -105,6 +149,93 @@ class TestPlacementMenuRendering:
         assert "#2 Milestone: v1" in out
         assert 'itree absorb --into t/t#3 --title "Some idea"' in out
         assert 'itree new t/t "Some idea" --under t/t#2' in out
+
+
+class TestMilestonePlacementRendering:
+    def test_placement_uses_the_root_ledger_when_a_lower_grouping_is_reachable(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """The displayed no-write command names a parent accepted by mutation preflight."""
+        repo = RepoRef(owner="t", repo="t")
+        dag = RepoDag(
+            repo_ref=repo,
+            issues={
+                1: _issue(1, "Backlog"),
+                10: _issue(10, "Ledger: t/t"),
+            },
+            children_of={10: (1,)},
+        )
+        inquiry = cli.PlacementInquiry(repo_ref=repo, title=MilestoneTitle.parse("release 2"))
+
+        cli.print_milestone_placement(inquiry, dag, "", None, ())
+
+        command = next(line.strip() for line in capsys.readouterr().out.splitlines() if line.startswith("  itree milestone"))
+        tokens = shlex.split(command)
+        displayed_parent = IssueRef.parse(tokens[tokens.index("--under") + 1])
+        result = preflight_milestone(
+            CreateMilestoneRequest(
+                repo_ref=repo,
+                title=inquiry.title,
+                parent=displayed_parent,
+                body="",
+            ),
+            dag,
+            (),
+        )
+
+        assert displayed_parent.number == 10
+        assert isinstance(result, ValidatedMilestonePlan)
+        assert result.parent_issue.number == 10
+
+
+class TestScratchFixtureCleanup:
+    def test_cleanup_continues_after_a_real_github_failure(self) -> None:
+        """A failed issue cleanup is contextualized while later tracked issues are still cleaned."""
+        fixtures = ScratchFixtures()
+        missing = GithubIssue(
+            id=999_999_999,
+            number=999_999_999,
+            title="proof: missing cleanup boundary",
+            state=IssueState.open,
+            html_url="https://github.com/dzackgarza/itree-e2e-scratch/issues/999999999",
+        )
+        fixtures.track(missing)
+        created = fixtures.new_issue("cleanup continues after GitHub failure")
+
+        with pytest.raises(FixtureCleanupFailure) as error:
+            fixtures.cleanup()
+
+        assert error.value.issue_number == missing.number
+        assert error.value.operation == "close"
+        assert fixtures.api.get_parent_number(created.number) is None
+        assert fixtures.api.get_issue(created.number).state is IssueState.closed
+
+
+class TestMilestoneRefusals:
+    def test_backlog_parent_rejects_before_live_github_mutation(self, scratch: ScratchFixtures, capsys: pytest.CaptureFixture[str]) -> None:
+        """A rejected Backlog parent leaves live milestone, issue, and edge state unchanged."""
+        backlog = scratch.track(scratch.api.create_issue("Backlog", "Unscoped work."))
+        scratch.api.add_subissue(LEDGER, backlog.id)
+        work_unit = scratch.new_issue("milestone parent rejection", parent=LEDGER)
+        title = f"proof backlog parent rejection {backlog.number}"
+        before_milestones = tuple((milestone.number, milestone.title.value) for milestone in scratch.api.list_milestones())
+        before_parents = {
+            backlog.number: scratch.api.get_parent_number(backlog.number),
+            work_unit.number: scratch.api.get_parent_number(work_unit.number),
+        }
+
+        with pytest.raises(SystemExit) as exit_status:
+            cli.milestone(
+                SLUG,
+                title,
+                under=f"{SLUG}#{backlog.number}",
+                issues=[f"{SLUG}#{work_unit.number}"],
+            )
+
+        assert exit_status.value.code == 2
+        assert "parent_invalid" in capsys.readouterr().out
+        assert tuple((milestone.number, milestone.title.value) for milestone in scratch.api.list_milestones()) == before_milestones
+        assert scratch.api.get_parent_number(backlog.number) == before_parents[backlog.number]
+        assert scratch.api.get_parent_number(work_unit.number) == before_parents[work_unit.number]
+        assert all(issue["title"] != f"Milestone: {title}" for issue in scratch.api.fetch_repo_graph())
 
 
 class TestNewRefusals:

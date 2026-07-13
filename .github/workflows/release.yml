@@ -20,7 +20,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.14'
@@ -70,7 +69,6 @@ jobs:
             -F tag="$RELEASE_TAG" \
             --jq '.data.repository.release.id // empty')"
           test -z "$existing_release"
-
 
       - name: Build distribution
         run: just build

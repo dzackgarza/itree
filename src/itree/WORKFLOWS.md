@@ -12,6 +12,13 @@ root ledger        The single parentless issue anchoring the repo's work tree.
 grouping issue     A ledger, milestone, backlog, roadmap, or phase issue.
 (milestone ledger) Orders work units. Not itself a unit of work.
 
+milestone ledger   A `Milestone: TITLE` grouping issue that is a DIRECT CHILD
+                   of the root ledger. Its descendants are release-scoped and
+                   carry native GitHub milestone TITLE.
+
+backlog ledger     A sibling DIRECT CHILD branch of the root ledger. Its
+                   descendants are unscoped and have no native GitHub milestone.
+
 work unit          A coherent review/proof boundary that deserves one PR.
                    ALWAYS A LEAF. Acceptance criteria, proof obligations,
                    implementation checklists, and status all live in its
@@ -35,13 +42,18 @@ STATE             DETECTED BY                        ACTION
 NO_TREE           no root ledger (E001)              itree init OWNER/REPO "Ledger: ..."
 FOREST            open issues unreachable from root  itree triage OWNER/REPO
                   (E010/E011)
-MALFORMED         other E-findings (cycles, dup      itree doctor OWNER/REPO --explain CODE
-                  roots, closed parent hiding work)
-CLEAN_WITH_WORK   doctor OK, an open work unit       itree next OWNER/REPO  ->  work  ->  itree close
-DONE              doctor OK, no open work units       stop, or itree new for genuinely new work
+ERROR             E-findings                          dispatch issue-itree-maintenance synchronously;
+                                                      wait for its evidence before dependent work
+WARNING           W-findings                          dispatch issue-itree-maintenance asynchronously;
+                                                      continue substantive work
+CLEAN_WITH_WORK   no E/W finding, open work unit      itree next OWNER/REPO  ->  work  ->  itree close
+DONE              no E/W finding, no work units       stop, or itree new for genuinely new work
 ```
 
-A repo can only advance to `next` once it is CLEAN. Fix structure first.
+Severity controls maintenance timing, not whether work is possible.
+An error requires a synchronous maintenance handoff before *dependent* work continues; a warning lets substantive work continue while maintenance runs asynchronously.
+The maintenance agent is always the escape hatch.
+It rereads live state, appends its remediation ledger entry as a comment on the root ledger issue, repairs or routes the issue, and returns an evidence-backed disposition without substituting tree repair for substantive work.
 
 ## The four rails
 
@@ -126,10 +138,11 @@ owner/repo#21 milestone=4
 ```
 
 Placement is mandatory.
-Without `--under`, the command creates nothing, lists existing milestone ledgers and valid open grouping targets, prints an exact command with placement, and exits nonzero.
+Without `--under`, the command creates nothing, lists existing milestone ledgers and the root-ledger target, prints an exact command with placement, and exits nonzero.
 
 With placement supplied, the command fetches the full tree and all open or closed GitHub Milestones before writing.
-It rejects an invalid grouping parent, malformed tree state, an exact milestone or `Milestone: TITLE` collision, duplicate or invalid work-unit leaves, and cycle risks.
+It accepts only the unique reachable root ledger as `--under`. A generated `Milestone: TITLE` ledger is its direct child; Backlog is a sibling branch, not a valid parent.
+It rejects every other parent before any GitHub mutation, along with malformed tree state, an exact milestone or `Milestone: TITLE` collision, and duplicate or invalid work-unit leaves.
 A successful preflight fixes this effect order:
 
 1. Create the GitHub Milestone.
@@ -141,6 +154,12 @@ After mutation starts, `itree` stops at the first explicit rejection or indeterm
 It does not roll back, compensate, retry, silently reuse an object, or attempt the remaining suffix.
 The error identifies the confirmed prefix, current outcome, untouched suffix, and each work unit's preflight-recorded parent, sibling position, and milestone assignment.
 Recovery always begins with a live GitHub and tree reread.
+
+## Diagnostic maintenance
+
+Every error and warning in `itree doctor` protects an explicit ideal tree model, reports the observed deviation, and supplies a repair route.
+Use `itree doctor OWNER/REPO --explain CODE` for that policy and dispatch the shipped `issue-itree-maintenance` prompt.
+The root ledger issue holds an append-only maintenance ledger: add one `## itree maintenance ledger` comment for each handled finding with the code, affected live objects, ideal model, selected repair, dispatch timing, before/after evidence, disposition, and substantive work unit that remains in progress.
 
 ## Proportionality doctrine
 

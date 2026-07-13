@@ -98,7 +98,7 @@ def test_preflight_plans_parented_replace_and_parentless_attach_in_order() -> No
     request = CreateMilestoneRequest(
         repo_ref=repo_ref,
         title=MilestoneTitle.parse("release 2"),
-        parent=IssueRef(repo_ref=repo_ref, number=2),
+        parent=IssueRef(repo_ref=repo_ref, number=1),
         body="## Outcome\nShip release 2.",
         work_units=(
             IssueRef(repo_ref=repo_ref, number=3),
@@ -230,14 +230,35 @@ def test_effect_variants_require_their_target_shape() -> None:
 
 
 def test_preflight_rejects_a_work_unit_as_parent() -> None:
-    """Only an open grouping issue can own the new milestone ledger."""
+    """Only the root ledger can own the new milestone ledger."""
     from itree.milestone import preflight_milestone
 
     result = preflight_milestone(_request(3, (4,)), _representative_dag(), ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
     assert result.kind is models.MilestonePreflightErrorKind.parent_invalid
-    assert result.references == ("owner/repo#3",)
+    assert result.references == ("owner/repo#3", "owner/repo#1")
+
+
+def test_preflight_rejects_backlog_parent_before_an_effect_plan_exists() -> None:
+    """A release ledger and Backlog are sibling branches of the root ledger."""
+    from itree.milestone import preflight_milestone
+
+    dag = RepoDag(
+        repo_ref=RepoRef(owner="owner", repo="repo"),
+        issues={
+            1: _issue(1, "Ledger: owner/repo"),
+            2: _issue(2, "Backlog"),
+            3: _issue(3, "Release work unit"),
+        },
+        children_of={1: (2, 3)},
+    )
+
+    result = preflight_milestone(_request(2, (3,)), dag, ())
+
+    assert isinstance(result, models.MilestonePreflightRejected)
+    assert result.kind is models.MilestonePreflightErrorKind.parent_invalid
+    assert result.references == ("owner/repo#2", "owner/repo#1")
 
 
 def test_preflight_rejects_exact_ledger_title_collision_in_any_issue_state() -> None:
@@ -262,7 +283,7 @@ def test_preflight_rejects_exact_ledger_title_collision_in_any_issue_state() -> 
         children_of={1: (2, 5)},
     )
 
-    result = preflight_milestone(_request(2, ()), dag, ())
+    result = preflight_milestone(_request(1, ()), dag, ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
     assert result.kind is models.MilestonePreflightErrorKind.ledger_title_collision
@@ -274,7 +295,7 @@ def test_preflight_rejects_duplicate_work_unit_arguments() -> None:
     from itree.milestone import preflight_milestone
 
     result = preflight_milestone(
-        _request(2, (3, 3)),
+        _request(1, (3, 3)),
         _representative_dag(),
         (),
     )
@@ -321,7 +342,7 @@ def test_preflight_rejects_closed_work_unit() -> None:
         children_of={1: (2, 3)},
     )
 
-    result = preflight_milestone(_request(2, (3,)), dag, ())
+    result = preflight_milestone(_request(1, (3,)), dag, ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
     assert result.kind is models.MilestonePreflightErrorKind.invalid_work_unit
@@ -343,7 +364,7 @@ def test_preflight_rejects_nonleaf_work_unit() -> None:
         children_of={1: (2, 3), 2: (4,)},
     )
 
-    result = preflight_milestone(_request(3, (2,)), dag, ())
+    result = preflight_milestone(_request(1, (2,)), dag, ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
     assert result.kind is models.MilestonePreflightErrorKind.invalid_work_unit
@@ -363,15 +384,15 @@ def test_preflight_rejects_unknown_work_unit() -> None:
         children_of={1: (2,)},
     )
 
-    result = preflight_milestone(_request(2, (99,)), dag, ())
+    result = preflight_milestone(_request(1, (99,)), dag, ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
     assert result.kind is models.MilestonePreflightErrorKind.invalid_work_unit
     assert result.references == ("owner/repo#99",)
 
 
-def test_preflight_reports_cycle_risk_before_nonleaf_reclassification() -> None:
-    """Moving an ancestor beneath its descendant is rejected as the specific cycle risk."""
+def test_preflight_rejects_an_existing_milestone_ledger_as_parent() -> None:
+    """A milestone ledger is a sibling branch, never the parent of a new release ledger."""
     from itree.milestone import preflight_milestone
 
     dag = RepoDag(
@@ -387,8 +408,8 @@ def test_preflight_reports_cycle_risk_before_nonleaf_reclassification() -> None:
     result = preflight_milestone(_request(3, (2,)), dag, ())
 
     assert isinstance(result, models.MilestonePreflightRejected)
-    assert result.kind is models.MilestonePreflightErrorKind.cycle_risk
-    assert result.references == ("owner/repo#2", "owner/repo#3")
+    assert result.kind is models.MilestonePreflightErrorKind.parent_invalid
+    assert result.references == ("owner/repo#3", "owner/repo#1")
 
 
 def test_preflight_rejects_unselected_open_orphan() -> None:
@@ -396,7 +417,7 @@ def test_preflight_rejects_unselected_open_orphan() -> None:
     from itree.milestone import preflight_milestone
 
     result = preflight_milestone(
-        _request(2, (3,)),
+        _request(1, (3,)),
         _representative_dag(),
         (),
     )
@@ -429,7 +450,7 @@ def test_preflight_records_existing_parent_order_and_milestone() -> None:
         children_of={1: (2, 3)},
     )
 
-    result = preflight_milestone(_request(2, (3,)), dag, ())
+    result = preflight_milestone(_request(1, (3,)), dag, ())
 
     assert isinstance(result, models.ValidatedMilestonePlan)
     assert result.work_units == (

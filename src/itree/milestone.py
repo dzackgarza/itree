@@ -48,19 +48,6 @@ def _reachable_from(dag: RepoDag, root_number: int) -> set[int]:
     return reachable
 
 
-def _is_ancestor(dag: RepoDag, ancestor: int, descendant: int) -> bool:
-    current = descendant
-    seen: set[int] = set()
-    while current in dag.parent_of:
-        if current in seen:
-            return True
-        seen.add(current)
-        current = dag.parent_of[current]
-        if current == ancestor:
-            return True
-    return False
-
-
 def _malformed_structure_references(dag: RepoDag) -> tuple[str, ...]:
     """Identify edge states that cannot support deterministic orchestration."""
     parents_by_child: dict[int, list[int]] = {number: [] for number in dag.issues}
@@ -146,10 +133,6 @@ def preflight_milestone(
             *(f"{request.repo_ref.slug}#{issue.number}" for issue in matching_ledgers),
         )
 
-    parent = dag.issues.get(request.parent.number)
-    if parent is None or not parent.is_open or not is_grouping_issue(parent.title):
-        return _reject(MilestonePreflightErrorKind.parent_invalid, request.parent.slug)
-
     root_numbers = tuple(number for number, issue in dag.issues.items() if number not in dag.parent_of and issue.is_open and is_root_ledger(issue.title))
     if len(root_numbers) != 1:
         return _reject(
@@ -157,9 +140,16 @@ def preflight_milestone(
             *(f"{request.repo_ref.slug}#{number}" for number in root_numbers),
         )
 
-    reachable = _reachable_from(dag, root_numbers[0])
-    if request.parent.number not in reachable:
-        return _reject(MilestonePreflightErrorKind.parent_invalid, request.parent.slug)
+    root_number = root_numbers[0]
+    parent = dag.issues.get(request.parent.number)
+    if parent is None or not parent.is_open or request.parent.number != root_number:
+        return _reject(
+            MilestonePreflightErrorKind.parent_invalid,
+            request.parent.slug,
+            f"{request.repo_ref.slug}#{root_number}",
+        )
+
+    reachable = _reachable_from(dag, root_number)
 
     requested_numbers = tuple(ref.number for ref in request.work_units)
     if len(set(requested_numbers)) != len(requested_numbers):
@@ -186,8 +176,6 @@ def preflight_milestone(
         prior_parent = dag.parent_of.get(ref.number)
         if ref.number not in reachable and prior_parent is not None:
             return _reject(MilestonePreflightErrorKind.repository_malformed, ref.slug)
-        if _is_ancestor(dag, ref.number, request.parent.number):
-            return _reject(MilestonePreflightErrorKind.cycle_risk, ref.slug, request.parent.slug)
         if is_grouping_issue(issue.title) or dag.children_of[ref.number]:
             return _reject(MilestonePreflightErrorKind.invalid_work_unit, ref.slug)
 

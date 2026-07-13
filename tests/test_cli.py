@@ -67,6 +67,23 @@ class TestPrintDiagnostic:
         out = capsys.readouterr().out
         assert out.startswith("ERROR E001:")
 
+    def test_warning_diagnostic_routes_to_async_maintenance(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Warnings preserve substantive work while an itree-maintenance agent heals structure."""
+        print_diagnostic("W040")
+        out = capsys.readouterr().out
+        assert "Maintenance: dispatch issue-itree-maintenance asynchronously" in out
+        assert "root ledger's remediation ledger comment" in out
+
+    def test_every_error_and_warning_has_a_model_and_maintenance_route(self) -> None:
+        """Every actionable doctor finding teaches its protected model and handoff."""
+        from itree.validate import DIAGNOSTIC_CATALOG
+
+        for details in DIAGNOSTIC_CATALOG.values():
+            if details["severity"] in ("error", "warning"):
+                assert details["ideal_model"]
+                assert details["remediation"]
+                assert details["maintenance"]
+
 
 class TestDoctorExplainFooter:
     """The Run: footer only suggests --explain for codes present in findings (#15)."""
@@ -212,6 +229,23 @@ class TestCLICommandStructure:
         out = capsys.readouterr().out
         expected = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
         assert out == expected
+
+    def test_help_milestone_explains_the_direct_root_rule(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Command-specific help distinguishes a milestone ledger from an ordinary grouping child."""
+        cli.help_milestone()
+        out = capsys.readouterr().out
+        assert "direct child of the root ledger" in out
+        assert "Backlog is a sibling branch" in out
+
+    def test_help_maintenance_ships_the_live_repair_contract(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Maintenance help exposes the required live reread, ledger, and handoff steps."""
+        cli.help_maintenance()
+        out = capsys.readouterr().out
+        assert "Reread the live GitHub issue tree" in out
+        assert "remediation ledger entry" in out
+        assert "append-only maintenance ledger" in out
+        assert "gh issue comment OWNER/REPO#ROOT" in out
+        assert "Preserve the current substantive work unit" in out
 
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""

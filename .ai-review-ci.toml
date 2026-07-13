@@ -1,0 +1,7 @@
+schema_version = 1
+profile = "python"
+installed_ref = "main"
+release_channel = "main"
+workflow_template_version = 1
+local_delegation = "global-justfile"
+default_branch = "main"

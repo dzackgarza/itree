@@ -304,7 +304,6 @@ class MilestonePreflightErrorKind(StrEnum):
     ledger_title_collision = "ledger_title_collision"
     duplicate_work_unit = "duplicate_work_unit"
     invalid_work_unit = "invalid_work_unit"
-    cycle_risk = "cycle_risk"
 
 
 class MilestonePreflightRejected(BaseModel):
