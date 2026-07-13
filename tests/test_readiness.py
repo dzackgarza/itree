@@ -11,6 +11,7 @@ The pure functions in ``readiness.py`` consume an already-built ``RepoDag``
 
 from __future__ import annotations
 
+from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 from itree.readiness import (
     DependencyErrorKind,
     ReadinessState,
@@ -18,8 +19,6 @@ from itree.readiness import (
     detect_dependency_errors,
     first_ready_work_unit,
 )
-
-from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 
 
 def _repo_ref() -> RepoRef:
