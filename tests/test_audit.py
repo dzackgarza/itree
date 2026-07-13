@@ -16,12 +16,12 @@ expected to fail until ``src/itree/audit.py`` exists.
 
 from __future__ import annotations
 
-from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 from itree.audit import (
-    detect_role_contradictions,
-    detect_label_conflicts,
     audit_completion_contracts,
+    detect_label_conflicts,
+    detect_role_contradictions,
 )
+from itree.models import GithubIssue, IssueState, RepoDag, RepoRef
 
 
 def _repo_ref() -> RepoRef:
@@ -89,9 +89,7 @@ def test_work_unit_without_grouping_title_is_accepted() -> None:
         repo_ref=_repo_ref(),
         issues={
             1: _issue(1, "Ledger: Root"),
-            2: _issue(
-                2, "Implement feature X", body="Acceptance criteria: done when X works."
-            ),
+            2: _issue(2, "Implement feature X", body="Acceptance criteria: done when X works."),
         },
         children_of={1: (2,)},
     )
@@ -204,10 +202,7 @@ def test_obligation_transfer_leaves_undischarged() -> None:
                 2,
                 "Original implementation",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: done when feature X is implemented.\n\n"
-                    "Implementation moved to #3."
-                ),
+                body=("Acceptance Criteria: done when feature X is implemented.\n\nImplementation moved to #3."),
             ),
             3: _issue(3, "Actual implementation", state=IssueState.open),
         },
@@ -250,10 +245,7 @@ def test_audit_cannot_discharge_implementation_obligation() -> None:
                 2,
                 "Audit of feature X",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: feature X implemented.\n\n"
-                    "Audit found gaps. Implementation routed to #3."
-                ),
+                body=("Acceptance Criteria: feature X implemented.\n\nAudit found gaps. Implementation routed to #3."),
             ),
             3: _issue(3, "Implement feature X", state=IssueState.open),
         },
@@ -342,10 +334,7 @@ def test_closed_broad_scope_audit_revalidation_on_new_owner() -> None:
                 2,
                 "Broad audit of subsystem",
                 state=IssueState.closed,
-                body=(
-                    "Acceptance Criteria: all of subsystem verified.\n\n"
-                    "Audit complete. New owner: #3 for future cases."
-                ),
+                body=("Acceptance Criteria: all of subsystem verified.\n\nAudit complete. New owner: #3 for future cases."),
             ),
             3: _issue(3, "New case family owner", state=IssueState.open),
         },
