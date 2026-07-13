@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 import networkx as nx
 
@@ -24,82 +24,111 @@ from .models import (
 class DiagnosticDetails(TypedDict):
     title: str
     severity: FindingSeverity
+    ideal_model: NotRequired[str]
     meaning: str
     remediation: list[str]
+    maintenance: NotRequired[list[str]]
+
+
+WARNING_MAINTENANCE = [
+    "dispatch issue-itree-maintenance asynchronously; record this finding code and the selected repair in its remediation ledger entry, then continue substantive work.",
+]
+ERROR_MAINTENANCE = [
+    "dispatch issue-itree-maintenance now; record the code and selected repair in its remediation ledger entry; await evidence before dependent work. This is not a terminal stop.",
+]
 
 
 DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "E001": {
         "title": "no_root",
         "severity": "error",
+        "ideal_model": "One open parentless `Ledger: ...` issue anchors every planned open issue in one traversal domain.",
         "meaning": "No parentless issue exists, so the repository has no traversal domain.",
         "remediation": [
             '1. Create one root ledger issue: itree init OWNER/REPO "Ledger: OWNER/REPO"',
             "2. Attach every open planned issue under it, directly or through a milestone/backlog ledger.",
             "Do not create multiple ledger issues. A milestone, project, roadmap, or epic is not a second root.",
         ],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E004": {
         "title": "root_not_ledger",
         "severity": "error",
+        "ideal_model": "The unique parentless traversal anchor is titled `Ledger: ...` so agents can identify its role without inference.",
         "meaning": "The unique root of the tree is not a ledger (its title does not start with 'Ledger:').",
         "remediation": ["1. Rename the root issue title so it starts with 'Ledger:', e.g., 'Ledger: OWNER/REPO'"],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E002": {
         "title": "multiple_root_ledgers",
         "severity": "error",
+        "ideal_model": "One root ledger orders all open work; sibling order beneath that root is the repository's traversal order.",
         "meaning": "This is a forest, not a tree. Multiple parentless issues exist in the repository.",
         "remediation": [
             "Run: itree triage OWNER/REPO",
             "It anchors on the 'Ledger:'-titled root and walks every stray through absorb / attach / close, one at a time.",
         ],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E003": {
         "title": "cycle_detected",
         "severity": "error",
+        "ideal_model": "Parentage is an acyclic rooted ordered tree, so preorder traversal has one deterministic meaning.",
         "meaning": "A circular dependency exists in the issue hierarchy. Cycles break the poset and prevent traversal.",
         "remediation": ["A. Detach one of the edges in the cycle using `itree detach` to break the loop."],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E010": {
         "title": "unreachable_open_issues",
         "severity": "error",
+        "ideal_model": "Every open planned issue is reachable from the single root ledger and can therefore be selected by preorder traversal.",
         "meaning": "These issues are not in the repository's deterministic traversal path. An agent following `itree next` will never reach them.",
         "remediation": [
             "Run: itree triage OWNER/REPO",
             "It walks each orphan through absorb / attach / close, one at a time.",
             "Absorb FIRST: an orphan smaller than one PR of work belongs inside an existing work unit, not attached as a new leaf.",
         ],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E011": {
         "title": "parentless_non_root_issues",
         "severity": "error",
+        "ideal_model": "Only the root ledger is parentless; every other open planned issue has one parent in the tree.",
         "meaning": "These are accidental roots. They need a parent, a merge, or a close.",
         "remediation": [
             "Run: itree triage OWNER/REPO",
             "It walks each orphan through absorb / attach / close, one at a time.",
         ],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E012": {
         "title": "closed_parent_with_open_descendants",
         "severity": "error",
+        "ideal_model": "Open work remains beneath open grouping ancestors so traversal never hides live work behind a closed node.",
         "meaning": "Traversal may skip live work. Reopen the parent or move the descendants.",
         "remediation": ["A. Reopen the parent issue.", "B. Move or detach the open children so they are attached under an open parent."],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E013": {
         "title": "duplicate_reachable_issue",
         "severity": "error",
+        "ideal_model": "Every reachable issue has exactly one parent, preserving a tree rather than a DAG.",
         "meaning": "Tree invariant is violated: a node has multiple parents in the DAG.",
         "remediation": ["A. Detach the issue from one of its multiple parents so it only appears once."],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "E014": {
         "title": "dependency_edges_present",
         "severity": "error",
+        "ideal_model": "Preorder tree position, not a separate dependency graph, expresses the repository's execution order.",
         "meaning": "This model does not use DAG scheduling. Move blockers earlier in preorder or make the blocker its own ordered work-unit issue.",
         "remediation": ["A. Remove the blocked_by dependency using the GitHub UI or API.", "B. Reorder the issues in the tree so the blocker appears earlier in preorder."],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "W030": {
         "title": "dead_open_grouping",
         "severity": "warning",
+        "ideal_model": "An open grouping ledger either orders live descendants or is explicitly marked deferred for later breakdown.",
         "meaning": "An open grouping issue (milestone/backlog ledger) has no open descendants. It is a stale shelf: traversal gains nothing from it.",
         "remediation": [
             "A. Close the grouping issue if its work is complete.",
@@ -108,19 +137,23 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "configured deferral label (deferral_label in ~/.config/itree/config.toml; default "
             "'deferred'); doctor then reports it as I010 instead of warning.",
         ],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "W020": {
         "title": "depth_near_limit",
         "severity": "warning",
+        "ideal_model": "Tree depth stays below GitHub's eight-level sub-issue cap by keeping task lists in work-unit bodies.",
         "meaning": "GitHub supports at most eight nested sub-issue levels; split or flatten before the tree hits the limit.",
         "remediation": [
             "A. Flatten the tree by moving sub-issues to a higher parent.",
             "B. Keep implementation task lists inside the relevant work-unit issue instead of nesting issues for checklist items.",
         ],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "E015": {
         "title": "work_unit_decomposed_into_child_issues",
         "severity": "error",
+        "ideal_model": "A PR-sized work unit is a leaf; its checklist and proof obligations live in its issue body or comments.",
         "meaning": (
             "A non-organizational issue is a PR-sized work unit. Its stories, proof burdens, "
             "and implementation checklist belong in the issue body/comments, not in child issues."
@@ -129,33 +162,44 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "A. Move child issue content into the parent issue body or comments, then close or detach the child issues.",
             "B. If the children are truly separate PR-sized work units, convert the parent into an organizational ledger such as 'Milestone: ...' or 'Backlog: ...'.",
         ],
+        "maintenance": ERROR_MAINTENANCE,
     },
     "W040": {
         "title": "milestone_mismatch",
         "severity": "warning",
+        "ideal_model": (
+            "The root has sibling scope branches: each `Milestone: TITLE` ledger owns release-scoped descendants with native milestone `TITLE`, "
+            "while Backlog owns unscoped descendants with no native milestone."
+        ),
         "meaning": (
-            "The tree defines traversal. The GitHub milestone defines release/time grouping. They should normally agree so Projects and milestone progress views remain useful."
+            "A descendant's native milestone conflicts with the scope branch that owns it. Nesting a milestone ledger under Backlog creates this "
+            "contradiction: the same descendants are both unscoped and release-scoped."
         ),
         "remediation": [
-            "- Move the issue to the correct milestone ledger, or",
-            "- Set its GitHub milestone to match the ledger, or",
-            "- Move it to Backlog if it is not release-scoped.",
+            "A. Move release-scoped work under its direct-root `Milestone: TITLE` ledger and assign native milestone TITLE.",
+            "B. Move unscoped work under Backlog and clear its native milestone.",
+            "C. Do not nest a milestone ledger under Backlog; create it directly under the root ledger.",
         ],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "W041": {
         "title": "milestone_without_ledger",
         "severity": "warning",
+        "ideal_model": "Every release-scoped native GitHub milestone has a matching `Milestone: TITLE` direct child of the root ledger.",
         "meaning": "Create a milestone ledger under the root, or deliberately keep milestones outside tree policy.",
         "remediation": [
             "A. Create a milestone ledger issue under the root ledger representing this milestone.",
             "B. Clear the milestone from the issues if it is not meant to be tracked.",
         ],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "W050": {
         "title": "missing_acceptance_criteria",
         "severity": "warning",
+        "ideal_model": "Every PR-sized work unit carries its own explicit completion and proof boundary in the issue body.",
         "meaning": "A work-unit issue should not make agents infer completion semantics. Add explicit done criteria to the issue itself.",
         "remediation": ['A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "Q001": {
         "title": "too_many_open_work_units",

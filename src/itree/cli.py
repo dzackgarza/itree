@@ -71,6 +71,10 @@ and names the single next work unit to do.
   leaves: checklists, proof, and status live in their body or comments, not
   in child issues.
 
+  A generated `Milestone: TITLE` ledger is a direct child of the root ledger.
+  Backlog is its sibling branch: Backlog descendants are unscoped, while
+  milestone-ledger descendants carry native GitHub milestone TITLE.
+
 Run `itree help model` for the full organization model, repo state machine,
 guard rails, and proportionality doctrine.
 """
@@ -84,6 +88,23 @@ Use `itree doctor --explain CODE` for detailed remediation of a diagnostic.""",
 # Subapp for progressive disclosure help
 help_app = App(name="help", help="Organization guide and model explanation.")
 app.command(help_app)
+
+MILESTONE_HELP_TEXT = """Milestone placement model
+
+A native GitHub milestone and its `Milestone: TITLE` issue ledger describe one
+release-scoped branch. The generated ledger MUST be a direct child of the root ledger.
+Backlog is a sibling branch and owns only unscoped work with no native GitHub milestone.
+
+Valid:
+  Ledger
+  ├── Milestone: TITLE -> native milestone TITLE
+  └── Backlog -> no native milestone
+
+`itree milestone OWNER/REPO TITLE --under OWNER/REPO#ROOT` rejects every other
+parent before GitHub mutation begins. Use `itree help model` for the complete
+tree model and `itree doctor OWNER/REPO --explain W040` for the maintenance
+route when release and backlog ownership already conflict.
+"""
 
 
 def parse_ref(raw: str) -> IssueRef:
@@ -109,6 +130,10 @@ def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
     """Print one catalog diagnostic: code, meaning, evidence, remediation."""
     details = DIAGNOSTIC_CATALOG[code]
     print(f"{SEVERITY_PREFIX[details['severity']]} {code}: {details['title']}.\n")
+    ideal_model = details.get("ideal_model")
+    if ideal_model:
+        print("Ideal model:")
+        print(f"  {ideal_model}")
     print("Meaning:")
     print(f"  {details['meaning']}")
     if evidence:
@@ -118,6 +143,11 @@ def print_diagnostic(code: str, evidence: Sequence[str] = ()) -> None:
     print("\nRepair routes:")
     for route in details["remediation"]:
         print(f"  {route}")
+    maintenance = details.get("maintenance")
+    if maintenance:
+        print(f"\nMaintenance: {maintenance[0]}")
+        for route in maintenance[1:]:
+            print(f"  {route}")
 
 
 def get_repo_root(repo: str) -> tuple[RepoRef, int]:
@@ -157,6 +187,19 @@ def help_model() -> None:
     # `help model`, never every import of itree.cli.
     doc = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
     print(doc, end="")
+
+
+@help_app.command(name="milestone")
+def help_milestone() -> None:
+    """Print the command-specific direct-root milestone placement rule."""
+    print(MILESTONE_HELP_TEXT, end="")
+
+
+@help_app.command(name="maintenance")
+def help_maintenance() -> None:
+    """Print the shipped issue-itree-maintenance agent prompt."""
+    prompt = importlib.resources.files("itree").joinpath("ISSUE_ITREE_MAINTENANCE.md").read_text(encoding="utf-8")
+    print(prompt, end="")
 
 
 @app.command(group="Structural")
@@ -407,7 +450,7 @@ def milestone(
     *,
     under: Annotated[
         str | None,
-        Parameter(help="Open grouping parent as OWNER/REPO#N"),
+        Parameter(help="Root ledger parent as OWNER/REPO#N"),
     ] = None,
     body: Annotated[str, Parameter(help="Milestone ledger body in Markdown")] = "",
     body_file: Annotated[
@@ -426,7 +469,7 @@ def milestone(
     """Create a GitHub Milestone and its issue-tree ledger.
 
     Without --under this creates nothing and prints existing milestone
-    ledgers, valid grouping targets, and an exact command with placement.
+    ledgers, the root-ledger target, and an exact command with placement.
     With placement supplied, one complete preflight precedes the ordered
     milestone, ledger, parentage, and assignment writes. A rejected or
     indeterminate write stops the untouched suffix without rollback.
@@ -970,6 +1013,10 @@ def render_doctor_report(
         for f in report.findings:
             # Format to only display standard code summary
             lines.append(f"  {f.code}: {len(f.evidence)} {f.title.replace('_', ' ')}")
+            details = DIAGNOSTIC_CATALOG[f.code]
+            maintenance = details.get("maintenance")
+            if maintenance:
+                lines.append(f"    maintenance: {maintenance[0]}")
     lines.append("")
 
     # Advisory Q-codes: rendered here, never part of the exit status.
@@ -1012,13 +1059,7 @@ def doctor(
     if explain:
         code = explain.upper()
         if code in DIAGNOSTIC_CATALOG:
-            details = DIAGNOSTIC_CATALOG[code]
-            print(f"{code}: {details['title']}.\n")
-            print("Meaning:")
-            print(f"  {details['meaning']}\n")
-            print("Repair routes:")
-            for route in details["remediation"]:
-                print(f"  {route}")
+            print_diagnostic(code)
             sys.exit(0)
         else:
             print(f"Unknown diagnostic code: {explain}")

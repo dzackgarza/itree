@@ -67,7 +67,6 @@ class TestPrintDiagnostic:
         out = capsys.readouterr().out
         assert out.startswith("ERROR E001:")
 
-    @pytest.mark.xfail(strict=True, reason="itree#39: W040 does not route to asynchronous tree maintenance")
     def test_warning_diagnostic_routes_to_async_maintenance(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Warnings preserve substantive work while an itree-maintenance agent heals structure."""
         print_diagnostic("W040")
@@ -75,7 +74,6 @@ class TestPrintDiagnostic:
         assert "Maintenance: dispatch issue-itree-maintenance asynchronously" in out
         assert "remediation ledger entry" in out
 
-    @pytest.mark.xfail(strict=True, reason="itree#39: diagnostic catalog lacks the required model and maintenance route")
     def test_every_error_and_warning_has_a_model_and_maintenance_route(self) -> None:
         """Every actionable doctor finding teaches its protected model and handoff."""
         from itree.validate import DIAGNOSTIC_CATALOG
@@ -232,13 +230,20 @@ class TestCLICommandStructure:
         expected = importlib.resources.files("itree").joinpath("WORKFLOWS.md").read_text(encoding="utf-8")
         assert out == expected
 
-    @pytest.mark.xfail(strict=True, reason="itree#39: progressive help does not expose the direct-root milestone rule")
     def test_help_milestone_explains_the_direct_root_rule(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Command-specific help distinguishes a milestone ledger from an ordinary grouping child."""
         cli.help_milestone()
         out = capsys.readouterr().out
         assert "direct child of the root ledger" in out
         assert "Backlog is a sibling branch" in out
+
+    def test_help_maintenance_ships_the_live_repair_contract(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Maintenance help exposes the required live reread, ledger, and handoff steps."""
+        cli.help_maintenance()
+        out = capsys.readouterr().out
+        assert "Reread the live GitHub issue tree" in out
+        assert "remediation ledger entry" in out
+        assert "Preserve the current substantive work unit" in out
 
     def test_move_cli_rejects_both_before_and_after(self) -> None:
         """CLI move command rejects both --before and --after flags."""

@@ -139,9 +139,14 @@ itree milestone owner/repo "v1" \
 ```
 
 `--under` is mandatory before any write.
-Without it, the command creates nothing, lists existing milestone ledgers and valid grouping targets, prints an exact placed invocation, and exits nonzero.
+Without it, the command creates nothing, lists existing milestone ledgers and the root-ledger target, prints an exact placed invocation, and exits nonzero.
 
-With placement supplied, one preflight rejects malformed tree state, exact milestone or ledger title collisions, invalid parents, duplicate or invalid leaves, and cycle risks.
+`Milestone: TITLE` is stricter than an ordinary grouping child: it must be a direct child of the root ledger.
+Backlog is its sibling branch.
+Milestone-ledger descendants are release-scoped and use native GitHub milestone `TITLE`; Backlog descendants are unscoped and have no native GitHub milestone.
+Use `itree help milestone` for the command-specific model.
+
+With placement supplied, one preflight rejects malformed tree state, every non-root parent, exact milestone or ledger title collisions, and duplicate or invalid leaves.
 Only then does the command create the GitHub Milestone, create and attach `Milestone: v1`, assign its milestone, and move each supplied work unit beneath it in argument order with the same assignment.
 Parented work units use replace-parent semantics; parentless work units use attach semantics.
 
@@ -198,6 +203,9 @@ itree tree owner/repo --json
 It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, and missing acceptance criteria.
 
 Use `itree doctor owner/repo --explain CODE` for the meaning and repair routes of any finding code.
+Warnings dispatch `issue-itree-maintenance` asynchronously while substantive work continues.
+Errors dispatch it synchronously before dependent work continues; the maintenance agent is the escape hatch, not an absolute work stop.
+The shipped prompt is available through `itree help maintenance`.
 
 ## Development
 
