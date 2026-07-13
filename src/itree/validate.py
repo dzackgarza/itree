@@ -34,7 +34,9 @@ WARNING_MAINTENANCE = [
     "dispatch issue-itree-maintenance asynchronously; record this finding code and the selected repair in its remediation ledger entry, then continue substantive work.",
 ]
 ERROR_MAINTENANCE = [
-    "dispatch issue-itree-maintenance now; record the code and selected repair in its remediation ledger entry; await evidence before dependent work. This is not a terminal stop.",
+    "dispatch issue-itree-maintenance now; "
+    "record the code and selected repair in its remediation ledger entry; "
+    "await evidence before dependent work. This is not a terminal stop.",
 ]
 
 
