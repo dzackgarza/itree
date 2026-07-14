@@ -22,18 +22,31 @@ from .validate import DIAGNOSTIC_CATALOG
 CONFIG_PATH = Path.home() / ".config" / "itree" / "config.toml"
 
 
-class MetricsConfig(BaseModel):
-    """Knobs for the Q-code predicates, from ~/.config/itree/config.toml."""
+class ItreeConfig(BaseModel):
+    """All itree configuration from ~/.config/itree/config.toml.
+
+    Includes proportionality metrics knobs (Q-codes), deferral policy,
+    and completion-contract audit policy.  Repository-level policy may
+    override these defaults; user-global config is the fallback.
+    """
 
     model_config = ConfigDict(frozen=True)
 
+    # Proportionality metrics (Q001-Q003)
     max_open_work_units: int = 8
     loc_per_work_unit: int = 400
     flat_children_ratio: float = 0.5
     flat_min_children: int = 6
+    # Deferral policy (#19)
     deferral_label: str = "deferred"
+    # Completion-contract audit policy (#41)
     decomposition_label: str = ""
     derived_state_labels: tuple[str, ...] = ()
+
+
+# Backwards compatibility: MetricsConfig is now an alias for ItreeConfig
+# so existing imports continue to work.
+MetricsConfig = ItreeConfig
 
 
 class PresentCodeSize(BaseModel):
@@ -103,9 +116,7 @@ def structure_questions(
         findings.append(
             _q_finding(
                 "Q001",
-                [
-                    f"{open_work_units} open work units exceed max_open_work_units={config.max_open_work_units}"
-                ],
+                [f"{open_work_units} open work units exceed max_open_work_units={config.max_open_work_units}"],
             )
         )
 
@@ -115,29 +126,19 @@ def structure_questions(
             findings.append(
                 _q_finding(
                     "Q002",
-                    [
-                        f"{open_work_units} open work units against {code_size.total_loc} LOC supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"
-                    ],
+                    [f"{open_work_units} open work units against {code_size.total_loc} LOC supports ~{supported} (loc_per_work_unit={config.loc_per_work_unit})"],
                 )
             )
 
     if report.root.kind == "present":
         root_num = report.root.ref.number
         open_children = [c for c in dag.children_of[root_num] if dag.issues[c].is_open]
-        open_reachable = (
-            report.metrics.open_issues_reachable_from_root - 1
-        )  # minus the root itself
-        if (
-            len(open_children) >= config.flat_min_children
-            and open_reachable > 0
-            and len(open_children) / open_reachable >= config.flat_children_ratio
-        ):
+        open_reachable = report.metrics.open_issues_reachable_from_root - 1  # minus the root itself
+        if len(open_children) >= config.flat_min_children and open_reachable > 0 and len(open_children) / open_reachable >= config.flat_children_ratio:
             findings.append(
                 _q_finding(
                     "Q003",
-                    [
-                        f"{len(open_children)} of {open_reachable} open issues hang directly off root #{root_num} (>= flat_children_ratio={config.flat_children_ratio})"
-                    ],
+                    [f"{len(open_children)} of {open_reachable} open issues hang directly off root #{root_num} (>= flat_children_ratio={config.flat_children_ratio})"],
                 )
             )
 

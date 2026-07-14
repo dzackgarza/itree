@@ -4,41 +4,31 @@ Detects when a structurally valid tree still permits an agent to close
 administrative slices while the implementation named by the original
 contract never occurs.
 
-The audit is deterministic and builds on #40's readiness model.  All
-functions are pure: they consume an already-built ``RepoDag`` and never
-touch the network.  ``generate_doctor_report`` converts
-``CompletionFinding`` results into ``Finding`` objects via the
-diagnostic catalog.
+The audit is deterministic, builds on #40's readiness model, and uses
+explicit ``itree-contract`` declarations parsed from issue bodies.
+Unstructured prose may produce a Q advisory ("possible undeclared
+transfer"), but never a definitive error.
+
+All functions are pure: they consume an already-built ``RepoDag`` and
+never touch the network.
 """
 
 from __future__ import annotations
 
-import re
-
 from pydantic import BaseModel, ConfigDict
 
-from .models import RepoDag
-from .validate import is_grouping_issue, lacks_acceptance_criteria
+from .contracts import (
+    ContractDeclaration,
+    ObligationKind,
+    build_ownership_chains,
+    parse_contract_declarations,
+)
+from .models import IssueRef, RepoDag, RepoRef
+from .predicates import is_grouping_issue
 
-# Pattern for issue references in bodies: #N where N is a positive integer.
-# Won't match markdown headers (# at line start) because those are followed
-# by whitespace, not digits.  Negative lookbehind for "/" and word characters
-# prevents matching the #N inside a qualified cross-repo reference such as
-# owner/repo#N, so a local issue with the same number is not falsely treated
-# as a transfer target (Spec F).
-_ISSUE_REF_PATTERN = re.compile(r"(?<![/&\w])#([1-9]\d*)")
-
-# Transfer language indicating an implementation obligation was moved
-# to another issue rather than discharged.
-_TRANSFER_KEYWORDS = ("moved to", "routed to", "transferred to", "deferred to")
-
-# Audit-only language indicating the issue is explicitly not an
-# implementation obligation.
-_AUDIT_ONLY_KEYWORDS = ("audit-only", "audit only")
-
-# New-owner language indicating a closed broad-scope audit may need
-# revalidation when new case families land.
-_NEW_OWNER_KEYWORDS = ("new owner", "future cases", "future owner", "later owner")
+# ---------------------------------------------------------------------------
+# Intermediate result type
+# ---------------------------------------------------------------------------
 
 
 class CompletionFinding(BaseModel):
@@ -49,6 +39,13 @@ class CompletionFinding(BaseModel):
     code: str
     issue_numbers: tuple[int, ...]
     evidence: tuple[str, ...]
+    # Typed witness fields
+    origin: IssueRef | None = None
+    owner: IssueRef | None = None
+    path: tuple[IssueRef, ...] = ()
+    obligation_kind: str | None = None
+    evidence_disposition: str | None = None
+    unresolved_burden: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -56,35 +53,25 @@ class CompletionFinding(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _parse_issue_refs(body: str | None) -> tuple[int, ...]:
-    """Extract issue numbers referenced in an issue body via #N pattern.
-
-    Each referenced number appears exactly once in the result, preserving
-    order of first appearance (Spec A).  Qualified cross-repo references
-    such as ``owner/repo#N`` do not match: the leading ``/`` is excluded
-    by the regex's negative lookbehind (Spec F).
-    """
-    if not body:
-        return ()
-    seen: set[int] = set()
-    out: list[int] = []
-    for m in _ISSUE_REF_PATTERN.finditer(body):
-        n = int(m.group(1))
-        if n not in seen:
-            seen.add(n)
-            out.append(n)
-    return tuple(out)
-
-
 def _children_of(dag: RepoDag, number: int) -> tuple[int, ...]:
-    """Return children of ``number`` or empty tuple — no dict.get default."""
+    """Return children of ``number`` or empty tuple."""
     if number in dag.children_of:
         return dag.children_of[number]
     return ()
 
 
-def _has_work_unit_descendants(dag: RepoDag, grouping_number: int) -> bool:
-    """Check if a grouping issue has any non-grouping descendants in its subtree."""
+def _has_implementation_descendants(
+    dag: RepoDag,
+    declarations_by_issue: dict[int, list[ContractDeclaration]],
+    grouping_number: int,
+) -> bool:
+    """Check if a grouping has any descendants that own implementation obligations.
+
+    A descendant counts if it has a contract declaration with
+    kind="implementation" and evidence="discharges" (or is open with
+    an implementation declaration).  An administrative leaf, closed
+    planning issue, or audit issue does not count.
+    """
     visited: set[int] = set()
     stack: list[int] = list(_children_of(dag, grouping_number))
     while stack:
@@ -93,76 +80,81 @@ def _has_work_unit_descendants(dag: RepoDag, grouping_number: int) -> bool:
             continue
         visited.add(num)
         issue = dag.issues[num]
-        if not is_grouping_issue(issue.title):
-            return True
-        stack.extend(_children_of(dag, num))
+        # Check if this descendant has an implementation declaration
+        if num in declarations_by_issue:
+            decls = declarations_by_issue[num]
+        else:
+            decls = []
+        for d in decls:
+            if d.kind == ObligationKind.implementation:
+                # Any descendant with an implementation declaration is
+                # an implementation owner, regardless of open/closed
+                # state.  The evidence disposition tells us whether the
+                # obligation is discharged, but the descendant still
+                # owns it.
+                return True
+        # Continue traversing through grouping descendants
+        if is_grouping_issue(issue.title):
+            stack.extend(_children_of(dag, num))
     return False
 
 
-def _body_contains_any(body: str | None, keywords: tuple[str, ...]) -> bool:
-    """Case-insensitive check if body contains any of the keywords."""
-    if not body:
-        return False
-    body_lower = body.lower()
-    return any(kw in body_lower for kw in keywords)
-
-
-def _refs_on_transfer_lines(body: str | None) -> tuple[int, ...]:
-    """Extract issue refs only from lines containing a transfer keyword (Spec D).
-
-    A body that says "Moved to #3. See also #5 for context" must treat only
-    #3 as a transfer target, not #5.  We split the body into lines and, for
-    each line whose lower-cased text contains any transfer keyword, extract
-    refs from that line only.  Refs are deduplicated by first appearance.
-    """
-    if not body:
-        return ()
-    seen: set[int] = set()
-    out: list[int] = []
-    for line in body.splitlines():
-        line_lower = line.lower()
-        if not any(kw in line_lower for kw in _TRANSFER_KEYWORDS):
-            continue
-        for m in _ISSUE_REF_PATTERN.finditer(line):
-            n = int(m.group(1))
-            if n not in seen:
-                seen.add(n)
-                out.append(n)
-    return tuple(out)
+def _build_declarations_map(
+    dag: RepoDag,
+) -> dict[int, list[ContractDeclaration]]:
+    """Parse contract declarations from all issue bodies in the DAG."""
+    result: dict[int, list[ContractDeclaration]] = {}
+    for number, issue in sorted(dag.issues.items()):
+        decls = parse_contract_declarations(issue.body)
+        if decls:
+            result[number] = decls
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Role contradictions
+# Role contradictions (W060)
 # ---------------------------------------------------------------------------
 
 
-def detect_role_contradictions(dag: RepoDag) -> list[CompletionFinding]:
+def detect_role_contradictions(
+    dag: RepoDag,
+    declarations_by_issue: dict[int, list[ContractDeclaration]] | None = None,
+) -> list[CompletionFinding]:
     """Detect grouping issues whose body declares them as work-unit leaves.
 
-    A grouping issue (Milestone:, Backlog:, Roadmap:, Phase:) that declares
-    itself a "work-unit leaf" in its body is a role contradiction: its
-    structural role and its declared role disagree.
+    A grouping issue that declares itself a work-unit leaf (via an
+    ``itree-contract`` block with ``kind="implementation"`` and no
+    ``requires``) is a role contradiction: its structural role and its
+    declared role disagree.
     """
+    if declarations_by_issue is None:
+        declarations_by_issue = _build_declarations_map(dag)
+
     findings: list[CompletionFinding] = []
     for number, issue in sorted(dag.issues.items()):
         if not issue.is_open:
             continue
         if not is_grouping_issue(issue.title):
             continue
-        body = issue.body
-        if body and ("work-unit leaf" in body.lower() or "work unit leaf" in body.lower()):
-            findings.append(
-                CompletionFinding(
-                    code="W060",
-                    issue_numbers=(number,),
-                    evidence=(f'#{number} "{issue.title}" is a grouping issue but its body declares it a work-unit leaf',),
+        if number in declarations_by_issue:
+            decls = declarations_by_issue[number]
+        else:
+            decls = []
+        for d in decls:
+            if d.kind == ObligationKind.implementation and not d.requires:
+                findings.append(
+                    CompletionFinding(
+                        code="W060",
+                        issue_numbers=(number,),
+                        evidence=(f'#{number} "{issue.title}" is a grouping issue but declares itself an implementation leaf with no prerequisites',),
+                        obligation_kind=d.kind.value,
+                    )
                 )
-            )
     return findings
 
 
 # ---------------------------------------------------------------------------
-# Label conflicts
+# Label conflicts (W061, W062)
 # ---------------------------------------------------------------------------
 
 
@@ -173,10 +165,10 @@ def detect_label_conflicts(
 ) -> list[CompletionFinding]:
     """Detect label conflicts: decomposition labels on work-unit leaves, derived-state labels.
 
-    - W061: A work-unit leaf carrying the configured decomposition label.
-      The same label on a partially decomposed grouping is accepted.
-    - W062: Any issue carrying a configured derived-state label.
-      Domain and workflow labels are untouched.
+    - W061: A work-unit leaf (no children, non-grouping title) carrying
+      the configured decomposition label.  The same label on a grouping
+      is accepted.
+    - W062: Any open issue carrying a configured derived-state label.
     """
     findings: list[CompletionFinding] = []
 
@@ -187,12 +179,8 @@ def detect_label_conflicts(
             if not issue.is_open:
                 continue
             if is_grouping_issue(issue.title):
-                # Grouping with decomposition label is accepted regardless
-                # of whether it has children yet — the label marks it as
-                # needing decomposition, which is its intended use on a grouping.
                 continue
-            # W061 fires only on actual leaves (Spec G).  An issue with
-            # children is not a leaf — E015 covers that decomposition case.
+            # Must be a leaf (no children)
             if _children_of(dag, number):
                 continue
             labels_lower = {label.casefold() for label in issue.labels}
@@ -205,7 +193,7 @@ def detect_label_conflicts(
                     )
                 )
 
-    # W062: derived-state label on any issue
+    # W062: derived-state label on open issues
     if derived_state_labels:
         derived_lower = {label.casefold() for label in derived_state_labels}
         w062_issues: list[int] = []
@@ -231,124 +219,161 @@ def detect_label_conflicts(
 
 
 # ---------------------------------------------------------------------------
-# Completion contracts
+# Completion contracts (E016, E017, Q004)
 # ---------------------------------------------------------------------------
 
 
 def audit_completion_contracts(
     dag: RepoDag,
     deferral_label: str = "deferred",
+    declarations_by_issue: dict[int, list[ContractDeclaration]] | None = None,
 ) -> list[CompletionFinding]:
-    """Audit completion contracts for false-green closure and non-monotone completion.
+    """Audit completion contracts using explicit declarations.
 
     Detects:
-    - E016: A closed issue transferred an implementation obligation to a later
-      issue that is still open. Closing the original leaves the obligation
-      unresolved.
-    - E017: A grouping issue with no work-unit descendants is required by a
-      completion contract. Traversal will never execute the required
-      implementation through this grouping.
-    - Q004: A closed broad-scope audit declared a later owner for future cases.
-      The previously closed audit may need revalidation when the new owner
-      lands new case families.
+    - E016: A closed issue with an implementation declaration whose owner
+      is still open and whose evidence disposition is not ``discharges``.
+      The ownership chain is followed recursively.
+    - E017: A grouping with no implementation-owning descendants that is
+      required by an active or closed contract declaration.
+    - Q004: A closed audit-type declaration with ``revalidate_on`` refs
+      pointing to open issues.  Advisory only.
     """
+    if declarations_by_issue is None:
+        declarations_by_issue = _build_declarations_map(dag)
+
     findings: list[CompletionFinding] = []
 
-    # Build reverse reference map: issue N -> issues that reference N in body.
-    # Skip self-references (Spec B): an issue referencing itself creates a
-    # self-contract that makes E017 report an issue as "required by: itself."
-    ref_map: dict[int, list[int]] = {}
-    for number, issue in sorted(dag.issues.items()):
-        for ref in _parse_issue_refs(issue.body):
-            if ref == number:
-                continue
-            if ref in ref_map:
-                ref_map[ref].append(number)
-            else:
-                ref_map[ref] = [number]
+    # Build ownership chains from declarations
+    chains = build_ownership_chains(declarations_by_issue, dag.repo_ref)
 
-    # E016: false-green closure
-    for number, issue in sorted(dag.issues.items()):
-        if issue.is_open:
+    # E016: false-green closure — unresolved implementation obligations
+    # found through ownership chain traversal.
+    for chain in chains:
+        if not chain.unresolved:
             continue
-        if lacks_acceptance_criteria(issue.body):
+        # Check if the origin issue is closed (false-green) or open (still routed)
+        origin_num = _resolve_issue_number(chain.origin, dag.repo_ref)
+        if origin_num is None or origin_num not in dag.issues:
             continue
-        if _body_contains_any(issue.body, _AUDIT_ONLY_KEYWORDS):
+        origin_issue = dag.issues[origin_num]
+        owner_num = _resolve_issue_number(chain.current_owner, dag.repo_ref)
+        if owner_num is None or owner_num not in dag.issues:
             continue
-        if not _body_contains_any(issue.body, _TRANSFER_KEYWORDS):
-            continue
-        # Only refs on the same line as a transfer keyword are transfer
-        # targets (Spec D).  A ref on an unrelated line ("See also #5 for
-        # context") is not a transfer even when the body contains a
-        # transfer keyword elsewhere.
-        refs = _refs_on_transfer_lines(issue.body)
-        open_targets = [r for r in refs if r in dag.issues and dag.issues[r].is_open]
-        if open_targets:
-            chain = " -> ".join(f"#{n}" for n in [number, *open_targets])
-            findings.append(
-                CompletionFinding(
-                    code="E016",
-                    issue_numbers=(number,),
-                    evidence=(
-                        f'#{number} "{issue.title}" is closed but transferred implementation obligation to open issue(s): {", ".join(f"#{r}" for r in open_targets)}',
-                        f"ownership chain: {chain}",
-                    ),
-                )
+        owner_issue = dag.issues[owner_num]
+
+        # Only report if the origin is closed (false-green) or if the
+        # owner is open (obligation not yet discharged).
+        if origin_issue.is_open and not owner_issue.is_open:
+            continue  # origin still open, owner closed — not false-green
+
+        path_str = " -> ".join(ref.slug for ref in chain.path)
+        findings.append(
+            CompletionFinding(
+                code="E016",
+                issue_numbers=(origin_num,),
+                evidence=(
+                    f'#{origin_num} "{origin_issue.title}" has an unresolved implementation obligation owned by {chain.current_owner.slug}',
+                    f"ownership chain: {path_str}",
+                    f"current owner {'is open' if owner_issue.is_open else 'is closed but obligation not discharged'}",
+                ),
+                origin=chain.origin,
+                owner=chain.current_owner,
+                path=chain.path,
+                obligation_kind=ObligationKind.implementation.value,
+                unresolved_burden=(f"implementation obligation routed to {chain.current_owner.slug} but not discharged"),
             )
+        )
 
-    # E017: grouping with no work-unit descendants required by a contract
+    # E017: grouping with no implementation-owning descendants required
+    # by a contract declaration.  The deferral label does NOT suppress
+    # this — a deferred shelf required by a contract remains unresolved.
     deferral_lower = deferral_label.casefold()
+
+    # Build reverse reference map from declarations: which issues declare
+    # a requirement on another issue via ``requires`` or ``owner``?
+    required_by: dict[int, list[int]] = {}
+    for issue_num, decls in declarations_by_issue.items():
+        for d in decls:
+            # ``requires`` refs
+            for req in d.requires:
+                req_num = _resolve_issue_number(req, dag.repo_ref)
+                if req_num is not None and req_num != issue_num:
+                    if req_num in required_by:
+                        required_by[req_num].append(issue_num)
+                    else:
+                        required_by[req_num] = [issue_num]
+            # ``owner`` refs also create a requirement
+            if d.owner is not None:
+                owner_num = _resolve_issue_number(d.owner, dag.repo_ref)
+                if owner_num is not None and owner_num != issue_num:
+                    if owner_num in required_by:
+                        required_by[owner_num].append(issue_num)
+                    else:
+                        required_by[owner_num] = [issue_num]
+
     for number, issue in sorted(dag.issues.items()):
         if not issue.is_open:
             continue
         if not is_grouping_issue(issue.title):
             continue
-        if _has_work_unit_descendants(dag, number):
+        if _has_implementation_descendants(dag, declarations_by_issue, number):
             continue
+        # Check if any contract requires this grouping
+        if number not in required_by:
+            continue
+        # Report — deferral label does NOT suppress this
+        referrers = required_by[number]
         labels_lower = {label.casefold() for label in issue.labels}
-        if deferral_lower in labels_lower:
-            continue
-        if number in ref_map:
-            # Only open referrers carry an active completion contract (Spec C).
-            # If every referrer is closed, no active contract requires this
-            # grouping and E017 must not fire.
-            open_referrers = [r for r in ref_map[number] if r in dag.issues and dag.issues[r].is_open]
-            if not open_referrers:
-                continue
-            findings.append(
-                CompletionFinding(
-                    code="E017",
-                    issue_numbers=(number,),
-                    evidence=(
-                        f'#{number} "{issue.title}" is a grouping with no work-unit descendants but is required by: {", ".join(f"#{r}" for r in open_referrers)}',
-                        "traversal will never execute the required implementation through this grouping",
-                    ),
-                )
+        is_deferred = deferral_lower in labels_lower
+        evidence_lines = [
+            f'#{number} "{issue.title}" is a grouping with no implementation-owning descendants but is required by: {", ".join(f"#{r}" for r in referrers)}',
+            "traversal will never execute the required implementation through this grouping",
+        ]
+        if is_deferred:
+            evidence_lines.append("the deferral label suppresses W030 (stale shelf) but does not discharge the unresolved contract requirement")
+        findings.append(
+            CompletionFinding(
+                code="E017",
+                issue_numbers=(number,),
+                evidence=tuple(evidence_lines),
+                unresolved_burden=(f"grouping required by {len(referrers)} contract(s) but has no implementation-owning descendants"),
             )
+        )
 
-    # Q004: closed broad-scope audit with declared later owner
-    for number, issue in sorted(dag.issues.items()):
+    # Q004: closed audit-type declarations with revalidate_on refs to open issues
+    for issue_num, decls in declarations_by_issue.items():
+        issue = dag.issues[issue_num]
         if issue.is_open:
             continue
-        if not _body_contains_any(issue.body, _NEW_OWNER_KEYWORDS):
-            continue
-        # Q004 targets closed broad-scope audits, not ordinary ownership
-        # handoffs (Spec E).  Require an audit-related keyword in the body
-        # or "audit" in the title.
-        if not _body_contains_any(issue.body, _AUDIT_ONLY_KEYWORDS) and "audit" not in issue.title.lower():
-            continue
-        refs = _parse_issue_refs(issue.body)
-        open_targets = [r for r in refs if r in dag.issues and dag.issues[r].is_open]
-        if open_targets:
-            findings.append(
-                CompletionFinding(
-                    code="Q004",
-                    issue_numbers=(number,),
-                    evidence=(
-                        f'#{number} "{issue.title}" is a closed broad-scope audit with a declared later owner: {", ".join(f"#{r}" for r in open_targets)}',
-                        "previously closed audit may need revalidation for the new case family",
-                    ),
+        for d in decls:
+            if d.kind != ObligationKind.audit:
+                continue
+            if not d.revalidate_on:
+                continue
+            open_revalidate: list[IssueRef] = []
+            for ref in d.revalidate_on:
+                ref_num = _resolve_issue_number(ref, dag.repo_ref)
+                if ref_num is not None and ref_num in dag.issues and dag.issues[ref_num].is_open:
+                    open_revalidate.append(ref)
+            if open_revalidate:
+                findings.append(
+                    CompletionFinding(
+                        code="Q004",
+                        issue_numbers=(issue_num,),
+                        evidence=(
+                            f'#{issue_num} "{issue.title}" is a closed audit with revalidate_on refs to open issue(s): {", ".join(ref.slug for ref in open_revalidate)}',
+                            "previously closed audit may need revalidation for the new case family",
+                        ),
+                        obligation_kind=d.kind.value,
+                    )
                 )
-            )
 
     return findings
+
+
+def _resolve_issue_number(ref: IssueRef, repo_ref: RepoRef) -> int | None:
+    """Resolve an IssueRef to a local issue number if it belongs to repo_ref."""
+    if ref.repo_ref == repo_ref:
+        return ref.number
+    return None

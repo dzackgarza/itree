@@ -4,7 +4,14 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    field_validator,
+    model_validator,
+)
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
@@ -576,7 +583,11 @@ class MoveRequest(BaseModel):
         """Validate move request constraints: before/after mutual exclusivity, same repo, not self."""
         if self.before is not None and self.after is not None:
             raise ValueError("use either --before or --after, not both")
-        refs = [self.child, self.parent, *(r for r in [self.before, self.after] if r is not None)]
+        refs = [
+            self.child,
+            self.parent,
+            *(r for r in [self.before, self.after] if r is not None),
+        ]
         if any(not self.parent.same_repo(r) for r in refs):
             raise ValueError("move arguments must be in the same repository")
         if self.child.number == self.parent.number:
@@ -695,6 +706,14 @@ class Finding(BaseModel):
     agent_instruction: str | None = None
     remediation: list[str]
     suggested_commands: list[str] = []
+    # Typed witness fields for completion-contract findings (itree#41).
+    # Populated by audit functions; None for non-contract findings.
+    origin: IssueRef | None = None
+    owner: IssueRef | None = None
+    path: tuple[IssueRef, ...] = ()
+    obligation_kind: str | None = None
+    evidence_disposition: str | None = None
+    unresolved_burden: str | None = None
 
 
 class PresentReportRef(BaseModel):
