@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .contracts import (
+    ContractCompletion,
     ContractDeclaration,
     ContractDecomposition,
     ContractEvidence,
@@ -41,7 +42,12 @@ def audit_completion_contracts(
     return findings
 
 
-def _finding(code: str, evidence: list[str], witness: AuditFindingWitness | None = None) -> Finding:
+def _finding(
+    code: str,
+    evidence: list[str],
+    witness: AuditFindingWitness | None = None,
+    witnesses: tuple[AuditFindingWitness, ...] = (),
+) -> Finding:
     from .validate import DIAGNOSTIC_CATALOG
 
     details = DIAGNOSTIC_CATALOG[code]
@@ -53,6 +59,7 @@ def _finding(code: str, evidence: list[str], witness: AuditFindingWitness | None
         meaning=details["meaning"],
         remediation=details["remediation"],
         witness=witness,
+        witnesses=witnesses,
     )
 
 
@@ -79,15 +86,7 @@ def _invalid_implementation_discharges(
     dag: RepoDag,
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
 ) -> list[Finding]:
-    implementation_owners: dict[int, set[int]] = {}
-    for declaration in _implementation_routes(declarations_by_issue):
-        if declaration.owner is None or not _is_local(dag, declaration.owner):
-            continue
-        origin = declaration.origin or declaration.issue
-        if _is_local(dag, origin):
-            if declaration.owner.number not in implementation_owners:
-                implementation_owners[declaration.owner.number] = set()
-            implementation_owners[declaration.owner.number].add(origin.number)
+    implementation_owners = _transitive_implementation_owner_origins(dag, declarations_by_issue)
 
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
@@ -102,7 +101,7 @@ def _invalid_implementation_discharges(
             if declaration.origin.number not in implementation_owners[owner_number]:
                 continue
             evidence.append(f"#{owner_number} presents {declaration.kind.value} evidence as discharge for implementation obligation #{declaration.origin.number}")
-            first_witness = first_witness or AuditFindingWitness(
+            witness = AuditFindingWitness(
                 originating_obligation=declaration.origin,
                 current_owner=declaration.issue,
                 edge_chain=(declaration.origin, declaration.issue),
@@ -110,6 +109,7 @@ def _invalid_implementation_discharges(
                 obligation_kind=ContractKind.implementation.value,
                 unresolved_burden="non-implementation evidence cannot discharge implementation",
             )
+            first_witness = first_witness or witness
 
     return [_finding("E019", evidence, first_witness)] if evidence else []
 
@@ -118,14 +118,15 @@ def _unresolved_implementation_routes(
     dag: RepoDag,
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
 ) -> list[Finding]:
-    incoming_owners = _incoming_implementation_owners(dag, declarations_by_issue)
     evidence: list[str] = []
     churn_evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
     churn_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
+    churn_witnesses: list[AuditFindingWitness] = []
 
     for declaration in _implementation_routes(declarations_by_issue):
-        if declaration.issue.number in incoming_owners:
+        if not _is_route_root(declaration):
             continue
         origin = declaration.origin or declaration.issue
         if not _is_local(dag, origin):
@@ -140,7 +141,7 @@ def _unresolved_implementation_routes(
             terminal_issue = dag.issues.get(terminal.number)
             terminal_state = terminal_issue.state.value if terminal_issue else "missing"
             evidence.append(f"{chain_text} remains unresolved at {terminal_state} terminal owner")
-            first_witness = first_witness or AuditFindingWitness(
+            witness = AuditFindingWitness(
                 originating_obligation=origin,
                 current_owner=terminal,
                 edge_chain=tuple(chain),
@@ -148,9 +149,11 @@ def _unresolved_implementation_routes(
                 obligation_kind=ContractKind.implementation.value,
                 unresolved_burden="implementation obligation lacks a matching implementation discharge",
             )
+            witnesses.append(witness)
+            first_witness = first_witness or witness
             if len(chain) >= 4:
                 churn_evidence.append(f"{chain_text} has {len(chain) - 1} routing hops before implementation discharge")
-                churn_witness = churn_witness or AuditFindingWitness(
+                churn_route_witness = AuditFindingWitness(
                     originating_obligation=origin,
                     current_owner=terminal,
                     edge_chain=tuple(chain),
@@ -158,12 +161,14 @@ def _unresolved_implementation_routes(
                     obligation_kind=ContractKind.implementation.value,
                     unresolved_burden="routing chain churns before implementation-bearing owner",
                 )
+                churn_witnesses.append(churn_route_witness)
+                churn_witness = churn_witness or churn_route_witness
 
     findings: list[Finding] = []
     if evidence:
-        findings.append(_finding("E016", evidence, first_witness))
+        findings.append(_finding("E016", evidence, first_witness, tuple(witnesses)))
     if churn_evidence:
-        findings.append(_finding("Q005", churn_evidence, churn_witness))
+        findings.append(_finding("Q005", churn_evidence, churn_witness, tuple(churn_witnesses)))
     return findings
 
 
@@ -324,18 +329,34 @@ def _implementation_routes(
             yield declaration
 
 
-def _incoming_implementation_owners(
+def _transitive_implementation_owner_origins(
     dag: RepoDag,
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
-) -> set[int]:
-    owners: set[int] = set()
+) -> dict[int, set[int]]:
+    owners: dict[int, set[int]] = {}
     for declaration in _implementation_routes(declarations_by_issue):
-        if declaration.owner is not None and _is_local(dag, declaration.owner):
-            owners.add(declaration.owner.number)
+        if not _is_route_root(declaration):
+            continue
+        origin = declaration.origin or declaration.issue
+        if not _is_local(dag, origin):
+            continue
+        for chain in _walk_implementation_chain(dag, declarations_by_issue, origin, declaration):
+            for owner in chain[1:]:
+                if not _is_local(dag, owner):
+                    continue
+                if owner.number not in owners:
+                    owners[owner.number] = set()
+                owners[owner.number].add(origin.number)
     return owners
 
 
+def _is_route_root(declaration: ContractDeclaration) -> bool:
+    return declaration.origin is None or declaration.origin == declaration.issue
+
+
 def _starts_from_closed_route(dag: RepoDag, declaration: ContractDeclaration, origin: IssueRef) -> bool:
+    if declaration.completion == ContractCompletion.completed:
+        return True
     declaration_issue = dag.issues.get(declaration.issue.number)
     origin_issue = dag.issues.get(origin.number)
     if declaration_issue is not None and not declaration_issue.is_open:
@@ -375,7 +396,7 @@ def _walk_owner(
         if declaration.kind == ContractKind.implementation
         and declaration.owner is not None
         and declaration.evidence != ContractEvidence.discharges
-        and (declaration.origin is None or declaration.origin == origin)
+        and declaration.origin == origin
     ]
     if not next_routes:
         return [chain + [owner]]

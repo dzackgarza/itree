@@ -936,15 +936,26 @@ def generate_doctor_report(
             next_issue_ref = PresentReportRef(ref=next_issue)
             from .readiness import ReadinessState, compute_readiness
 
-            readiness = compute_readiness(dag, next_node.issue.number)
-            if readiness.state != ReadinessState.ready:
+            expected_next_issue: IssueRef | None = None
+            for candidate in tree_nodes:
+                if not candidate.issue.is_open:
+                    continue
+                if is_grouping_issue(candidate.issue.title):
+                    continue
+                readiness = compute_readiness(dag, candidate.issue.number)
+                if readiness.state == ReadinessState.ready:
+                    expected_next_issue = IssueRef(repo_ref=dag.repo_ref, number=candidate.issue.number)
+                    break
+
+            if expected_next_issue != next_issue:
                 f_details = DIAGNOSTIC_CATALOG["E020"]
+                expected_text = f"#{expected_next_issue.number}" if expected_next_issue is not None else "no ready work unit"
                 findings_list.append(
                     Finding(
                         code="E020",
                         severity="error",
                         title=f_details["title"],
-                        evidence=[f"reported next issue #{next_node.issue.number} is {readiness.state.value} under native readiness"],
+                        evidence=[f"reported next issue #{next_node.issue.number} contradicts independent native readiness selection {expected_text}"],
                         meaning=f_details["meaning"],
                         remediation=f_details["remediation"],
                     )

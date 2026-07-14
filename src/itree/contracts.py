@@ -37,6 +37,10 @@ class ContractDecomposition(StrEnum):
     partial = "partial"
 
 
+class ContractCompletion(StrEnum):
+    completed = "completed"
+
+
 class ContractDeclaration(BaseModel):
     """Typed declaration parsed from one ``itree-contract`` fenced block."""
 
@@ -53,6 +57,7 @@ class ContractDeclaration(BaseModel):
     revalidate_on: tuple[IssueRef, ...] = ()
     role: ContractRole | None = None
     decomposition: ContractDecomposition | None = None
+    completion: ContractCompletion | None = None
 
 
 class ContractParseError(BaseModel):
@@ -87,6 +92,7 @@ class _RawContractBlock(BaseModel):
     revalidate_on: tuple[str, ...] = ()
     role: ContractRole | None = None
     decomposition: ContractDecomposition | None = None
+    completion: ContractCompletion | None = None
 
     @field_validator("origin", "owner", mode="before")
     @classmethod
@@ -117,8 +123,14 @@ class _RawContractBlock(BaseModel):
             raise ValueError("discharge evidence must name the originating obligation")
         return self
 
+    @model_validator(mode="after")
+    def _implementation_route_names_owner(self) -> Self:
+        if self.kind == ContractKind.implementation and self.evidence == ContractEvidence.routes and self.owner is None:
+            raise ValueError("implementation route evidence must name the downstream owner")
+        return self
 
-_OPENING_FENCE_RE = re.compile(r"^(?P<fence>`{3,}|~{3,})[ \t]*itree-contract[ \t]*$")
+
+_OPENING_FENCE_RE = re.compile(r"^(?P<indent> {0,3})(?P<fence>`{3,}|~{3,})(?P<info>[^\n]*)$")
 
 
 def parse_issue_contracts(body: str | None, *, repo_ref: RepoRef, issue_number: IssueNumber) -> ParsedIssueContracts:
@@ -143,9 +155,9 @@ def parse_issue_contracts(body: str | None, *, repo_ref: RepoRef, issue_number: 
             index += 1
             continue
 
-        block_index += 1
         fence = opening["fence"]
-        closing_re = re.compile(rf"^{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
+        info_string = opening["info"].strip()
+        closing_re = re.compile(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
         start_line = index + 1
         content: list[str] = []
         index += 1
@@ -154,15 +166,21 @@ def parse_issue_contracts(body: str | None, *, repo_ref: RepoRef, issue_number: 
             index += 1
 
         if index == len(lines):
-            errors.append(
-                ContractParseError(
-                    issue=issue_ref,
-                    line=start_line,
-                    message="unterminated itree-contract fence",
+            if info_string == "itree-contract":
+                errors.append(
+                    ContractParseError(
+                        issue=issue_ref,
+                        line=start_line,
+                        message="unterminated itree-contract fence",
+                    )
                 )
-            )
             break
 
+        if info_string != "itree-contract":
+            index += 1
+            continue
+
+        block_index += 1
         declaration = _parse_contract_block(
             "\n".join(content),
             issue_ref=issue_ref,
@@ -200,6 +218,7 @@ def _parse_contract_block(
             revalidate_on=tuple(_parse_ref(raw, issue_ref.repo_ref) for raw in block.revalidate_on),
             role=block.role,
             decomposition=block.decomposition,
+            completion=block.completion,
         )
     except (tomllib.TOMLDecodeError, ValidationError, ValueError) as exc:
         return ContractParseError(

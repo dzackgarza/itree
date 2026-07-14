@@ -95,6 +95,40 @@ evidence = "routes"
     assert tuple(ref.slug for ref in declaration.revalidate_on) == ("testowner/testrepo#6",)
 
 
+def test_contract_parser_accepts_indented_markdown_contract_fences() -> None:
+    body = """
+The declaration is an actual Markdown fence indented within the allowed range.
+
+   ~~~~itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+   ~~~~
+"""
+
+    parsed = parse_issue_contracts(body, repo_ref=_repo_ref(), issue_number=2)
+
+    assert parsed.errors == ()
+    assert tuple((declaration.kind, declaration.owner) for declaration in parsed.declarations) == ((ContractKind.implementation, _ref(3)),)
+
+
+def test_contract_parser_ignores_contract_examples_inside_ordinary_fences() -> None:
+    body = """
+This issue quotes the contract syntax as documentation, not a live declaration.
+
+````markdown
+```itree-contract
+kind = "mystery"
+evidence = "routes"
+```
+````
+"""
+
+    parsed = parse_issue_contracts(body, repo_ref=_repo_ref(), issue_number=2)
+
+    assert parsed == parse_issue_contracts("", repo_ref=_repo_ref(), issue_number=2)
+
+
 def test_invalid_contract_block_is_reported_as_e018() -> None:
     dag = _dag(
         {
@@ -123,6 +157,33 @@ evidence = "routes"
     assert "invalid_completion_contract" in findings[0].title
     assert findings[0].witness is not None
     assert findings[0].witness.current_owner == _ref(2)
+
+
+def test_ownerless_implementation_route_is_reported_as_e018() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Ownerless route",
+                body="""
+## Acceptance Criteria
+- This malformed route must not disappear from the audit graph.
+
+```itree-contract
+kind = "implementation"
+evidence = "routes"
+```
+""",
+            ),
+        },
+        {1: (2,)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E018")
+
+    assert tuple(finding.witness.current_owner for finding in findings if finding.witness is not None) == (_ref(2),)
 
 
 def test_closed_implementation_route_reports_each_parallel_unresolved_owner() -> None:
@@ -160,6 +221,87 @@ evidence = "routes"
     assert any("#2 -> #4" in evidence for evidence in findings[0].evidence)
     assert findings[0].witness is not None
     assert tuple(ref.number for ref in findings[0].witness.edge_chain) == (2, 3)
+
+
+def test_closed_implementation_route_json_carries_each_parallel_witness() -> None:
+    body = """
+## Acceptance Criteria
+- Route all remaining implementation branches.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+```
+
+```itree-contract
+kind = "implementation"
+owner = "#4"
+evidence = "routes"
+```
+"""
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(2, "Original implementation obligation", body=body, state=IssueState.closed),
+            3: _issue(3, "Owner branch A"),
+            4: _issue(4, "Owner branch B"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    payload = report.model_dump(mode="json")
+    e016 = next(finding for finding in payload["findings"] if finding["code"] == "E016")
+
+    assert [[ref["number"] for ref in witness["edge_chain"]] for witness in e016["witnesses"]] == [[2, 3], [2, 4]]
+
+
+def test_incoming_owner_route_can_be_its_own_unresolved_obligation() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Original routed obligation",
+                body="""
+## Acceptance Criteria
+- Route implementation to #3.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+```
+""",
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Incoming owner with a separate closed route",
+                body="""
+## Acceptance Criteria
+- This issue also owns a separate unresolved implementation route.
+
+```itree-contract
+kind = "implementation"
+owner = "#4"
+evidence = "routes"
+```
+""",
+                state=IssueState.closed,
+            ),
+            4: _issue(4, "Terminal owner"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E016")
+
+    assert len(findings) == 1
+    assert any("#2 -> #3" in evidence for evidence in findings[0].evidence)
+    assert any("#3 -> #4" in evidence for evidence in findings[0].evidence)
 
 
 def test_audit_discharge_cannot_discharge_implementation_obligation() -> None:
@@ -209,6 +351,131 @@ evidence = "discharges"
     assert findings[0].witness.current_owner == _ref(3)
 
 
+def test_audit_discharge_cannot_discharge_transitively_routed_implementation() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Original implementation obligation",
+                body="""
+## Acceptance Criteria
+- Implementation must land.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+```
+""",
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Explicit route continuation",
+                body="""
+## Acceptance Criteria
+- Route the original implementation burden onward.
+
+```itree-contract
+kind = "implementation"
+origin = "#2"
+owner = "#4"
+evidence = "routes"
+```
+""",
+                state=IssueState.closed,
+            ),
+            4: _issue(
+                4,
+                "Coordination note claiming implementation closure",
+                body="""
+## Acceptance Criteria
+- Record coordination outcome.
+
+```itree-contract
+kind = "coordination"
+origin = "#2"
+evidence = "discharges"
+```
+""",
+                state=IssueState.closed,
+            ),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E019")
+
+    assert len(findings) == 1
+    assert findings[0].witness is not None
+    assert findings[0].witness.originating_obligation == _ref(2)
+    assert findings[0].witness.current_owner == _ref(4)
+
+
+def test_completed_implementation_route_claim_on_open_issue_reports_unresolved_owner() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Open issue with completed route claim",
+                body="""
+## Acceptance Criteria
+- This issue explicitly claims completion while routing implementation elsewhere.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+completion = "completed"
+```
+""",
+            ),
+            3: _issue(3, "Terminal implementation owner"),
+        },
+        {1: (2, 3)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E016")
+
+    assert len(findings) == 1
+    assert findings[0].witness is not None
+    assert tuple(ref.number for ref in findings[0].witness.edge_chain) == (2, 3)
+
+
+def test_invalid_completed_route_claim_value_is_reported_as_e018() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Issue with invalid completion claim",
+                body="""
+## Acceptance Criteria
+- Invalid explicit completion values must fail closed.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+completion = "complete-ish"
+```
+""",
+            ),
+            3: _issue(3, "Owner"),
+        },
+        {1: (2, 3)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E018")
+
+    assert tuple(finding.witness.current_owner for finding in findings if finding.witness is not None) == (_ref(2),)
+
+
 def test_required_grouping_without_executable_descendants_is_e017_even_when_deferred() -> None:
     dag = _dag(
         {
@@ -223,14 +490,16 @@ def test_required_grouping_without_executable_descendants_is_e017_even_when_defe
 ```itree-contract
 kind = "implementation"
 requires = ["#3"]
+owner = "#4"
 evidence = "routes"
 ```
 """,
                 state=IssueState.closed,
             ),
             3: _issue(3, "Milestone: deferred shell", body=ACCEPTANCE, labels=("deferred",)),
+            4: _issue(4, "Implementation owner"),
         },
-        {1: (2, 3)},
+        {1: (2, 3, 4)},
     )
 
     report = generate_doctor_report(dag)
@@ -341,15 +610,26 @@ def test_churning_route_chain_is_advisory_q005() -> None:
 
 ```itree-contract
 kind = "implementation"
+origin = "#2"
 owner = "#{owner}"
 evidence = "routes"
 ```
 """
 
+    first_route = """
+## Acceptance Criteria
+- Route to the next owner.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+```
+"""
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
-            2: _issue(2, "Original implementation obligation", body=route(3), state=IssueState.closed),
+            2: _issue(2, "Original implementation obligation", body=first_route, state=IssueState.closed),
             3: _issue(3, "Coordination hop A", body=route(4), state=IssueState.closed),
             4: _issue(4, "Coordination hop B", body=route(5), state=IssueState.closed),
             5: _issue(5, "Still unresolved owner"),
@@ -406,7 +686,7 @@ evidence = "routes"
     assert rendered.count("E016:") == 1
 
 
-def test_native_readiness_still_controls_next_work_unit() -> None:
+def test_doctor_compares_reported_next_to_independent_native_readiness_selection() -> None:
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
@@ -433,3 +713,4 @@ evidence = "records"
     report = generate_doctor_report(dag)
 
     assert _present_number(report.next_issue) == 3
+    assert _findings(report, "E020") == []

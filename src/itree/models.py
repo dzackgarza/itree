@@ -709,6 +709,7 @@ class Finding(BaseModel):
     remediation: list[str]
     suggested_commands: list[str] = []
     witness: AuditFindingWitness | None = None
+    witnesses: tuple[AuditFindingWitness, ...] = ()
 
 
 class PresentReportRef(BaseModel):
