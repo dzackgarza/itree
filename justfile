@@ -11,10 +11,14 @@ default:
 build:
     @uv build
 
-# Run the full local quality gate
-test:
-    @just -f ~/ai-review-ci/justfiles/python.just -d . test
+# Run immediate commit-tier quality checks
+test-commit:
+    @just -f ~/ai-review-ci/justfiles/python.just -d . test-commit
 
-# Run the CI quality gate
+# Run the full project suite before pushing
+test-push:
+    @just -f ~/ai-review-ci/justfiles/python.just -d . test-push
+
+# Run the CI acceptance gate
 test-ci:
     @just -f ~/ai-review-ci/justfiles/python.just -d . test-ci
