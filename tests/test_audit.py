@@ -823,3 +823,29 @@ def test_w061_fires_on_issue_with_no_children() -> None:
     w061 = [f for f in findings if f.code == "W061"]
     assert w061
     assert 2 in w061[0].issue_numbers
+
+
+def test_html_entity_not_matched_as_issue_ref() -> None:
+    """HTML numeric entities like &#123; should not match as issue references."""
+    from itree.audit import _parse_issue_refs
+
+    refs = _parse_issue_refs("See &#123; for details")
+    assert 123 not in refs
+
+
+def test_w062_does_not_fire_on_closed_issues() -> None:
+    """W062 should only fire on open issues, not closed ones."""
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Closed work unit", state=IssueState.closed, labels=("blocked",)),
+            3: _issue(3, "Open work unit", labels=("blocked",)),
+        },
+        children_of={1: (2, 3)},
+    )
+    findings = detect_label_conflicts(dag, derived_state_labels=("blocked",))
+    w062 = [f for f in findings if f.code == "W062"]
+    assert w062
+    assert 3 in w062[0].issue_numbers
+    assert 2 not in w062[0].issue_numbers

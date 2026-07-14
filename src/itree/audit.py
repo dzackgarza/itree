@@ -26,7 +26,7 @@ from .validate import is_grouping_issue, lacks_acceptance_criteria
 # prevents matching the #N inside a qualified cross-repo reference such as
 # owner/repo#N, so a local issue with the same number is not falsely treated
 # as a transfer target (Spec F).
-_ISSUE_REF_PATTERN = re.compile(r"(?<![/\w])#([1-9]\d*)")
+_ISSUE_REF_PATTERN = re.compile(r"(?<![/&\w])#([1-9]\d*)")
 
 # Transfer language indicating an implementation obligation was moved
 # to another issue rather than discharged.
@@ -211,6 +211,8 @@ def detect_label_conflicts(
         w062_issues: list[int] = []
         w062_evidence: list[str] = []
         for number, issue in sorted(dag.issues.items()):
+            if not issue.is_open:
+                continue
             labels_lower = {label.casefold() for label in issue.labels}
             conflicting = labels_lower & derived_lower
             if conflicting:
