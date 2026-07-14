@@ -32,6 +32,8 @@ class MetricsConfig(BaseModel):
     flat_children_ratio: float = 0.5
     flat_min_children: int = 6
     deferral_label: str = "deferred"
+    decomposition_label: str = ""
+    derived_state_labels: tuple[str, ...] = ()
 
 
 class PresentCodeSize(BaseModel):

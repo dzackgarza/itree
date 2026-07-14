@@ -1108,7 +1108,12 @@ def doctor(
         sys.exit(3)
 
     config = load_config()
-    report = generate_doctor_report(dag, deferral_label=config.deferral_label)
+    report = generate_doctor_report(
+        dag,
+        deferral_label=config.deferral_label,
+        decomposition_label=config.decomposition_label,
+        derived_state_labels=config.derived_state_labels,
+    )
 
     if as_json:
         print(report.model_dump_json(indent=2))
@@ -1127,6 +1132,8 @@ def collect_repo_healths(
     repos: Sequence[RepoRef],
     build: Callable[[RepoRef], RepoDag],
     deferral_label: str,
+    decomposition_label: str = "",
+    derived_state_labels: tuple[str, ...] = (),
 ) -> tuple[list[RepoHealth], list[tuple[str, str]]]:
     """Fetch and condense each repo's health, isolating per-repo failures.
 
@@ -1138,7 +1145,12 @@ def collect_repo_healths(
 
     def health_of(repo_ref: RepoRef) -> RepoHealth | tuple[str, str]:
         try:
-            return repo_health(build(repo_ref), deferral_label=deferral_label)
+            return repo_health(
+                build(repo_ref),
+                deferral_label=deferral_label,
+                decomposition_label=decomposition_label,
+                derived_state_labels=derived_state_labels,
+            )
         except Exception as e:
             return (repo_ref.slug, str(e))
 
@@ -1181,8 +1193,14 @@ def scan(
 
     # Read config once at the command boundary (mirrors doctor), then apply the
     # same deferral_label to every scanned repo.
-    deferral_label = load_config().deferral_label
-    healths, fetch_errors = collect_repo_healths(repos, build_dag, deferral_label)
+    config = load_config()
+    healths, fetch_errors = collect_repo_healths(
+        repos,
+        build_dag,
+        config.deferral_label,
+        decomposition_label=config.decomposition_label,
+        derived_state_labels=config.derived_state_labels,
+    )
 
     if as_json:
         print(json.dumps(scan_payload(healths, fetch_errors), indent=2))

@@ -9,7 +9,7 @@ from __future__ import annotations
 from itree.cli import doctor_exit_code, render_doctor_report
 from itree.contracts import ContractEvidence, ContractKind, parse_issue_contracts
 from itree.metrics import AbsentCodeSize, MetricsConfig
-from itree.models import Finding, GithubIssue, IssueRef, IssueState, RepoDag, RepoRef, ReportRef
+from itree.models import DoctorReport, Finding, GithubIssue, IssueRef, IssueState, RepoDag, RepoRef, ReportRef
 from itree.validate import generate_doctor_report
 
 ACCEPTANCE = "## Acceptance Criteria\n- The work is complete."
@@ -61,7 +61,7 @@ def _present_number(ref: ReportRef) -> int:
     return ref.ref.number
 
 
-def _findings(report, code: str) -> list[Finding]:
+def _findings(report: DoctorReport, code: str) -> list[Finding]:
     return [finding for finding in report.findings if finding.code == code]
 
 
