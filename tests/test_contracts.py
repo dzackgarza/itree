@@ -552,6 +552,84 @@ completion = "completed"
     assert tuple(ref.number for ref in findings[0].witness.edge_chain) == (2, 3)
 
 
+def test_completed_implementation_continuation_route_reports_unresolved_owner() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Open original route",
+                body="""
+## Acceptance Criteria
+- This issue routes implementation to the next owner.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "routes"
+```
+""",
+            ),
+            3: _issue(
+                3,
+                "Open completed continuation route",
+                body="""
+## Acceptance Criteria
+- This continuation claims completion while routing onward.
+
+```itree-contract
+kind = "implementation"
+origin = "#2"
+owner = "#4"
+evidence = "routes"
+completion = "completed"
+```
+""",
+            ),
+            4: _issue(4, "Terminal implementation owner"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E016")
+
+    assert len(findings) == 1
+    assert findings[0].witness is not None
+    assert findings[0].witness.originating_obligation == _ref(2)
+    assert tuple(ref.number for ref in findings[0].witness.edge_chain) == (3, 4)
+
+
+def test_completed_implementation_record_with_owner_is_not_a_route() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Completed implementation record",
+                body="""
+## Acceptance Criteria
+- This issue records implementation metadata.
+
+```itree-contract
+kind = "implementation"
+owner = "#3"
+evidence = "records"
+completion = "completed"
+```
+""",
+                state=IssueState.closed,
+            ),
+            3: _issue(3, "Related owner"),
+        },
+        {1: (2, 3)},
+    )
+
+    report = generate_doctor_report(dag)
+
+    assert _findings(report, "E016") == []
+
+
 def test_invalid_completed_route_claim_value_is_reported_as_e018() -> None:
     dag = _dag(
         {

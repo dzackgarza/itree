@@ -126,7 +126,7 @@ def _unresolved_implementation_routes(
     churn_witnesses: list[AuditFindingWitness] = []
 
     for declaration in _implementation_routes(declarations_by_issue):
-        if not _is_route_root(declaration):
+        if not _is_route_root(declaration) and declaration.completion != ContractCompletion.completed:
             continue
         origin = declaration.origin or declaration.issue
         if not _is_local(dag, origin):
@@ -342,7 +342,7 @@ def _implementation_routes(
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
 ) -> Iterable[ContractDeclaration]:
     for declaration in _implementation_declarations(declarations_by_issue):
-        if declaration.owner is not None and declaration.evidence != ContractEvidence.discharges:
+        if declaration.owner is not None and declaration.evidence == ContractEvidence.routes:
             yield declaration
 
 
