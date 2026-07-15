@@ -188,7 +188,7 @@ Because a deferred grouping has no open work units, `next` skips past it until i
 GitHub parentage owns tree shape, native blockers own readiness, and issue bodies own the work contract.
 Use an `itree-contract` fence only when those native surfaces cannot express a semantic obligation transfer, proof boundary, or revalidation trigger.
 
-```toml
+```itree-contract
 kind = "implementation"
 evidence = "routes"
 owner = "#42"

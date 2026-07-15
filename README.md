@@ -204,7 +204,7 @@ It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings
 
 When GitHub parentage and native blockers cannot express a semantic implementation transfer, put a strict TOML `itree-contract` fence in the issue body:
 
-```toml
+```itree-contract
 kind = "implementation"
 evidence = "routes"
 owner = "#42"
