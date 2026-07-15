@@ -182,3 +182,34 @@ A milestone or backlog ledger may legitimately hold no work units yet, on purpos
 Label such a grouping `deferred` (configurable via `deferral_label` in `~/.config/itree/config.toml`). `itree doctor` then reports it as informational `I010` ("deferred, awaiting breakdown") instead of warning `W030` (dead shelf).
 An untagged empty grouping still warns as a stale shelf.
 Because a deferred grouping has no open work units, `next` skips past it until its work is filed in.
+
+## Completion contracts
+
+GitHub parentage owns tree shape, native blockers own readiness, and issue bodies own the work contract.
+Use an `itree-contract` fence only when those native surfaces cannot express a semantic obligation transfer, proof boundary, or revalidation trigger.
+
+```toml
+kind = "implementation"
+evidence = "routes"
+owner = "#42"
+requires = ["#7"]
+revalidate_on = ["#84"]
+completion = "completed"
+```
+
+The fence is strict TOML. Valid `kind` values are `implementation`, `proof`, `research`, `audit`, and `coordination`. Valid `evidence` values are `routes`, `records`, `narrows`, and `discharges`. Refs use `#N` for the same repo or `OWNER/REPO#N` for a qualified issue.
+
+Use the fields as a small semantic contract:
+
+- `owner` names the current downstream owner of a routed obligation.
+- `origin` names the original obligation when later evidence claims to discharge it.
+- `requires` names grouping or work-unit refs that must produce executable descendants or implementation evidence.
+- `revalidate_on` names later owners, case families, subtypes, or capabilities that can invalidate a closed claim.
+- `role` may declare `grouping` or `work_unit` when the issue body needs to make the intended role explicit.
+- `decomposition` may declare `partial` or `complete` for grouping decomposition claims.
+- `completion = "completed"` marks an explicit closure claim even when the GitHub issue is still open.
+
+Malformed fences are `E018`. A closed or completed implementation route remains `E016` until the terminal owner provides matching implementation discharge evidence for the same `origin`. Audit, research, planning, and coordination records cannot discharge implementation.
+
+Completion contracts do not create a second scheduler.
+`next` still uses native blockers for readiness and preorder as the deterministic tie-breaker among ready work units.
