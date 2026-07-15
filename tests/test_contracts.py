@@ -615,6 +615,38 @@ evidence = "routes"
     assert "#3" in findings[0].evidence[0]
 
 
+def test_required_grouping_json_carries_each_witness() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Release contract",
+                body="""
+## Acceptance Criteria
+- Both groupings must produce executable work.
+
+```itree-contract
+kind = "implementation"
+requires = ["#3", "#4"]
+evidence = "records"
+```
+""",
+            ),
+            3: _issue(3, "Milestone: empty alpha", labels=("deferred",)),
+            4: _issue(4, "Milestone: empty beta", labels=("deferred",)),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    payload = report.model_dump(mode="json")
+    e017 = next(finding for finding in payload["findings"] if finding["code"] == "E017")
+
+    assert [witness["current_owner"]["number"] for witness in e017["witnesses"]] == [3, 4]
+    assert [[ref["number"] for ref in witness["edge_chain"]] for witness in e017["witnesses"]] == [[2, 3], [2, 4]]
+
+
 def test_role_declaration_contradicting_tree_shape_is_w060() -> None:
     dag = _dag(
         {
@@ -706,6 +738,39 @@ evidence = "records"
     assert _findings(report, "Q004")
     assert report.status == "ok"
     assert doctor_exit_code(report) == 0
+
+
+def test_completed_revalidation_claim_on_open_issue_is_q004() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Open audit with completed revalidation claim",
+                body="""
+## Acceptance Criteria
+- Audit covers the live case family.
+
+```itree-contract
+kind = "audit"
+revalidate_on = ["#3"]
+evidence = "records"
+completion = "completed"
+```
+""",
+            ),
+            3: _issue(3, "Later live case family"),
+        },
+        {1: (2, 3)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "Q004")
+
+    assert len(findings) == 1
+    assert findings[0].witness is not None
+    assert findings[0].witness.current_owner == _ref(2)
+    assert findings[0].witness.edge_chain == (_ref(2), _ref(3))
 
 
 def test_churning_route_chain_is_advisory_q005() -> None:

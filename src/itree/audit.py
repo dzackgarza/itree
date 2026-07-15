@@ -188,6 +188,7 @@ def _required_groupings_without_work(
 
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     for required_number, declarations in sorted(required_groupings.items()):
         issue = dag.issues.get(required_number)
         if issue is None or not _is_grouping(issue.title):
@@ -197,7 +198,7 @@ def _required_groupings_without_work(
         label_note = " including deferred shell" if deferral_label.casefold() in _label_set(issue.labels) else ""
         evidence.append(f"#{required_number} {issue.title!r} is required but has no executable work-unit descendants{label_note}")
         declaration = declarations[0]
-        first_witness = first_witness or AuditFindingWitness(
+        witness = AuditFindingWitness(
             originating_obligation=declaration.origin or declaration.issue,
             current_owner=_issue_ref(dag, required_number),
             edge_chain=(declaration.issue, _issue_ref(dag, required_number)),
@@ -205,8 +206,10 @@ def _required_groupings_without_work(
             obligation_kind=declaration.kind.value,
             unresolved_burden="required grouping has no executable work-unit descendants",
         )
+        witnesses.append(witness)
+        first_witness = first_witness or witness
 
-    return [_finding("E017", evidence, first_witness)] if evidence else []
+    return [_finding("E017", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _role_contradictions(
@@ -215,6 +218,7 @@ def _role_contradictions(
 ) -> list[Finding]:
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     for number, declarations in sorted(declarations_by_issue.items()):
         declared_roles = tuple(declaration.role for declaration in declarations if declaration.role is not None)
         if not declared_roles:
@@ -224,12 +228,14 @@ def _role_contradictions(
             if declared_role == actual_role:
                 continue
             evidence.append(f"#{number} declares role={declared_role.value} but tree/title structure is {actual_role.value}")
-            first_witness = first_witness or AuditFindingWitness(
+            witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state=f"declared={declared_role.value} actual={actual_role.value}",
                 unresolved_burden="declared role contradicts tree role",
             )
-    return [_finding("W060", evidence, first_witness)] if evidence else []
+            witnesses.append(witness)
+            first_witness = first_witness or witness
+    return [_finding("W060", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _decomposition_label_contradictions(
@@ -240,26 +246,31 @@ def _decomposition_label_contradictions(
 ) -> list[Finding]:
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     normalized_label = decomposition_label.casefold()
     for number, issue in sorted(dag.issues.items()):
         if normalized_label and issue.is_open and normalized_label in _label_set(issue.labels) and not _is_structural_grouping(dag, number):
             evidence.append(f"#{number} carries decomposition label {decomposition_label!r} but is a work-unit leaf")
-            first_witness = first_witness or AuditFindingWitness(
+            witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state=f"label={decomposition_label}",
                 unresolved_burden="decomposition label duplicates grouping state on a work unit",
             )
+            witnesses.append(witness)
+            first_witness = first_witness or witness
         if not _is_grouping(issue.title):
             continue
         complete_declarations = [declaration for declaration in declarations_by_issue[number] if declaration.decomposition == ContractDecomposition.complete]
         if complete_declarations and not _has_open_executable_descendant(dag, number):
             evidence.append(f"#{number} claims decomposition=complete but has no executable owner descendant")
-            first_witness = first_witness or AuditFindingWitness(
+            witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state="decomposition=complete",
                 unresolved_burden="complete decomposition lacks executable work-unit descendant",
             )
-    return [_finding("W061", evidence, first_witness)] if evidence else []
+            witnesses.append(witness)
+            first_witness = first_witness or witness
+    return [_finding("W061", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _derived_state_label_duplications(
@@ -272,17 +283,20 @@ def _derived_state_label_duplications(
         return []
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     for number, issue in sorted(dag.issues.items()):
         overlapping = sorted(_label_set(issue.labels) & configured)
         if not issue.is_open or not overlapping:
             continue
         evidence.append(f"#{number} carries derived-state label(s): {', '.join(overlapping)}")
-        first_witness = first_witness or AuditFindingWitness(
+        witness = AuditFindingWitness(
             current_owner=_issue_ref(dag, number),
             conflicting_state=f"labels={','.join(overlapping)}",
             unresolved_burden="configured label duplicates graph-derived state",
         )
-    return [_finding("W062", evidence, first_witness)] if evidence else []
+        witnesses.append(witness)
+        first_witness = first_witness or witness
+    return [_finding("W062", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _non_monotone_revalidation_questions(
@@ -291,17 +305,18 @@ def _non_monotone_revalidation_questions(
 ) -> list[Finding]:
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     for number, declarations in sorted(declarations_by_issue.items()):
         issue = dag.issues[number]
-        if issue.is_open:
-            continue
         for declaration in declarations:
+            if issue.is_open and declaration.completion != ContractCompletion.completed:
+                continue
             live_refs = [ref for ref in declaration.revalidate_on if _is_local(dag, ref) and ref.number in dag.issues and dag.issues[ref.number].is_open]
             if not live_refs:
                 continue
             live_text = ", ".join(f"#{ref.number}" for ref in live_refs)
-            evidence.append(f"closed #{number} declares revalidate_on live issue(s): {live_text}")
-            first_witness = first_witness or AuditFindingWitness(
+            evidence.append(f"closure claim #{number} declares revalidate_on live issue(s): {live_text}")
+            witness = AuditFindingWitness(
                 originating_obligation=declaration.origin or declaration.issue,
                 current_owner=declaration.issue,
                 edge_chain=(declaration.issue, *live_refs),
@@ -309,7 +324,9 @@ def _non_monotone_revalidation_questions(
                 obligation_kind=declaration.kind.value,
                 unresolved_burden="closure claim needs revalidation",
             )
-    return [_finding("Q004", evidence, first_witness)] if evidence else []
+            witnesses.append(witness)
+            first_witness = first_witness or witness
+    return [_finding("Q004", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _implementation_declarations(
