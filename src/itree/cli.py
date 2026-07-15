@@ -1090,7 +1090,13 @@ def doctor(
     explain: Annotated[str | None, Parameter(help="Explain the remediation of a diagnostic code")] = None,
     strict: Annotated[bool, Parameter(help="Treat warnings as errors")] = False,
 ) -> None:
-    """Scan the full repo issue DAG and report structure."""
+    """Scan the full repo issue DAG and report structure.
+
+    `doctor` also audits issue-body `itree-contract` fences for explicit
+    completion obligations, routed implementation owners, discharge evidence,
+    role/decomposition declarations, and revalidation triggers. Run
+    `itree help model` for the contract syntax.
+    """
     if explain:
         code = explain.upper()
         if code in DIAGNOSTIC_CATALOG:

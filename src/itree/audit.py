@@ -86,19 +86,18 @@ def _invalid_implementation_discharges(
     dag: RepoDag,
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
 ) -> list[Finding]:
-    implementation_owners = _transitive_implementation_owner_origins(dag, declarations_by_issue)
+    implementation_origins = _implementation_origin_numbers(dag, declarations_by_issue)
 
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
+    witnesses: list[AuditFindingWitness] = []
     for owner_number, declarations in sorted(declarations_by_issue.items()):
         for declaration in declarations:
             if declaration.kind == ContractKind.implementation or declaration.evidence != ContractEvidence.discharges or declaration.origin is None:
                 continue
             if not _is_local(dag, declaration.origin):
                 continue
-            if owner_number not in implementation_owners:
-                continue
-            if declaration.origin.number not in implementation_owners[owner_number]:
+            if declaration.origin.number not in implementation_origins:
                 continue
             evidence.append(f"#{owner_number} presents {declaration.kind.value} evidence as discharge for implementation obligation #{declaration.origin.number}")
             witness = AuditFindingWitness(
@@ -109,9 +108,10 @@ def _invalid_implementation_discharges(
                 obligation_kind=ContractKind.implementation.value,
                 unresolved_burden="non-implementation evidence cannot discharge implementation",
             )
+            witnesses.append(witness)
             first_witness = first_witness or witness
 
-    return [_finding("E019", evidence, first_witness)] if evidence else []
+    return [_finding("E019", evidence, first_witness, tuple(witnesses))] if evidence else []
 
 
 def _unresolved_implementation_routes(
@@ -327,6 +327,18 @@ def _implementation_routes(
     for declaration in _implementation_declarations(declarations_by_issue):
         if declaration.owner is not None and declaration.evidence != ContractEvidence.discharges:
             yield declaration
+
+
+def _implementation_origin_numbers(
+    dag: RepoDag,
+    declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
+) -> set[int]:
+    origins: set[int] = set()
+    for declaration in _implementation_declarations(declarations_by_issue):
+        origin = declaration.origin or declaration.issue
+        if _is_local(dag, origin):
+            origins.add(origin.number)
+    return origins
 
 
 def _transitive_implementation_owner_origins(

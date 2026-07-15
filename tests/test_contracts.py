@@ -351,6 +351,52 @@ evidence = "discharges"
     assert findings[0].witness.current_owner == _ref(3)
 
 
+def test_audit_discharge_cannot_discharge_direct_implementation_origin() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Direct implementation obligation",
+                body="""
+## Acceptance Criteria
+- Implementation must land here.
+
+```itree-contract
+kind = "implementation"
+evidence = "records"
+```
+""",
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Audit note claiming implementation closure",
+                body="""
+## Acceptance Criteria
+- Record the audit outcome.
+
+```itree-contract
+kind = "audit"
+origin = "#2"
+evidence = "discharges"
+```
+""",
+                state=IssueState.closed,
+            ),
+        },
+        {1: (2, 3)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E019")
+
+    assert len(findings) == 1
+    assert findings[0].witness is not None
+    assert findings[0].witness.originating_obligation == _ref(2)
+    assert findings[0].witness.current_owner == _ref(3)
+
+
 def test_audit_discharge_cannot_discharge_transitively_routed_implementation() -> None:
     dag = _dag(
         {
@@ -412,6 +458,66 @@ evidence = "discharges"
     assert findings[0].witness is not None
     assert findings[0].witness.originating_obligation == _ref(2)
     assert findings[0].witness.current_owner == _ref(4)
+
+
+def test_invalid_discharge_json_carries_each_witness() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Original implementation obligation",
+                body="""
+## Acceptance Criteria
+- Implementation must land.
+
+```itree-contract
+kind = "implementation"
+evidence = "records"
+```
+""",
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Audit note claiming implementation closure",
+                body="""
+## Acceptance Criteria
+- Record the audit outcome.
+
+```itree-contract
+kind = "audit"
+origin = "#2"
+evidence = "discharges"
+```
+""",
+                state=IssueState.closed,
+            ),
+            4: _issue(
+                4,
+                "Research note claiming implementation closure",
+                body="""
+## Acceptance Criteria
+- Record the research outcome.
+
+```itree-contract
+kind = "research"
+origin = "#2"
+evidence = "discharges"
+```
+""",
+                state=IssueState.closed,
+            ),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    payload = report.model_dump(mode="json")
+    e019 = next(finding for finding in payload["findings"] if finding["code"] == "E019")
+
+    assert [witness["current_owner"]["number"] for witness in e019["witnesses"]] == [3, 4]
+    assert [witness["originating_obligation"]["number"] for witness in e019["witnesses"]] == [2, 2]
 
 
 def test_completed_implementation_route_claim_on_open_issue_reports_unresolved_owner() -> None:
