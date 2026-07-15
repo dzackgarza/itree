@@ -686,6 +686,19 @@ class RepoDag(BaseModel):
         return TreeNode(issue=issue, children=children)
 
 
+class AuditFindingWitness(BaseModel):
+    """Structured witness for findings whose evidence has graph semantics."""
+
+    model_config = ConfigDict(frozen=True)
+
+    originating_obligation: IssueRef | None = None
+    current_owner: IssueRef | None = None
+    edge_chain: tuple[IssueRef, ...] = ()
+    conflicting_state: str | None = None
+    obligation_kind: str | None = None
+    unresolved_burden: str | None = None
+
+
 class Finding(BaseModel):
     code: str
     severity: FindingSeverity
@@ -695,6 +708,8 @@ class Finding(BaseModel):
     agent_instruction: str | None = None
     remediation: list[str]
     suggested_commands: list[str] = []
+    witness: AuditFindingWitness | None = None
+    witnesses: tuple[AuditFindingWitness, ...] = ()
 
 
 class PresentReportRef(BaseModel):

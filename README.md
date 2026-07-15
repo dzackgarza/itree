@@ -5,7 +5,7 @@ Deterministic traversal layer over GitHub sub-issue trees.
 `itree` keeps one ordered issue tree per repository and tells an agent the single next work unit to do.
 You keep stories, plans, proof obligations, and checklists *inside* each work-unit issue; `itree` handles structure and traversal.
 
-The full organization model, repo state machine, guard rails, and proportionality doctrine live in [`WORKFLOWS.md`](WORKFLOWS.md) and print verbatim from `itree help model`.
+The full organization model, repo state machine, guard rails, and proportionality doctrine live in [`src/itree/WORKFLOWS.md`](src/itree/WORKFLOWS.md) and print verbatim from `itree help model`.
 
 ## Install / invoke
 
@@ -200,7 +200,21 @@ itree tree owner/repo --json
 ## Validation
 
 `itree doctor` is the single validator.
-It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, and missing acceptance criteria.
+It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, missing acceptance criteria, and explicit completion-contract violations.
+
+When GitHub parentage and native blockers cannot express a semantic implementation transfer, put a strict TOML `itree-contract` fence in the issue body:
+
+```itree-contract
+kind = "implementation"
+evidence = "routes"
+owner = "#42"
+requires = ["#7"]
+revalidate_on = ["#84"]
+completion = "completed"
+```
+
+The contract surface is intentionally small.
+`kind` is one of `implementation`, `proof`, `research`, `audit`, or `coordination`; `evidence` is one of `routes`, `records`, `narrows`, or `discharges`. Implementation routes require an `owner`. Discharge evidence requires an `origin`. Unknown fields, invalid enum values, malformed TOML, or invalid refs are `E018` findings rather than silent skips.
 
 Use `itree doctor owner/repo --explain CODE` for the meaning and repair routes of any finding code.
 Warnings dispatch `issue-itree-maintenance` asynchronously while substantive work continues.

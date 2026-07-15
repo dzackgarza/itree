@@ -132,7 +132,10 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "preorder is the deterministic tie-breaker among ready work. "
             "Only dependency cycles are structural errors."
         ),
-        "meaning": "The native blocked_by graph contains a dependency cycle or references a deleted or inaccessible blocker. These errors prevent the affected issues from becoming ready.",
+        "meaning": (
+            "The native blocked_by graph contains a dependency cycle or references a deleted or inaccessible blocker. "
+            "These errors prevent the affected issues from becoming ready."
+        ),
         "remediation": [
             "A. Break the cycle by removing one blocked_by edge using the GitHub UI or API.",
             "B. Restructure the issues so the dependency relation is acyclic.",
@@ -178,6 +181,68 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         ],
         "maintenance": ERROR_MAINTENANCE,
     },
+    "E016": {
+        "title": "unresolved_implementation_route",
+        "severity": "error",
+        "ideal_model": (
+            "A closed implementation-bearing issue may route work only when the downstream owner remains visible "
+            "and eventually provides matching implementation discharge evidence."
+        ),
+        "meaning": "A closed or completed issue still routes an implementation obligation to a terminal owner without a matching implementation discharge.",
+        "remediation": [
+            "A. Reopen or move the implementation obligation to the terminal owner and keep the route explicit.",
+            "B. If implementation is complete, add a matching implementation discharge that names the originating obligation.",
+            "C. Do not use planning, audit, or coordination evidence as implementation discharge.",
+        ],
+        "maintenance": ERROR_MAINTENANCE,
+    },
+    "E017": {
+        "title": "required_grouping_without_executable_descendants",
+        "severity": "error",
+        "ideal_model": "A required grouping must contain at least one executable work-unit descendant before it can own implementation work.",
+        "meaning": "A completion contract requires a grouping issue that currently has no executable work-unit descendants.",
+        "remediation": [
+            "A. Add or move the actual work unit under the grouping.",
+            "B. Route the obligation directly to an existing executable work unit.",
+            "C. Remove the requirement only if the originating obligation no longer depends on that grouping.",
+        ],
+        "maintenance": ERROR_MAINTENANCE,
+    },
+    "E018": {
+        "title": "invalid_completion_contract",
+        "severity": "error",
+        "ideal_model": "Every itree-contract fence is strict TOML with known fields, valid enum values, and valid issue references.",
+        "meaning": "A malformed completion-contract block prevents doctor from trusting the issue's declared completion semantics.",
+        "remediation": [
+            "A. Fix the malformed itree-contract fence.",
+            "B. Remove unknown fields and invalid enum values.",
+            "C. Use #N for same-repo refs or OWNER/REPO#N for qualified refs.",
+        ],
+        "maintenance": ERROR_MAINTENANCE,
+    },
+    "E019": {
+        "title": "invalid_implementation_discharge",
+        "severity": "error",
+        "ideal_model": "Only implementation evidence can discharge an implementation obligation, and it must name the originating obligation.",
+        "meaning": "Audit, research, proof, or coordination evidence is being presented as if it completed implementation work.",
+        "remediation": [
+            "A. Keep the audit/research/coordination record, but do not mark implementation discharged through it.",
+            "B. Route the implementation obligation to the real owner.",
+            "C. Add implementation discharge evidence only after implementation lands.",
+        ],
+        "maintenance": ERROR_MAINTENANCE,
+    },
+    "E020": {
+        "title": "readiness_contract_contradiction",
+        "severity": "error",
+        "ideal_model": "Doctor and next must use the same native dependency readiness model: first ready work unit in preorder.",
+        "meaning": "The reported next work unit contradicts native blocked_by readiness facts.",
+        "remediation": [
+            "A. Treat this as an itree implementation defect and repair the doctor/next readiness integration.",
+            "B. Do not add a separate scheduling layer to paper over the contradiction.",
+        ],
+        "maintenance": ERROR_MAINTENANCE,
+    },
     "W040": {
         "title": "milestone_mismatch",
         "severity": "warning",
@@ -215,6 +280,39 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "remediation": ['A. Edit the issue body to add a "Done when", "Done Criteria", or "Acceptance Criteria" section.'],
         "maintenance": WARNING_MAINTENANCE,
     },
+    "W060": {
+        "title": "role_contradiction",
+        "severity": "warning",
+        "ideal_model": "Issue title, child structure, labels, and body declarations should agree on grouping versus work-unit role.",
+        "meaning": "An issue's declared role contradicts its tree or title role.",
+        "remediation": [
+            "A. Rename or move the issue so tree structure matches the declared role.",
+            "B. Correct the body declaration if the tree structure is already right.",
+        ],
+        "maintenance": WARNING_MAINTENANCE,
+    },
+    "W061": {
+        "title": "decomposition_label_contradiction",
+        "severity": "warning",
+        "ideal_model": "Decomposition state belongs to grouping issues until an executable work unit owns the implementation burden.",
+        "meaning": "A decomposition label or declaration contradicts the executable structure beneath the issue.",
+        "remediation": [
+            "A. Move the decomposition label to the grouping issue that still needs breakdown.",
+            "B. Add or move an executable work unit under a grouping that claims decomposition is complete.",
+        ],
+        "maintenance": WARNING_MAINTENANCE,
+    },
+    "W062": {
+        "title": "derived_state_label_duplication",
+        "severity": "warning",
+        "ideal_model": "Labels should not duplicate facts that itree derives from the graph, dependencies, or contract declarations.",
+        "meaning": "A configured label duplicates graph-derived state such as readiness, role, blocker, or executable-descendant state.",
+        "remediation": [
+            "A. Remove the duplicate label and rely on doctor/next output.",
+            "B. Keep labels for human taxonomy, not for derived tree state.",
+        ],
+        "maintenance": WARNING_MAINTENANCE,
+    },
     "Q001": {
         "title": "too_many_open_work_units",
         "severity": "question",
@@ -241,6 +339,24 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "remediation": [
             "1. Group related issues under milestone or backlog ledgers: itree move ISSUE --under LEDGER.",
             "2. If flat is intended for this repo, tune flat_children_ratio / flat_min_children in ~/.config/itree/config.toml.",
+        ],
+    },
+    "Q004": {
+        "title": "non_monotone_closure_revalidation",
+        "severity": "question",
+        "meaning": "A closed audit, placement, or completeness claim names later live state that can invalidate the old closure claim.",
+        "remediation": [
+            "1. Re-read the named live owner, case family, subtype, or capability.",
+            "2. Reopen or reroute only if the revalidation proves the old claim no longer covers the live tree.",
+        ],
+    },
+    "Q005": {
+        "title": "deferral_chain_churn",
+        "severity": "question",
+        "meaning": "An implementation obligation has passed through repeated routing or coordination hops before any matching discharge.",
+        "remediation": [
+            "1. Collapse routing-only hops into the actual implementation owner when possible.",
+            "2. Preserve provenance in the contract chain; do not hide the originating obligation.",
         ],
     },
     "I001": {
@@ -271,9 +387,7 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
     # detect_dependency_errors can diagnose them as deleted_blocker.
     # Drop dependencies where the blocked issue or a known blocker is a PR.
     dependencies = {
-        issue: tuple(b for b in blockers if b not in dag.issues or not dag.issues[b].is_pull_request)
-        for issue, blockers in dag.dependencies.items()
-        if issue in issues
+        issue: tuple(b for b in blockers if b not in dag.issues or not dag.issues[b].is_pull_request) for issue, blockers in dag.dependencies.items() if issue in issues
     }
     return RepoDag(
         repo_ref=dag.repo_ref,
@@ -363,14 +477,24 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
 ROOT_STATUS_CODES = ("E001", "E002", "E004")
 
 
-def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
+def repo_health(
+    dag: RepoDag,
+    deferral_label: str = "deferred",
+    decomposition_label: str = "",
+    derived_state_labels: tuple[str, ...] = (),
+) -> RepoHealth:
     """Condense a repo's issue DAG into one account-scan health digest.
 
     Config is read at the CLI command boundary (once per invocation) and the
     resolved deferral_label is passed in, so a concurrent account scan does not
     re-read config once per repo.
     """
-    report = generate_doctor_report(dag, deferral_label=deferral_label)
+    report = generate_doctor_report(
+        dag,
+        deferral_label=deferral_label,
+        decomposition_label=decomposition_label,
+        derived_state_labels=derived_state_labels,
+    )
     codes = {f.code for f in report.findings}
     root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
     return RepoHealth(
@@ -382,7 +506,12 @@ def repo_health(dag: RepoDag, deferral_label: str = "deferred") -> RepoHealth:
     )
 
 
-def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> DoctorReport:
+def generate_doctor_report(
+    dag: RepoDag,
+    deferral_label: str = "deferred",
+    decomposition_label: str = "",
+    derived_state_labels: tuple[str, ...] = (),
+) -> DoctorReport:
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
 
@@ -431,6 +560,17 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
                 remediation=f_details["remediation"],
             )
         )
+
+    from .audit import audit_completion_contracts
+
+    findings_list.extend(
+        audit_completion_contracts(
+            dag,
+            deferral_label=deferral_label,
+            decomposition_label=decomposition_label,
+            derived_state_labels=derived_state_labels,
+        )
+    )
 
     # 3. Discover candidates (parentless nodes in the DAG)
     candidates = find_root_ledger_candidates(dag)
@@ -794,6 +934,32 @@ def generate_doctor_report(dag: RepoDag, deferral_label: str = "deferred") -> Do
         if next_node:
             next_issue = IssueRef(repo_ref=dag.repo_ref, number=next_node.issue.number)
             next_issue_ref = PresentReportRef(ref=next_issue)
+            from .readiness import ReadinessState, compute_readiness
+
+            expected_next_issue: IssueRef | None = None
+            for candidate in tree_nodes:
+                if not candidate.issue.is_open:
+                    continue
+                if is_grouping_issue(candidate.issue.title):
+                    continue
+                readiness = compute_readiness(dag, candidate.issue.number)
+                if readiness.state == ReadinessState.ready:
+                    expected_next_issue = IssueRef(repo_ref=dag.repo_ref, number=candidate.issue.number)
+                    break
+
+            if expected_next_issue != next_issue:
+                f_details = DIAGNOSTIC_CATALOG["E020"]
+                expected_text = f"#{expected_next_issue.number}" if expected_next_issue is not None else "no ready work unit"
+                findings_list.append(
+                    Finding(
+                        code="E020",
+                        severity="error",
+                        title=f_details["title"],
+                        evidence=[f"reported next issue #{next_node.issue.number} contradicts independent native readiness selection {expected_text}"],
+                        meaning=f_details["meaning"],
+                        remediation=f_details["remediation"],
+                    )
+                )
 
     # Determine status
     errors_count = sum(1 for f in findings_list if f.severity == "error")
