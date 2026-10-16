@@ -31,3 +31,7 @@ test-push:
 # Run the CI acceptance gate
 test-ci:
     @just -f ~/ai-review-ci/justfiles/python.just -d . test-ci
+
+# Run the scheduled whole-tree audit (semgrep and debt scans) through the central implementation.
+ambient:
+    @just -f ~/ai-review-ci/justfiles/python.just -d . ambient
