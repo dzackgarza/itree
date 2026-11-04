@@ -183,6 +183,23 @@ Label such a grouping `deferred` (configurable via `deferral_label` in `~/.confi
 An untagged empty grouping still warns as a stale shelf.
 Because a deferred grouping has no open work units, `next` skips past it until its work is filed in.
 
+## Routed groupings (work owned by another repository)
+
+A milestone or backlog ledger may keep its place in this tree for cross-repository ordering after its work units move to the repository that owns the code.
+Record the hand-off with a coordination routes contract in the grouping's body, naming the owner issue in the other repository:
+
+```itree-contract
+kind = "coordination"
+evidence = "routes"
+owner = "OWNER/OTHER-REPO#N"
+role = "grouping"
+```
+
+`itree doctor` then reports the grouping as informational `I011` ("routes its work to OWNER/OTHER-REPO#N") instead of warning `W030`.
+Only a well-formed fence whose `owner` is a qualified ref to another repository counts; a same-repository owner still warns `W030`, and a malformed fence is `E018` and still warns `W030`.
+Doctor stays offline and does not read the remote owner, so it does not detect a route to a closed or empty owner.
+Because a routed grouping has no open local work units, `next` skips past it.
+
 ## Foreign sub-issues and blockers
 
 GitHub allows a sub-issue or native blocker from another repository, and `gh issue transfer` leaves a transferred issue listed under its old parent.
@@ -191,7 +208,7 @@ Each repository owns one tree, so `itree` keys every edge by repository and numb
 
 A foreign sub-issue is not a live local descendant: a grouping whose only children are foreign still warns `W030`.
 Detach a child that a transfer left behind.
-When the grouping deliberately hands its work to the other repository, record the route with a coordination contract on the grouping.
+When the grouping deliberately hands its work to the other repository, record the route with a coordination contract on the grouping (see Routed groupings).
 A foreign blocker does not gate local readiness.
 
 ## Completion contracts

@@ -963,3 +963,47 @@ evidence = "records"
 
     assert _present_number(report.next_issue) == 3
     assert _findings(report, "E020") == []
+
+
+def _routed_grouping_dag(body: str) -> RepoDag:
+    return _dag(
+        {
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: Routed", body=body),
+            3: _issue(3, "Local work unit"),
+        },
+        {1: (2, 3)},
+    )
+
+
+def _coordination_fence(owner: str) -> str:
+    return f'```itree-contract\nkind = "coordination"\nevidence = "routes"\nowner = "{owner}"\nrole = "grouping"\n```\n'
+
+
+def test_grouping_routed_to_another_repository_is_informational() -> None:
+    """A grouping whose coordination contract routes to a foreign owner reports I011, not W030."""
+    report = generate_doctor_report(_routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")))
+
+    assert _findings(report, "W030") == []
+    routed = _findings(report, "I011")
+    assert len(routed) == 1
+    assert routed[0].evidence == ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23']
+
+
+def test_grouping_without_route_still_reports_dead_grouping() -> None:
+    """An empty grouping with no contract, or a route to an owner in this repository, stays W030."""
+    for body in (ACCEPTANCE, _coordination_fence("#3")):
+        report = generate_doctor_report(_routed_grouping_dag(body))
+
+        assert _findings(report, "I011") == []
+        assert [finding.evidence for finding in _findings(report, "W030")] == [['#2 "Milestone: Routed" has no open descendants']]
+
+
+def test_malformed_route_fence_is_invalid_contract_not_routed() -> None:
+    """A malformed coordination fence remains E018 and does not suppress W030."""
+    body = '```itree-contract\nkind = "coordination"\nevidence = "routes"\nowner = "otherowner/otherrepo#23"\nunknown_field = 1\n```\n'
+    report = generate_doctor_report(_routed_grouping_dag(body))
+
+    assert len(_findings(report, "E018")) == 1
+    assert _findings(report, "I011") == []
+    assert len(_findings(report, "W030")) == 1
