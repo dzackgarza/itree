@@ -153,6 +153,9 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "C. If it is an intentional long-horizon shelf awaiting breakdown, label it with your "
             "configured deferral label (deferral_label in ~/.config/itree/config.toml; default "
             "'deferred'); doctor then reports it as I010 instead of warning.",
+            "D. If its work was handed to an owner issue in another repository, add a coordination routes "
+            'contract (kind = "coordination", evidence = "routes", owner = "OWNER/REPO#N") to its body; '
+            "doctor then reports it as I011 instead of warning.",
         ],
         "maintenance": WARNING_MAINTENANCE,
     },
@@ -372,6 +375,14 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "It is a long-horizon shelf awaiting breakdown once it becomes the next item, not a stale one.",
         "remediation": [],
     },
+    "I011": {
+        "title": "routed_grouping",
+        "severity": "info",
+        "meaning": "An open grouping has no open local descendants because its coordination routes contract hands its work "
+        "to an owner issue in another repository. The grouping keeps cross-repository ordering here; the owner's tree holds the work. "
+        "Doctor does not read the remote owner, so it cannot see whether that owner is closed or empty.",
+        "remediation": [],
+    },
     "I012": {
         "title": "foreign_edge",
         "severity": "info",
@@ -410,6 +421,21 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
         foreign_children={parent: refs for parent, refs in dag.foreign_children.items() if parent in issues},
         foreign_blockers={issue: refs for issue, refs in dag.foreign_blockers.items() if issue in issues},
     )
+
+
+def _foreign_coordination_route(dag: RepoDag, number: int) -> IssueRef | None:
+    """Return the owner of a well-formed coordination routes contract that lives in another repository.
+
+    Malformed fences yield no declaration, so they never suppress W030; they remain E018.
+    """
+    from .contracts import ContractEvidence, ContractKind, parse_issue_contracts
+
+    parsed = parse_issue_contracts(dag.issues[number].body, repo_ref=dag.repo_ref, issue_number=number)
+    for declaration in parsed.declarations:
+        owner = declaration.owner
+        if declaration.kind == ContractKind.coordination and declaration.evidence == ContractEvidence.routes and owner is not None and owner.repo_ref.slug.casefold() != dag.repo_ref.slug.casefold():
+            return owner
+    return None
 
 
 def parse_milestone_ledger_name(title: str) -> str | None:
@@ -815,12 +841,18 @@ def generate_doctor_report(
         # W030: open grouping issue (other than the root) with no open descendants.
         # A grouping carrying the deferral label is an intentional long-horizon
         # shelf awaiting breakdown, not a dead one: it is reported as I010 instead.
+        # A grouping whose coordination contract routes its work to an owner in
+        # another repository is reported as I011 instead.
         dead_groupings = []
         deferred_groupings = []
+        routed_groupings = []
         for node in tree_nodes[1:]:
             if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
+                route = _foreign_coordination_route(dag, node.issue.number)
                 if deferral_label.casefold() in {label.casefold() for label in node.issue.labels}:
                     deferred_groupings.append(f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown')
+                elif route is not None:
+                    routed_groupings.append(f'#{node.issue.number} "{node.issue.title}" routes its work to {route.slug}')
                 else:
                     dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
 
@@ -845,6 +877,19 @@ def generate_doctor_report(
                     severity="info",
                     title=f_details["title"],
                     evidence=deferred_groupings,
+                    meaning=f_details["meaning"],
+                    remediation=f_details["remediation"],
+                )
+            )
+
+        if routed_groupings:
+            f_details = DIAGNOSTIC_CATALOG["I011"]
+            findings_list.append(
+                Finding(
+                    code="I011",
+                    severity="info",
+                    title=f_details["title"],
+                    evidence=routed_groupings,
                     meaning=f_details["meaning"],
                     remediation=f_details["remediation"],
                 )
