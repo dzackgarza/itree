@@ -200,7 +200,7 @@ itree tree owner/repo --json
 ## Validation
 
 `itree doctor` is the single validator.
-It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, missing acceptance criteria, and explicit completion-contract violations.
+It reports findings against a diagnostic catalog (`E…` errors, `W…` warnings, advisory `Q…` structure questions) covering: missing/multiple roots, a root not titled `Ledger:`, cycles, unreachable or parentless open issues, closed parents hiding open descendants, duplicate reachable issues, dependency edges, depth near GitHub's 8-level cap, work units decomposed into child issues, dead open grouping issues, milestone mismatches, missing acceptance criteria, explicit completion-contract violations, and informational `I…` notes such as cross-repository sub-issues and blockers kept out of the local tree.
 
 When GitHub parentage and native blockers cannot express a semantic implementation transfer, put a strict TOML `itree-contract` fence in the issue body:
 

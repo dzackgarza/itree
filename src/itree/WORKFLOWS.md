@@ -183,6 +183,17 @@ Label such a grouping `deferred` (configurable via `deferral_label` in `~/.confi
 An untagged empty grouping still warns as a stale shelf.
 Because a deferred grouping has no open work units, `next` skips past it until its work is filed in.
 
+## Foreign sub-issues and blockers
+
+GitHub allows a sub-issue or native blocker from another repository, and `gh issue transfer` leaves a transferred issue listed under its old parent.
+Each repository owns one tree, so `itree` keys every edge by repository and number and keeps a foreign issue out of the local tree.
+`itree doctor` names each foreign edge with its repository as informational `I012`; `itree tree` shows a foreign sub-issue as a qualified `[foreign]` leaf under its local parent.
+
+A foreign sub-issue is not a live local descendant: a grouping whose only children are foreign still warns `W030`.
+Detach a child that a transfer left behind.
+When the grouping deliberately hands its work to the other repository, record the route with a coordination contract on the grouping.
+A foreign blocker does not gate local readiness.
+
 ## Completion contracts
 
 GitHub parentage owns tree shape, native blockers own readiness, and issue bodies own the work contract.

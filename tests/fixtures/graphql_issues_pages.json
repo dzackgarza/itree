@@ -21,10 +21,16 @@
                 "totalCount": 2,
                 "nodes": [
                   {
-                    "number": 2
+                    "number": 2,
+                    "repository": {
+                      "nameWithOwner": "testowner/testrepo"
+                    }
                   },
                   {
-                    "number": 3
+                    "number": 3,
+                    "repository": {
+                      "nameWithOwner": "testowner/testrepo"
+                    }
                   }
                 ]
               },
@@ -48,7 +54,10 @@
                 "totalCount": 1,
                 "nodes": [
                   {
-                    "number": 4
+                    "number": 4,
+                    "repository": {
+                      "nameWithOwner": "testowner/testrepo"
+                    }
                   }
                 ]
               },

@@ -487,6 +487,14 @@ class GithubIssue(BaseModel):
         """Whether this GitHub issues API record is actually a pull request."""
         return self.pull_request is not None
 
+    @property
+    def repository_slug(self) -> str:
+        """Return OWNER/REPO of the repository that owns this issue, read from its html_url."""
+        m = re.fullmatch(r"https://github\.com/(?P<slug>[^/]+/[^/]+)/(?:issues|pull)/\d+", self.html_url)
+        if not m:
+            raise ValueError(f"cannot read repository from html_url {self.html_url!r}")
+        return m["slug"]
+
 
 class TreeNode(BaseModel):
     """Materialized rooted ordered tree node."""
@@ -620,6 +628,11 @@ class RepoDag(BaseModel):
 
     # Dependency relationships: child_number -> tuple of blocker issue numbers.
     dependencies: dict[int, tuple[int, ...]] = Field(default_factory=dict)
+
+    # Cross-repository edges, kept out of the local DAG: parent_number ->
+    # ordered foreign sub-issues, and issue_number -> foreign blockers.
+    foreign_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
+    foreign_blockers: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _compute_derived(self) -> Self:
