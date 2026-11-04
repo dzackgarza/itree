@@ -21,7 +21,9 @@ from .models import (
 
 # One paginated query returns the entire issue DAG: every issue (open and
 # closed) with its ordered sub-issue edges and blocked-by edges. Sub-issue
-# order IS sibling priority order. PRs never appear: repository.issues is
+# order IS sibling priority order. Each edge endpoint carries its repository:
+# GitHub allows cross-repository sub-issues and blockers, so a bare number
+# does not identify an endpoint. PRs never appear: repository.issues is
 # issues-only in GraphQL, unlike the REST issues endpoint.
 REPO_GRAPH_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
@@ -40,11 +42,11 @@ query($owner: String!, $name: String!, $endCursor: String) {
         labels(first: 100) { nodes { name } }  # GitHub single-page max; one issue never exceeds this
         subIssues(first: 100) {
           totalCount
-          nodes { number }
+          nodes { number repository { nameWithOwner } }
         }
         blockedBy(first: 100) {
           totalCount
-          nodes { number }
+          nodes { number repository { nameWithOwner } }
         }
       }
     }
@@ -568,7 +570,7 @@ class GithubApi(BaseModel):
                 assert len(blockers) == blocked_by["totalCount"], (
                     f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{node['number']}: expected {blocked_by['totalCount']}, fetched {len(blockers)}"
                 )
-                blocked_by["nodes"] = [{"number": blocker.number} for blocker in blockers]
+                blocked_by["nodes"] = [{"number": blocker.number, "repository": {"nameWithOwner": blocker.repository_slug}} for blocker in blockers]
         return nodes
 
     def get_parent_number(self, number: int) -> int | None:

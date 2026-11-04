@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .github import GithubApi
-from .models import GithubIssue, RepoDag, RepoRef
+from .models import GithubIssue, IssueRef, RepoDag, RepoRef
 
 # Resolver for the >100-children fallback: given a parent number, return its
 # full sub-issue list. In production this is ``GithubApi.list_subissues``; the
@@ -30,28 +30,49 @@ def dag_from_graph_nodes(
 
     children_of: dict[int, tuple[int, ...]] = {}
     dependencies: dict[int, tuple[int, ...]] = {}
+    foreign_children: dict[int, tuple[IssueRef, ...]] = {}
+    foreign_blockers: dict[int, tuple[IssueRef, ...]] = {}
     for node in nodes:
         number = node["number"]
         sub = node["subIssues"]
-        child_numbers = [child["number"] for child in sub["nodes"]]
-        if sub["totalCount"] > len(child_numbers):
+        child_refs = [_edge_ref(child) for child in sub["nodes"]]
+        if sub["totalCount"] > len(child_refs):
             # >100 children: the GraphQL page is truncated; fall back to the
             # REST sub-issues endpoint for this one node to keep edges complete.
-            child_numbers = [child.number for child in subissue_resolver(number) if not child.is_pull_request]
-        present = tuple(child for child in child_numbers if child in issues)
+            child_refs = [IssueRef(repo_ref=RepoRef.parse(child.repository_slug), number=child.number) for child in subissue_resolver(number) if not child.is_pull_request]
+        present = tuple(ref.number for ref in child_refs if _same_repo(ref, repo_ref) and ref.number in issues)
         if present:
             children_of[number] = present
+        foreign = tuple(ref for ref in child_refs if not _same_repo(ref, repo_ref))
+        if foreign:
+            foreign_children[number] = foreign
 
-        blockers = tuple(blocker["number"] for blocker in node["blockedBy"]["nodes"] if blocker["number"] in issues)
+        blocker_refs = [_edge_ref(blocker) for blocker in node["blockedBy"]["nodes"]]
+        blockers = tuple(ref.number for ref in blocker_refs if _same_repo(ref, repo_ref) and ref.number in issues)
         if blockers:
             dependencies[number] = blockers
+        foreign_blocker_refs = tuple(ref for ref in blocker_refs if not _same_repo(ref, repo_ref))
+        if foreign_blocker_refs:
+            foreign_blockers[number] = foreign_blocker_refs
 
     return RepoDag(
         repo_ref=repo_ref,
         issues=issues,
         children_of=children_of,
         dependencies=dependencies,
+        foreign_children=foreign_children,
+        foreign_blockers=foreign_blockers,
     )
+
+
+def _edge_ref(edge: dict) -> IssueRef:
+    """Key a GraphQL sub-issue or blocker node by repository and number."""
+    return IssueRef(repo_ref=RepoRef.parse(edge["repository"]["nameWithOwner"]), number=edge["number"])
+
+
+def _same_repo(ref: IssueRef, repo_ref: RepoRef) -> bool:
+    """GitHub owner and repository names are case-insensitive."""
+    return ref.repo_ref.slug.casefold() == repo_ref.slug.casefold()
 
 
 def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:

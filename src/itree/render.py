@@ -105,7 +105,8 @@ def render_tree(
     count of nodes it dropped as hidden_count (see prune_closed).
 
     When ``dag`` is provided, blocked issues are annotated with their open
-    direct blockers.
+    direct blockers, and foreign sub-issues render as qualified ``[foreign]``
+    leaves under their local parent.
     """
     lines: list[str] = []
     seen: set[int] = set()
@@ -142,13 +143,16 @@ def render_tree(
             shown = children[:TRUNCATE_HEAD]
             overflow = children[TRUNCATE_HEAD:]
 
+        foreign = dag.foreign_children[node.issue.number] if dag is not None and node.issue.number in dag.foreign_children else ()
         child_prefix = "" if node is root else prefix + ("    " if connector.startswith("└") else "│   ")
         for i, child in enumerate(shown):
-            last = i == len(shown) - 1 and not overflow
+            last = i == len(shown) - 1 and not overflow and not foreign
             walk(child, child_prefix, "└── " if last else "├── ")
         if overflow:
             numbers = " ".join(f"#{child.issue.number}" for child in overflow)
-            lines.append(f"{child_prefix}└── ... {len(overflow)} more: {numbers}")
+            lines.append(f"{child_prefix}{'├── ' if foreign else '└── '}... {len(overflow)} more: {numbers}")
+        for i, ref in enumerate(foreign):
+            lines.append(f"{child_prefix}{'└── ' if i == len(foreign) - 1 else '├── '}{ref.slug}  [foreign]")
 
     walk(root, "", "")
 

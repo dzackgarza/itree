@@ -37,9 +37,9 @@ def _node(
         "labels": {"nodes": [{"name": name} for name in labels]},
         "subIssues": {
             "totalCount": total_children if total_children is not None else len(children),
-            "nodes": [{"number": child} for child in children],
+            "nodes": [{"number": child, "repository": {"nameWithOwner": "testowner/testrepo"}} for child in children],
         },
-        "blockedBy": {"nodes": [{"number": blocker} for blocker in blocked_by]},
+        "blockedBy": {"nodes": [{"number": blocker, "repository": {"nameWithOwner": "testowner/testrepo"}} for blocker in blocked_by]},
     }
 
 

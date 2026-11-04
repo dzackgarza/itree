@@ -372,6 +372,19 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "It is a long-horizon shelf awaiting breakdown once it becomes the next item, not a stale one.",
         "remediation": [],
     },
+    "I012": {
+        "title": "foreign_edge",
+        "severity": "info",
+        "meaning": "A local issue lists a sub-issue or native blocker that lives in another repository. "
+        "Each repository owns its own tree, so doctor keeps the foreign issue out of this DAG: it is not a local child, "
+        "it does not count as an open descendant for W030, and it does not gate readiness. "
+        "`gh issue transfer` leaves a transferred issue listed under its old parent, so this follows cross-repository migrations.",
+        "remediation": [
+            "A. Detach the foreign sub-issue if it was left behind by a transfer and the local parent no longer owns it.",
+            "B. If the local grouping deliberately hands its work to the other repository, record that with a "
+            "coordination routes contract on the grouping.",
+        ],
+    },
 }
 
 
@@ -394,6 +407,8 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
         issues=issues,
         children_of=children_of,
         dependencies=dependencies,
+        foreign_children={parent: refs for parent, refs in dag.foreign_children.items() if parent in issues},
+        foreign_blockers={issue: refs for issue, refs in dag.foreign_blockers.items() if issue in issues},
     )
 
 
@@ -571,6 +586,22 @@ def generate_doctor_report(
             derived_state_labels=derived_state_labels,
         )
     )
+
+    foreign_edges = [f"#{parent} lists foreign sub-issue {ref.slug}" for parent, refs in sorted(dag.foreign_children.items()) for ref in refs] + [
+        f"#{issue} is blocked by foreign issue {ref.slug}" for issue, refs in sorted(dag.foreign_blockers.items()) for ref in refs
+    ]
+    if foreign_edges:
+        f_details = DIAGNOSTIC_CATALOG["I012"]
+        findings_list.append(
+            Finding(
+                code="I012",
+                severity="info",
+                title=f_details["title"],
+                evidence=foreign_edges,
+                meaning=f_details["meaning"],
+                remediation=f_details["remediation"],
+            )
+        )
 
     # 3. Discover candidates (parentless nodes in the DAG)
     candidates = find_root_ledger_candidates(dag)
