@@ -177,6 +177,13 @@ Recovery starts by rereading live GitHub state.
 | --- | --- | --- |
 | `close` | Close an issue | `itree close owner/repo#5 --reason completed` |
 
+### Cross-repository sub-issues
+
+`attach`, `detach` and `move` accept a child in another repository of the parent's owner, as GitHub's sub-issues contract allows; a child of another owner is refused before any write.
+The parent's tree orders such a child: `tree` shows it at its sibling position as `OWNER/REPO#N TITLE  [foreign]`, and `next` can select it when it is open and its local parent is ready.
+Its own blockers live in its own repository and are not read.
+In the child's own repository, an issue under a foreign parent is neither a root nor an orphan; doctor names it in `I012`.
+
 ### Ordering siblings
 
 Use `--before` and `--after` with `move` to prioritize siblings:

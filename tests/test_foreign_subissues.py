@@ -34,6 +34,7 @@ def _node(
         "url": f"https://github.com/{LOCAL}/issues/{number}",
         "milestone": {"title": milestone} if milestone else None,
         "labels": {"nodes": []},
+        "parent": None,
         "subIssues": {
             "totalCount": len(children),
             "nodes": [{"number": n, "repository": {"nameWithOwner": repo}} for repo, n in children],
@@ -70,7 +71,7 @@ def test_foreign_subissue_does_not_collide_with_local_issue_of_same_number() -> 
 
 
 def test_tree_keeps_local_and_foreign_child_of_same_number_distinguishable() -> None:
-    """`itree tree --all` shows the closed local #204 under its ledger and the foreign #204 qualified under #420."""
+    """`itree tree --all` shows the closed local #204 under its ledger and the foreign #204 qualified under #420, in sibling order."""
     dag = dag_from_graph_nodes(RepoRef(owner="testowner", repo="testrepo"), _nodes(), _no_rest)
     out = render_tree(dag.materialize_root(1), dag=dag)
 
@@ -79,8 +80,8 @@ def test_tree_keeps_local_and_foreign_child_of_same_number_distinguishable() -> 
         "├── #103 Ledger: Slop  [closed]",
         "│   └── #204 Closed local slop finding  [closed]",
         "└── #420 Milestone: M1  [grouping]",
-        "    ├── #10 Local work unit  [WU]",
-        f"    └── {FOREIGN}#204  [foreign]",
+        f"    ├── {FOREIGN}#204  [foreign]",
+        "    └── #10 Local work unit  [WU]",
     ]
 
 

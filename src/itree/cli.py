@@ -55,6 +55,7 @@ from .models import (
 )
 from .render import prune_closed, render_scan, render_tree, shape_summary
 from .traversal import build_dag
+from .readiness import issue_label
 from .validate import (
     DIAGNOSTIC_CATALOG,
     find_root_ledger_candidates,
@@ -622,7 +623,7 @@ def attach(
     req = AttachRequest(parent=parse_ref(parent), child=parse_ref(child))
     api = GithubApi.from_issue_ref(req.parent)
     try:
-        child_issue = api.get_issue(req.child.number)
+        child_issue = GithubApi.from_issue_ref(req.child).get_issue(req.child.number)
         api.add_subissue(req.parent.number, child_issue.id)
         print(req.child.slug)
     except Exception as e:
@@ -644,7 +645,7 @@ def detach(
     req = DetachRequest(parent=parse_ref(parent), child=parse_ref(child))
     api = GithubApi.from_issue_ref(req.parent)
     try:
-        child_issue = api.get_issue(req.child.number)
+        child_issue = GithubApi.from_issue_ref(req.child).get_issue(req.child.number)
         api.remove_subissue(req.parent.number, child_issue.id)
         print(req.child.slug)
     except Exception as e:
@@ -673,15 +674,16 @@ def move(
         after=parse_ref(after) if after else None,
     )
     api = GithubApi.from_issue_ref(req.parent)
+    child_api = GithubApi.from_issue_ref(req.child)
     try:
-        child_issue = api.get_issue(req.child.number)
+        child_issue = child_api.get_issue(req.child.number)
         # GitHub 422s replace_parent=true when the parent is unchanged, so a
         # same-parent reorder goes straight to the priority endpoint.
-        if api.get_parent_number(req.child.number) != req.parent.number:
+        if child_api.get_parent(req.child.number) != req.parent:
             api.replace_parent_subissue(req.parent.number, child_issue.id)
         if req.before is not None or req.after is not None:
-            before_id = api.get_issue(req.before.number).id if req.before is not None else None
-            after_id = api.get_issue(req.after.number).id if req.after is not None else None
+            before_id = GithubApi.from_issue_ref(req.before).get_issue(req.before.number).id if req.before is not None else None
+            after_id = GithubApi.from_issue_ref(req.after).get_issue(req.after.number).id if req.after is not None else None
             api.reprioritize(
                 req.parent.number,
                 child_issue.id,
@@ -754,17 +756,19 @@ def tree(
         return
 
     next_node = first_open_work_unit(tree_node, dag)
-    next_number = next_node.issue.number if next_node else None
+    next_label = issue_label(dag, next_node) if next_node else None
+    next_foreign = IssueRef.parse(next_label) if next_label is not None and not next_label.startswith("#") else None
+    next_number = next_node.issue.number if next_node is not None and next_foreign is None else None
 
     if show_all:
-        print(render_tree(tree_node, next_number=next_number, hidden_count=0, dag=dag))
+        print(render_tree(tree_node, next_number=next_number, next_foreign=next_foreign, hidden_count=0, dag=dag))
         return
 
     pruned, hidden_count = prune_closed(tree_node)
     if pruned is None:
         print(f"Root ledger #{root_num} is closed; nothing open to render. Run: itree doctor {repo_ref.slug}")
         sys.exit(1)
-    print(render_tree(pruned, next_number=next_number, hidden_count=hidden_count, dag=dag))
+    print(render_tree(pruned, next_number=next_number, next_foreign=next_foreign, hidden_count=hidden_count, dag=dag))
 
 
 @app.command(group="Query")
@@ -814,11 +818,12 @@ def next(
                 print(f"    Blocked by: {', '.join(blockers)}")
             return
 
+        label = issue_label(dag, node)
         print("Next work unit:")
-        print(f"  #{node.issue.number} {node.issue.title}\n")
+        print(f"  {label} {node.issue.title}\n")
 
         print("Instruction:")
-        print(f"  Work from issue #{node.issue.number}; keep planning state on that issue.")
+        print(f"  Work from issue {label}; keep planning state on that issue.")
         print("  Open the PR when implementation starts; synthesize its body from the issue.")
         print("  Keep implementation tasks in the issue body or issue comments.")
 
@@ -1038,7 +1043,7 @@ def render_doctor_report(
     if report.root.kind == "present":
         tree_node = dag.materialize_root(report.root.ref.number)
         next_node = first_open_work_unit(tree_node, dag)
-        lines.append(f"  {shape_summary(tree_node, next_node.issue.number if next_node else None)}")
+        lines.append(f"  {shape_summary(tree_node, issue_label(dag, next_node) if next_node else None)}")
     lines.append("")
 
     lines.append("Findings:")

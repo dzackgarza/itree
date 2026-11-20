@@ -154,7 +154,7 @@ class TestOrchestrationFunctions:
         """AttachRequest validates same repository requirement."""
         parent = IssueRef(repo_ref=RepoRef(owner="owner1", repo="repo"), number=1)
         child = IssueRef(repo_ref=RepoRef(owner="owner2", repo="repo"), number=2)
-        with pytest.raises(ValueError, match="same repository"):
+        with pytest.raises(ValueError, match="same owner"):
             AttachRequest(parent=parent, child=child)
 
     def test_do_move_before_after_exclusive_in_request(self) -> None:

@@ -386,9 +386,11 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "I012": {
         "title": "foreign_edge",
         "severity": "info",
-        "meaning": "A local issue lists a sub-issue or native blocker that lives in another repository. "
-        "Each repository owns its own tree, so doctor keeps the foreign issue out of this DAG: it is not a local child, "
+        "meaning": "A local issue lists a sub-issue or native blocker that lives in another repository, or sits under a parent there. "
+        "Doctor keeps the foreign issue out of this DAG: it is not a local child, "
         "it does not count as an open descendant for W030, and it does not gate readiness. "
+        "`itree next` and `itree tree` order a foreign sub-issue at its sibling position under its local parent; "
+        "an issue under a foreign parent is ordered by that parent's tree, so here it is neither a root nor an orphan. "
         "`gh issue transfer` leaves a transferred issue listed under its old parent, so this follows cross-repository migrations.",
         "remediation": [
             "A. Detach the foreign sub-issue if it was left behind by a transfer and the local parent no longer owns it.",
@@ -420,6 +422,9 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
         dependencies=dependencies,
         foreign_children={parent: refs for parent, refs in dag.foreign_children.items() if parent in issues},
         foreign_blockers={issue: refs for issue, refs in dag.foreign_blockers.items() if issue in issues},
+        ordered_children={parent: refs for parent, refs in dag.ordered_children.items() if parent in issues},
+        foreign_issues=dag.foreign_issues,
+        foreign_parent={issue: ref for issue, ref in dag.foreign_parent.items() if issue in issues},
     )
 
 
@@ -511,7 +516,8 @@ def find_root_ledger_candidates(dag: RepoDag) -> list[int]:
         for child in children:
             G.add_edge(parent, child)
 
-    return [n for n in G.nodes if G.in_degree(n) == 0 and dag.issues[n].is_open]
+    # An issue whose parent is in another repository is ordered by that tree.
+    return [n for n in G.nodes if G.in_degree(n) == 0 and dag.issues[n].is_open and n not in dag.foreign_parent]
 
 
 # Root-shape diagnostics, in the order the scan reports them as root_status.
@@ -615,7 +621,7 @@ def generate_doctor_report(
 
     foreign_edges = [f"#{parent} lists foreign sub-issue {ref.slug}" for parent, refs in sorted(dag.foreign_children.items()) for ref in refs] + [
         f"#{issue} is blocked by foreign issue {ref.slug}" for issue, refs in sorted(dag.foreign_blockers.items()) for ref in refs
-    ]
+    ] + [f"#{issue} sits under foreign parent {ref.slug}" for issue, ref in sorted(dag.foreign_parent.items())]
     if foreign_edges:
         f_details = DIAGNOSTIC_CATALOG["I012"]
         findings_list.append(
@@ -706,7 +712,7 @@ def generate_doctor_report(
         # Collect open issues outside the root ledger
         unreachable_open = []
         for num, issue in sorted(dag.issues.items()):
-            if issue.is_open and num not in reachable and num != root_num:
+            if issue.is_open and num not in reachable and num != root_num and num not in dag.foreign_parent:
                 unreachable_open.append(num)
 
         # E010: unreachable open issues
@@ -727,7 +733,7 @@ def generate_doctor_report(
         # E011: parentless non-root open issues
         parentless_non_root = []
         for num, issue in sorted(dag.issues.items()):
-            if issue.is_open and num != root_num and G.in_degree(num) == 0:
+            if issue.is_open and num != root_num and G.in_degree(num) == 0 and num not in dag.foreign_parent:
                 parentless_non_root.append(num)
 
         if parentless_non_root:

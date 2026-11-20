@@ -7,7 +7,7 @@ work unit decomposed into child issues should be obvious in one screen.
 
 from __future__ import annotations
 
-from .models import RepoDag, RepoHealth, TreeNode
+from .models import IssueRef, RepoDag, RepoHealth, TreeNode
 from .validate import is_grouping_issue
 
 # A parent with more than MAX_CHILDREN_SHOWN visible children renders the
@@ -46,7 +46,7 @@ def prune_closed(root: TreeNode) -> tuple[TreeNode | None, int]:
     return TreeNode(issue=root.issue, children=tuple(kept)), hidden
 
 
-def shape_summary(root: TreeNode, next_number: int | None) -> str:
+def shape_summary(root: TreeNode, next_label: str | None) -> str:
     """One-line shape digest: the absurdity metrics at a glance."""
     nodes = root.preorder()
     open_nodes = [n for n in nodes if n.issue.is_open]
@@ -57,7 +57,7 @@ def shape_summary(root: TreeNode, next_number: int | None) -> str:
         return 1 + max((depth(child) for child in node.children), default=0)
 
     fan_out = len([child for child in root.children if child.issue.is_open])
-    next_part = f"next #{next_number}" if next_number is not None else "next none"
+    next_part = f"next {next_label}" if next_label is not None else "next none"
     return f"shape: {len(open_nodes)} open | {len(groupings)} groupings | {len(work_units)} work units | depth {depth(root)} | root fan-out {fan_out} | {next_part}"
 
 
@@ -96,6 +96,7 @@ def render_tree(
     root: TreeNode,
     *,
     next_number: int | None = None,
+    next_foreign: IssueRef | None = None,
     hidden_count: int = 0,
     dag: RepoDag | None = None,
 ) -> str:
@@ -106,7 +107,9 @@ def render_tree(
 
     When ``dag`` is provided, blocked issues are annotated with their open
     direct blockers, and foreign sub-issues render as qualified ``[foreign]``
-    leaves under their local parent.
+    leaves at their sibling position under their local parent, with their title
+    and state read from their own repository. ``next_foreign`` marks a foreign
+    leaf as the next work unit.
     """
     lines: list[str] = []
     seen: set[int] = set()
@@ -143,21 +146,39 @@ def render_tree(
             shown = children[:TRUNCATE_HEAD]
             overflow = children[TRUNCATE_HEAD:]
 
-        foreign = dag.foreign_children[node.issue.number] if dag is not None and node.issue.number in dag.foreign_children else ()
         child_prefix = "" if node is root else prefix + ("    " if connector.startswith("└") else "│   ")
-        for i, child in enumerate(shown):
-            last = i == len(shown) - 1 and not overflow and not foreign
-            walk(child, child_prefix, "└── " if last else "├── ")
+        foreign = dag.foreign_children[node.issue.number] if dag is not None and node.issue.number in dag.foreign_children else ()
+        if foreign:
+            # Interleave local and foreign children in GitHub's sibling order.
+            local = {child.issue.number: child for child in children}
+            assert dag is not None
+            items: tuple[TreeNode | IssueRef, ...] = tuple(
+                ref if ref.repo_ref.slug.casefold() != dag.slug.casefold() else local[ref.number]
+                for ref in dag.ordered_children[node.issue.number]
+                if ref.repo_ref.slug.casefold() != dag.slug.casefold() or ref.number in local
+            )
+            overflow = ()
+        else:
+            items = shown
+        for i, item in enumerate(items):
+            last = i == len(items) - 1 and not overflow
+            branch = "└── " if last else "├── "
+            if isinstance(item, TreeNode):
+                walk(item, child_prefix, branch)
+                continue
+            assert dag is not None
+            issue = dag.foreign_issues.get(item)
+            label = f"{item.slug}  [foreign]" if issue is None else f"{item.slug} {issue.title}  [foreign]{'' if issue.is_open else ' [closed]'}"
+            lines.append(f"{child_prefix}{branch}{label}{'  <- next' if item == next_foreign else ''}")
         if overflow:
             numbers = " ".join(f"#{child.issue.number}" for child in overflow)
-            lines.append(f"{child_prefix}{'├── ' if foreign else '└── '}... {len(overflow)} more: {numbers}")
-        for i, ref in enumerate(foreign):
-            lines.append(f"{child_prefix}{'└── ' if i == len(foreign) - 1 else '├── '}{ref.slug}  [foreign]")
+            lines.append(f"{child_prefix}└── ... {len(overflow)} more: {numbers}")
 
     walk(root, "", "")
 
     if hidden_count:
         lines.append("")
         lines.append(f"({hidden_count} closed issue{'s' if hidden_count != 1 else ''} hidden; --all to show)")
-    lines.append(shape_summary(root, next_number))
+    next_label = next_foreign.slug if next_foreign is not None else None if next_number is None else f"#{next_number}"
+    lines.append(shape_summary(root, next_label))
     return "\n".join(lines)

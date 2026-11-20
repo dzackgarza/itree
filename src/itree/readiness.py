@@ -25,6 +25,8 @@ from enum import StrEnum
 import networkx as nx
 from pydantic import BaseModel, ConfigDict
 
+from collections.abc import Iterator
+
 from .models import RepoDag, TreeNode
 from .validate import is_grouping_issue
 
@@ -145,6 +147,32 @@ def detect_dependency_errors(dag: RepoDag) -> list[DependencyError]:
     return errors
 
 
+def work_order(node: TreeNode, dag: RepoDag) -> Iterator[tuple[TreeNode, int | None]]:
+    """Preorder over the local tree with each foreign sub-issue at its sibling position.
+
+    Yields ``(node, None)`` for a local node and ``(leaf, parent_number)`` for a
+    foreign sub-issue, a leaf built from its issue as read in its own repository.
+    """
+    yield node, None
+    number = node.issue.number
+    if number not in dag.foreign_children:
+        for child in node.children:
+            yield from work_order(child, dag)
+        return
+    local = {child.issue.number: child for child in node.children}
+    for ref in dag.ordered_children[number]:
+        if ref in dag.foreign_issues:
+            yield TreeNode(issue=dag.foreign_issues[ref]), number
+        elif ref.number in local and ref.repo_ref.slug.casefold() == dag.slug.casefold():
+            yield from work_order(local[ref.number], dag)
+
+
+def issue_label(dag: RepoDag, issue_node: TreeNode) -> str:
+    """``#N`` for a local issue, ``OWNER/REPO#N`` for a foreign one."""
+    slug = issue_node.issue.repository_slug
+    return f"#{issue_node.issue.number}" if slug.casefold() == dag.slug.casefold() else f"{slug}#{issue_node.issue.number}"
+
+
 def first_ready_work_unit(root: TreeNode, dag: RepoDag) -> TreeNode | None:
     """Find the first ready open work-unit leaf in preorder.
 
@@ -154,15 +182,20 @@ def first_ready_work_unit(root: TreeNode, dag: RepoDag) -> TreeNode | None:
     - it is ready (no open direct blockers, no blocked grouping ancestors),
     - every reachable grouping ancestor is also ready.
 
+    A foreign sub-issue takes its sibling position under its local parent. It is
+    ready when it is open and its local parent is ready; its own blockers live in
+    its own repository and are not read here.
+
     Preorder is the stable tie-breaker; this function returns exactly one
     work unit or ``None``.
     """
-    for node in root.preorder():
+    for node, foreign_parent in work_order(root, dag):
         if not node.issue.is_open:
             continue
         if is_grouping_issue(node.issue.title):
             continue
-        result = compute_readiness(dag, node.issue.number)
+        number = node.issue.number if foreign_parent is None else foreign_parent
+        result = compute_readiness(dag, number)
         if result.state == ReadinessState.ready:
             return node
     return None

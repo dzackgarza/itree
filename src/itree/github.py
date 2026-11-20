@@ -44,6 +44,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
           totalCount
           nodes { number repository { nameWithOwner } }
         }
+        parent { number repository { nameWithOwner } }
         blockedBy(first: 100) {
           totalCount
           nodes { number repository { nameWithOwner } }
@@ -61,7 +62,7 @@ ISSUE_PARENT_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
-      parent { number }
+      parent { number repository { nameWithOwner } }
     }
   }
 }
@@ -175,8 +176,8 @@ def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
     return tuple(nodes)
 
 
-def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> int | None:
-    """Parse the GraphQL ``Issue.parent`` response into a parent number or None.
+def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> IssueRef | None:
+    """Parse the GraphQL ``Issue.parent`` response into the parent's reference or None.
 
     Pure counterpart to ``get_parent_number``. A null repository or issue means
     the reference could not be resolved and fails loudly.
@@ -186,7 +187,9 @@ def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> int | No
     if repository is None or repository["issue"] is None:
         raise RuntimeError(f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}")
     parent = repository["issue"]["parent"]
-    return None if parent is None else int(parent["number"])
+    if parent is None:
+        return None
+    return IssueRef(repo_ref=RepoRef.parse(parent["repository"]["nameWithOwner"]), number=int(parent["number"]))
 
 
 class GithubApi(BaseModel):
@@ -573,8 +576,8 @@ class GithubApi(BaseModel):
                 blocked_by["nodes"] = [{"number": blocker.number, "repository": {"nameWithOwner": blocker.repository_slug}} for blocker in blockers]
         return nodes
 
-    def get_parent_number(self, number: int) -> int | None:
-        """Return the issue's current parent number via GraphQL Issue.parent, or None."""
+    def get_parent(self, number: int) -> IssueRef | None:
+        """Return the issue's current parent, in any repository of the owner, via GraphQL Issue.parent."""
         cmd = [
             "gh",
             "api",
@@ -590,6 +593,15 @@ class GithubApi(BaseModel):
         ]
         proc = self._run_api_command(cmd, "graphql", timeout=30)
         return parse_issue_parent(proc.stdout, self.owner, self.repo, number)
+
+    def get_parent_number(self, number: int) -> int | None:
+        """Return the number of the issue's parent in this repository, or None; a parent elsewhere raises."""
+        parent = self.get_parent(number)
+        if parent is None:
+            return None
+        if parent.repo_ref.slug.casefold() != self.repo_ref.slug.casefold():
+            raise RuntimeError(f"{self.repo_ref.slug}#{number} has its parent in another repository: {parent.slug}")
+        return parent.number
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
         """Create a new issue in the repository."""

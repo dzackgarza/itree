@@ -35,6 +35,7 @@ def _node(
         "url": f"https://github.com/testowner/testrepo/issues/{number}",
         "milestone": None,
         "labels": {"nodes": [{"name": name} for name in labels]},
+        "parent": None,
         "subIssues": {
             "totalCount": total_children if total_children is not None else len(children),
             "nodes": [{"number": child, "repository": {"nameWithOwner": "testowner/testrepo"}} for child in children],

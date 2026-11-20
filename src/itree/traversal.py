@@ -32,6 +32,8 @@ def dag_from_graph_nodes(
     dependencies: dict[int, tuple[int, ...]] = {}
     foreign_children: dict[int, tuple[IssueRef, ...]] = {}
     foreign_blockers: dict[int, tuple[IssueRef, ...]] = {}
+    ordered_children: dict[int, tuple[IssueRef, ...]] = {}
+    foreign_parent: dict[int, IssueRef] = {}
     for node in nodes:
         number = node["number"]
         sub = node["subIssues"]
@@ -46,6 +48,11 @@ def dag_from_graph_nodes(
         foreign = tuple(ref for ref in child_refs if not _same_repo(ref, repo_ref))
         if foreign:
             foreign_children[number] = foreign
+            ordered_children[number] = tuple(ref for ref in child_refs if not _same_repo(ref, repo_ref) or ref.number in issues)
+        if node["parent"] is not None:
+            parent_ref = _edge_ref(node["parent"])
+            if not _same_repo(parent_ref, repo_ref):
+                foreign_parent[number] = parent_ref
 
         blocker_refs = [_edge_ref(blocker) for blocker in node["blockedBy"]["nodes"]]
         blockers = tuple(ref.number for ref in blocker_refs if _same_repo(ref, repo_ref) and ref.number in issues)
@@ -62,6 +69,8 @@ def dag_from_graph_nodes(
         dependencies=dependencies,
         foreign_children=foreign_children,
         foreign_blockers=foreign_blockers,
+        ordered_children=ordered_children,
+        foreign_parent=foreign_parent,
     )
 
 
@@ -92,4 +101,7 @@ def build_dag(repo_ref: RepoRef, api: GithubApi | None = None) -> RepoDag:
         api = GithubApi.from_repo_ref(repo_ref)
 
     nodes = api.fetch_repo_graph()
-    return dag_from_graph_nodes(repo_ref, nodes, api.list_subissues)
+    dag = dag_from_graph_nodes(repo_ref, nodes, api.list_subissues)
+    # A foreign sub-issue is ordered by this tree, so its state and title are read from its own repository.
+    foreign_issues = {ref: GithubApi.from_issue_ref(ref).get_issue(ref.number) for refs in dag.foreign_children.values() for ref in refs}
+    return dag.model_copy(update={"foreign_issues": foreign_issues})

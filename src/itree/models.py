@@ -103,6 +103,10 @@ class IssueRef(BaseModel):
         """Check if this issue is in the same repository as another issue reference."""
         return self.repo_ref == other.repo_ref
 
+    def same_owner(self, other: IssueRef) -> bool:
+        """GitHub owner names are case-insensitive."""
+        return self.repo_ref.owner.casefold() == other.repo_ref.owner.casefold()
+
     def to_repo_ref(self) -> RepoRef:
         """Extract the repository reference from this issue reference."""
         return self.repo_ref
@@ -555,6 +559,11 @@ class TreeNode(BaseModel):
         return None
 
 
+# GitHub's sub-issues REST contract: "The sub-issue must belong to the same
+# repository owner as the parent issue" (POST .../issues/{n}/sub_issues).
+SAME_OWNER_RULE = "GitHub sub-issues must belong to the same owner as the parent issue"
+
+
 class AttachRequest(BaseModel):
     """Request to attach child as a GitHub sub-issue of parent."""
 
@@ -562,11 +571,11 @@ class AttachRequest(BaseModel):
     child: IssueRef
 
     @model_validator(mode="after")
-    def same_repository(self) -> Self:
-        """Validate that parent and child are in the same repository and are different issues."""
-        if not self.parent.same_repo(self.child):
-            raise ValueError("GitHub sub-issues must stay in the same repository")
-        if self.parent.number == self.child.number:
+    def same_owner(self) -> Self:
+        """Validate that parent and child have one owner and are different issues."""
+        if not self.parent.same_owner(self.child):
+            raise ValueError(SAME_OWNER_RULE)
+        if self.parent == self.child:
             raise ValueError("an issue cannot be attached under itself")
         return self
 
@@ -581,13 +590,13 @@ class MoveRequest(BaseModel):
 
     @model_validator(mode="after")
     def coherent_position(self) -> Self:
-        """Validate move request constraints: before/after mutual exclusivity, same repo, not self."""
+        """Validate move request constraints: before/after mutual exclusivity, one owner, not self."""
         if self.before is not None and self.after is not None:
             raise ValueError("use either --before or --after, not both")
         refs = [self.child, self.parent, *(r for r in [self.before, self.after] if r is not None)]
-        if any(not self.parent.same_repo(r) for r in refs):
-            raise ValueError("move arguments must be in the same repository")
-        if self.child.number == self.parent.number:
+        if any(not self.parent.same_owner(r) for r in refs):
+            raise ValueError(SAME_OWNER_RULE)
+        if self.child == self.parent:
             raise ValueError("cannot move an issue under itself")
         return self
 
@@ -599,10 +608,10 @@ class DetachRequest(BaseModel):
     child: IssueRef
 
     @model_validator(mode="after")
-    def same_repository(self) -> Self:
-        """Validate that parent and child are in the same repository."""
-        if not self.parent.same_repo(self.child):
-            raise ValueError("detach arguments must be in the same repository")
+    def same_owner(self) -> Self:
+        """Validate that parent and child have one owner."""
+        if not self.parent.same_owner(self.child):
+            raise ValueError(SAME_OWNER_RULE)
         return self
 
 
@@ -633,6 +642,12 @@ class RepoDag(BaseModel):
     # ordered foreign sub-issues, and issue_number -> foreign blockers.
     foreign_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
     foreign_blockers: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
+    # For each parent with a foreign sub-issue, all its sub-issues in GitHub's
+    # sibling order; the foreign sub-issues as read from their own repositories;
+    # and issue_number -> its parent in another repository, which owns its order.
+    ordered_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
+    foreign_issues: dict[IssueRef, GithubIssue] = Field(default_factory=dict)
+    foreign_parent: dict[int, IssueRef] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _compute_derived(self) -> Self:
@@ -664,9 +679,9 @@ class RepoDag(BaseModel):
 
     @property
     def roots(self) -> tuple[GithubIssue, ...]:
-        """Issues that are not sub-issues of any other issue."""
+        """Issues that are not sub-issues of any other issue, in this or another repository."""
         parents = self.parent_of
-        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in parents)
+        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in parents and num not in self.foreign_parent)
 
     @property
     def orphans(self) -> tuple[GithubIssue, ...]:

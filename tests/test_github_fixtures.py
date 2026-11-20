@@ -151,9 +151,9 @@ class TestParseSubissuesPages:
 class TestParseIssueParent:
     """parse_issue_parent maps the GraphQL Issue.parent response (#15)."""
 
-    def test_parented_issue_returns_parent_number(self) -> None:
-        raw = json.dumps({"data": {"repository": {"issue": {"parent": {"number": 2}}}}})
-        assert parse_issue_parent(raw, "o", "r", 15) == 2
+    def test_parented_issue_returns_parent_ref(self) -> None:
+        raw = json.dumps({"data": {"repository": {"issue": {"parent": {"number": 2, "repository": {"nameWithOwner": "o/other"}}}}}})
+        assert parse_issue_parent(raw, "o", "r", 15) == IssueRef.parse("o/other#2")
 
     def test_parentless_issue_returns_none(self) -> None:
         raw = json.dumps({"data": {"repository": {"issue": {"parent": None}}}})
