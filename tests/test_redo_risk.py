@@ -163,3 +163,17 @@ def test_q006_is_not_evaluated_without_the_repository_tree() -> None:
     )
 
     assert _q006(generate_doctor_report(dag)) == []
+
+
+def test_package_relative_path_resolves_to_the_tree_file() -> None:
+    report = _report((2, 3), _small_then_large(small_body="Fix a typo in `pkg/parser.py`."))
+
+    findings = _q006(report)
+    assert len(findings) == 1
+    assert "src/pkg/parser.py" in findings[0].evidence[0]
+
+
+def test_path_suffix_must_end_at_a_directory_boundary() -> None:
+    report = _report((2, 3), _small_then_large(small_body="Fix a typo in `kg/parser.py`."))
+
+    assert _q006(report) == []
