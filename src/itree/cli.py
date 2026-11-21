@@ -21,7 +21,7 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .github import GithubApi, list_repos
+from .github import GithubApi, list_repos, resolve_routed_owner
 from .metrics import (
     CodeSizeEvidence,
     MetricsConfig,
@@ -58,6 +58,7 @@ from .traversal import build_dag
 from .readiness import issue_label
 from .validate import (
     DIAGNOSTIC_CATALOG,
+    RoutedOwnerResolver,
     find_root_ledger_candidates,
     first_open_work_unit,
     generate_doctor_report,
@@ -825,6 +826,7 @@ def next(
             print("No ready work units found. Blocked open work units:")
             for candidate, readiness in blocked_work_units:
                 blockers = [f"#{blocker}" for blocker in readiness.open_blockers]
+                blockers.extend(ref.slug for ref in readiness.open_foreign_blockers)
                 blockers.extend(f"ancestor #{ancestor}" for ancestor in readiness.blocked_ancestors)
                 print(f"  #{candidate.issue.number} {candidate.issue.title}")
                 print(f"    Blocked by: {', '.join(blockers)}")
@@ -1125,8 +1127,9 @@ def doctor(
 
     repo_ref = parse_repo(repo)
     try:
-        dag = build_dag(repo_ref)
-        repo_files = GithubApi.from_repo_ref(repo_ref).list_tree_files()
+        api = GithubApi.from_repo_ref(repo_ref)
+        dag = build_dag(repo_ref, api)
+        repo_files = api.list_tree_files()
     except Exception as e:
         print(f"GitHub/auth/API failure: {e}", file=sys.stderr)
         sys.exit(3)
@@ -1138,6 +1141,7 @@ def doctor(
         decomposition_label=config.decomposition_label,
         derived_state_labels=config.derived_state_labels,
         repo_files=repo_files,
+        routed_owner_resolver=resolve_routed_owner,
     )
 
     if as_json:
@@ -1159,6 +1163,7 @@ def collect_repo_healths(
     deferral_label: str,
     decomposition_label: str = "",
     derived_state_labels: tuple[str, ...] = (),
+    routed_owner_resolver: RoutedOwnerResolver | None = None,
 ) -> tuple[list[RepoHealth], list[tuple[str, str]]]:
     """Fetch and condense each repo's health, isolating per-repo failures.
 
@@ -1175,6 +1180,7 @@ def collect_repo_healths(
                 deferral_label=deferral_label,
                 decomposition_label=decomposition_label,
                 derived_state_labels=derived_state_labels,
+                routed_owner_resolver=routed_owner_resolver,
             )
         except Exception as e:
             return (repo_ref.slug, str(e))
@@ -1225,6 +1231,7 @@ def scan(
         config.deferral_label,
         decomposition_label=config.decomposition_label,
         derived_state_labels=config.derived_state_labels,
+        routed_owner_resolver=resolve_routed_owner,
     )
 
     if as_json:

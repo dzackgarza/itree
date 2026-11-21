@@ -17,6 +17,8 @@ from .models import (
     PlannedMilestoneEffect,
     RemoteOperationFailure,
     RepoRef,
+    RoutedOwnerResolution,
+    RoutedOwnerState,
 )
 
 # One paginated query returns the entire issue DAG: every issue (open and
@@ -47,7 +49,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         parent { number repository { nameWithOwner } }
         blockedBy(first: 100) {
           totalCount
-          nodes { number repository { nameWithOwner } }
+          nodes { number state repository { nameWithOwner } }
         }
       }
     }
@@ -666,7 +668,9 @@ class GithubApi(BaseModel):
                 assert len(blockers) == blocked_by["totalCount"], (
                     f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{node['number']}: expected {blocked_by['totalCount']}, fetched {len(blockers)}"
                 )
-                blocked_by["nodes"] = [{"number": blocker.number, "repository": {"nameWithOwner": blocker.repository_slug}} for blocker in blockers]
+                blocked_by["nodes"] = [
+                    {"number": blocker.number, "state": blocker.state.value.upper(), "repository": {"nameWithOwner": blocker.repository_slug}} for blocker in blockers
+                ]
         return nodes
 
     def get_parent(self, number: int) -> IssueRef | None:
@@ -793,3 +797,43 @@ class GithubApi(BaseModel):
             json_body={"body": body},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
+
+
+def resolve_routed_owner(ref: IssueRef) -> RoutedOwnerResolution:
+    """Read one routed owner issue and its local sub-tree.
+
+    Doctor calls this once per distinct ``I011`` owner. The owner's repository
+    graph supplies both the owner's state and every descendant, so a closed
+    owner and an owner with no open work unit are distinguished without a
+    second read.
+    """
+    from .traversal import dag_from_graph_nodes
+    from .validate import is_grouping_issue
+
+    try:
+        api = GithubApi.from_issue_ref(ref)
+        nodes = api.fetch_repo_graph()
+        owner_dag = dag_from_graph_nodes(ref.to_repo_ref(), nodes, api.list_subissues)
+    except (AssertionError, KeyError, RuntimeError, ValueError) as e:
+        # No access, deleted, transferred, or a malformed response: the route
+        # cannot be verified, so doctor must say that instead of reporting I011.
+        return RoutedOwnerResolution(state=RoutedOwnerState.unreadable, detail=str(e))
+
+    owner = owner_dag.issues.get(ref.number)
+    if owner is None:
+        return RoutedOwnerResolution(state=RoutedOwnerState.unreadable, detail=f"{ref.slug} is absent from its repository graph")
+    if not owner.is_open:
+        return RoutedOwnerResolution(state=RoutedOwnerState.closed)
+
+    stack = [ref.number]
+    seen: set[int] = set()
+    while stack:
+        number = stack.pop()
+        if number in seen:
+            continue
+        seen.add(number)
+        issue = owner_dag.issues[number]
+        if issue.is_open and not is_grouping_issue(issue.title):
+            return RoutedOwnerResolution(state=RoutedOwnerState.open_with_work)
+        stack.extend(owner_dag.children_of.get(number, ()))
+    return RoutedOwnerResolution(state=RoutedOwnerState.no_open_work)

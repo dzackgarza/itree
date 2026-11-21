@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import NotRequired, TypedDict
 
 import networkx as nx
@@ -17,8 +18,13 @@ from .models import (
     RepoHealth,
     ReportRef,
     ReportStatus,
+    RoutedOwnerResolution,
+    RoutedOwnerState,
     TreeNode,
 )
+
+# One network read per distinct routed owner, injected so doctor stays provable.
+RoutedOwnerResolver = Callable[[IssueRef], RoutedOwnerResolution]
 
 
 class DiagnosticDetails(TypedDict):
@@ -394,18 +400,36 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "severity": "info",
         "meaning": "An open grouping has no open local descendants because its coordination routes contract hands its work "
         "to an owner issue in another repository. The grouping keeps cross-repository ordering here; the owner's tree holds the work. "
-        "Doctor does not read the remote owner, so it cannot see whether that owner is closed or empty.",
+        "Doctor reads the owner once and confirms it is open with at least one open work unit.",
         "remediation": [],
+    },
+    "W031": {
+        "title": "dead_routed_owner",
+        "severity": "warning",
+        "ideal_model": "A routed grouping names an owner that is open and still holds open work, so the hand-off is live.",
+        "meaning": (
+            "A grouping routes its work to a foreign owner that is closed, has no open work unit, or cannot be read. "
+            "The local grouping keeps its place in the tree but the declared owner can no longer receive the work."
+        ),
+        "remediation": [
+            "A. If the routing work is complete, close the grouping issue.",
+            "B. If the owner moved, update the coordination routes contract to the live owner issue.",
+            "C. If the owner was deleted or is inaccessible, restore access or record the current owner.",
+            "D. If the work returns to this repository, remove the route contract and file the work units locally.",
+        ],
+        "maintenance": WARNING_MAINTENANCE,
     },
     "I012": {
         "title": "foreign_edge",
         "severity": "info",
-        "meaning": "A local issue lists a sub-issue or native blocker that lives in another repository, or sits under a parent there. "
-        "Doctor keeps the foreign issue out of this DAG: it is not a local child, "
-        "it does not count as an open descendant for W030, and it does not gate readiness. "
-        "`itree next` and `itree tree` order a foreign sub-issue at its sibling position under its local parent; "
-        "an issue under a foreign parent is ordered by that parent's tree, so here it is neither a root nor an orphan. "
-        "`gh issue transfer` leaves a transferred issue listed under its old parent, so this follows cross-repository migrations.",
+        "meaning": (
+            "A local issue lists a sub-issue or native blocker that lives in another repository, or sits under a parent there. "
+            "Doctor keeps the foreign issue out of this DAG: it is not a local child, "
+            "it does not count as an open descendant for W030, and an open foreign blocker gates readiness. "
+            "`itree next` and `itree tree` order a foreign sub-issue at its sibling position under its local parent; "
+            "an issue under a foreign parent is ordered by that parent's tree, so here it is neither a root nor an orphan. "
+            "`gh issue transfer` leaves a transferred issue listed under its old parent, so this follows cross-repository migrations."
+        ),
         "remediation": [
             "A. Detach the foreign sub-issue if it was left behind by a transfer and the local parent no longer owns it.",
             "B. If the local grouping deliberately hands its work to the other repository, record that with a "
@@ -436,6 +460,7 @@ def issue_only_dag(dag: RepoDag) -> RepoDag:
         dependencies=dependencies,
         foreign_children={parent: refs for parent, refs in dag.foreign_children.items() if parent in issues},
         foreign_blockers={issue: refs for issue, refs in dag.foreign_blockers.items() if issue in issues},
+        foreign_blocker_states=dag.foreign_blocker_states,
         ordered_children={parent: refs for parent, refs in dag.ordered_children.items() if parent in issues},
         foreign_issues=dag.foreign_issues,
         foreign_parent={issue: ref for issue, ref in dag.foreign_parent.items() if issue in issues},
@@ -543,6 +568,7 @@ def repo_health(
     deferral_label: str = "deferred",
     decomposition_label: str = "",
     derived_state_labels: tuple[str, ...] = (),
+    routed_owner_resolver: RoutedOwnerResolver | None = None,
 ) -> RepoHealth:
     """Condense a repo's issue DAG into one account-scan health digest.
 
@@ -555,6 +581,7 @@ def repo_health(
         deferral_label=deferral_label,
         decomposition_label=decomposition_label,
         derived_state_labels=derived_state_labels,
+        routed_owner_resolver=routed_owner_resolver,
     )
     codes = {f.code for f in report.findings}
     root_status = next((code for code in ROOT_STATUS_CODES if code in codes), "ok")
@@ -563,6 +590,7 @@ def repo_health(
         open_issues=sum(1 for issue in dag.issues.values() if issue.is_open),
         root_status=root_status,
         error_count=report.metrics.errors,
+        warning_count=report.metrics.warnings,
         next_work_unit=report.next_issue,
     )
 
@@ -573,8 +601,13 @@ def generate_doctor_report(
     decomposition_label: str = "",
     derived_state_labels: tuple[str, ...] = (),
     repo_files: frozenset[str] | None = None,
+    routed_owner_resolver: RoutedOwnerResolver | None = None,
 ) -> DoctorReport:
-    """``repo_files`` is the repository's file tree; Q006 is evaluated only when it is given."""
+    """``repo_files`` is the repository's file tree; Q006 is evaluated only when it is given.
+
+    ``routed_owner_resolver`` reads one routed owner per distinct ref; when it
+    is omitted, a route with no local descendants stays informational ``I011``.
+    """
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
 
@@ -868,13 +901,30 @@ def generate_doctor_report(
         dead_groupings = []
         deferred_groupings = []
         routed_groupings = []
+        dead_routes = []
+        owner_cache: dict[IssueRef, RoutedOwnerResolution] = {}
         for node in tree_nodes[1:]:
             if node.issue.is_open and is_grouping_issue(node.issue.title) and not any(d.issue.is_open for d in node.descendants()):
                 route = _foreign_coordination_route(dag, node.issue.number)
                 if deferral_label.casefold() in {label.casefold() for label in node.issue.labels}:
                     deferred_groupings.append(f'#{node.issue.number} "{node.issue.title}" is deferred, awaiting breakdown')
                 elif route is not None:
-                    routed_groupings.append(f'#{node.issue.number} "{node.issue.title}" routes its work to {route.slug}')
+                    evidence = f'#{node.issue.number} "{node.issue.title}" routes its work to {route.slug}'
+                    if routed_owner_resolver is None:
+                        routed_groupings.append(evidence)
+                        continue
+                    resolution = owner_cache.get(route)
+                    if resolution is None:
+                        resolution = routed_owner_resolver(route)
+                        owner_cache[route] = resolution
+                    if resolution.state == RoutedOwnerState.open_with_work:
+                        routed_groupings.append(evidence)
+                    elif resolution.state == RoutedOwnerState.closed:
+                        dead_routes.append(f"{evidence}, which is closed")
+                    elif resolution.state == RoutedOwnerState.no_open_work:
+                        dead_routes.append(f"{evidence}, which has no open work units")
+                    else:
+                        dead_routes.append(f"{evidence}, which cannot be read: {resolution.detail}")
                 else:
                     dead_groupings.append(f'#{node.issue.number} "{node.issue.title}" has no open descendants')
 
@@ -912,6 +962,19 @@ def generate_doctor_report(
                     severity="info",
                     title=f_details["title"],
                     evidence=routed_groupings,
+                    meaning=f_details["meaning"],
+                    remediation=f_details["remediation"],
+                )
+            )
+
+        if dead_routes:
+            f_details = DIAGNOSTIC_CATALOG["W031"]
+            findings_list.append(
+                Finding(
+                    code="W031",
+                    severity="warning",
+                    title=f_details["title"],
+                    evidence=dead_routes,
                     meaning=f_details["meaning"],
                     remediation=f_details["remediation"],
                 )

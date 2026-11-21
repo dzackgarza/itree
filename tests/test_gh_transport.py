@@ -68,6 +68,9 @@ if "/git/trees/" in path:
     request = next(a for a in args if a.startswith("repos/")).split("/git/trees/", 1)[1]
     sys.stdout.write(json.dumps(scenario["trees"][request]))
     sys.exit(0)
+if path.endswith("/dependencies/blocked_by"):
+    sys.stdout.write(json.dumps(scenario["blocked_by"][path.split("/")[-3]]))
+    sys.exit(0)
 number = path.rsplit("/", 1)[-1]
 issue = dict(scenario["issues"][number])
 if "--include" in args:
@@ -145,6 +148,16 @@ def _graph_node(
         },
         "parent": None,
         "blockedBy": {"totalCount": 0, "nodes": []},
+    }
+
+
+def _foreign_issue(number: int, state: str) -> dict:
+    return {
+        "id": 20_000 + number,
+        "number": number,
+        "title": f"Foreign {number}",
+        "state": state,
+        "html_url": f"https://github.com/testowner/other/issues/{number}",
     }
 
 
@@ -250,6 +263,28 @@ class TestSlurpFreePagination:
             parse_subissues_pages(json.dumps({"message": "boom"}))
         with pytest.raises(TypeError, match="non-object page"):
             parse_repo_graph_pages(json.dumps([1]), "testowner", "testrepo")
+
+    def test_blocked_by_rest_fallback_carries_the_blocker_state(self, tmp_path: Path) -> None:
+        """Past the 100-blocker GraphQL page, the REST fallback keeps each blocker's state."""
+        gh = GhBoundary(tmp_path)
+        work_unit = _graph_node(2, "Work unit", [])
+        work_unit["blockedBy"] = {
+            "totalCount": 2,
+            "nodes": [{"number": 8, "state": "OPEN", "repository": {"nameWithOwner": "testowner/other"}}],
+        }
+        gh.configure(
+            {
+                "graphql": _graph_document([_graph_node(1, f"Ledger: {SLUG}", [2]), work_unit]),
+                "blocked_by": {"2": [_foreign_issue(8, "open"), _foreign_issue(9, "closed")]},
+            }
+        )
+
+        result = gh.run("tree", SLUG)
+
+        assert result.returncode == 0, result.stderr
+        line = next(line for line in result.stdout.splitlines() if "#2 Work unit" in line)
+        assert "[blocked by testowner/other#8]" in line
+        assert "#9" not in line
 
     def test_doctor_reports_the_same_tree_over_multiple_pages_against_gh_without_slurp(self, tmp_path: Path) -> None:
         gh = GhBoundary(tmp_path)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .github import GithubApi
-from .models import GithubIssue, IssueRef, RepoDag, RepoRef
+from .models import GithubIssue, IssueRef, IssueState, RepoDag, RepoRef
 
 # Resolver for the >100-children fallback: given a parent number, return its
 # full sub-issue list. In production this is ``GithubApi.list_subissues``; the
@@ -32,6 +32,7 @@ def dag_from_graph_nodes(
     dependencies: dict[int, tuple[int, ...]] = {}
     foreign_children: dict[int, tuple[IssueRef, ...]] = {}
     foreign_blockers: dict[int, tuple[IssueRef, ...]] = {}
+    foreign_blocker_states: dict[IssueRef, IssueState] = {}
     ordered_children: dict[int, tuple[IssueRef, ...]] = {}
     foreign_parent: dict[int, IssueRef] = {}
     for node in nodes:
@@ -61,6 +62,10 @@ def dag_from_graph_nodes(
         foreign_blocker_refs = tuple(ref for ref in blocker_refs if not _same_repo(ref, repo_ref))
         if foreign_blocker_refs:
             foreign_blockers[number] = foreign_blocker_refs
+            for blocker in node["blockedBy"]["nodes"]:
+                ref = _edge_ref(blocker)
+                if not _same_repo(ref, repo_ref):
+                    foreign_blocker_states[ref] = IssueState(blocker["state"].lower())
 
     return RepoDag(
         repo_ref=repo_ref,
@@ -69,6 +74,7 @@ def dag_from_graph_nodes(
         dependencies=dependencies,
         foreign_children=foreign_children,
         foreign_blockers=foreign_blockers,
+        foreign_blocker_states=foreign_blocker_states,
         ordered_children=ordered_children,
         foreign_parent=foreign_parent,
     )

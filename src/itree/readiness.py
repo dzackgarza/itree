@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict
 
 from collections.abc import Iterator
 
-from .models import RepoDag, TreeNode
+from .models import IssueRef, IssueState, RepoDag, TreeNode
 from .validate import is_grouping_issue
 
 
@@ -44,7 +44,9 @@ class DependencyErrorKind(StrEnum):
 class ReadinessResult(BaseModel):
     """Readiness state for a single issue within a DAG.
 
-    - ``open_blockers`` lists the issue numbers of direct open blockers.
+    - ``open_blockers`` lists the issue numbers of direct open local blockers.
+    - ``open_foreign_blockers`` lists the qualified refs of direct open
+      blockers in other repositories.
     - ``blocked_ancestors`` lists grouping ancestors that have open blockers,
       making this issue unready even if the issue itself has no direct blocker.
     """
@@ -53,6 +55,7 @@ class ReadinessResult(BaseModel):
 
     state: ReadinessState
     open_blockers: tuple[int, ...] = ()
+    open_foreign_blockers: tuple[IssueRef, ...] = ()
     blocked_ancestors: tuple[int, ...] = ()
 
 
@@ -75,7 +78,8 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
 
     An issue is **ready** when:
     - it is open, and
-    - none of its direct ``blocked_by`` blockers are open, and
+    - none of its direct ``blocked_by`` blockers are open, locally or in
+      another repository, and
     - none of its reachable grouping ancestors have an open direct blocker.
 
     An issue is **blocked** when any of those conditions fail.
@@ -87,6 +91,11 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
     # Direct blockers: absent blockers are unreadable and therefore unsatisfied.
     direct_blockers: tuple[int, ...] = dag.dependencies[issue_number] if issue_number in dag.dependencies else ()
     open_blockers = tuple(b for b in direct_blockers if b not in dag.issues or dag.issues[b].is_open)
+    # A foreign blocker's state arrives with the graph edge. An absent state is
+    # treated as open: an unreadable prerequisite is not a satisfied one.
+    open_foreign_blockers = tuple(
+        ref for ref in dag.foreign_blockers.get(issue_number, ()) if dag.foreign_blocker_states.get(ref, IssueState.open) == IssueState.open
+    )
 
     # Grouping ancestors with open blockers.
     blocked_ancestors: list[int] = []
@@ -97,14 +106,18 @@ def compute_readiness(dag: RepoDag, issue_number: int) -> ReadinessResult:
             break
         ancestor_blockers: tuple[int, ...] = dag.dependencies[ancestor] if ancestor in dag.dependencies else ()
         ancestor_open_blockers = [b for b in ancestor_blockers if b not in dag.issues or dag.issues[b].is_open]
-        if not ancestor_issue.is_open or ancestor_open_blockers:
+        ancestor_foreign_open = any(
+            dag.foreign_blocker_states.get(ref, IssueState.open) == IssueState.open for ref in dag.foreign_blockers.get(ancestor, ())
+        )
+        if not ancestor_issue.is_open or ancestor_open_blockers or ancestor_foreign_open:
             blocked_ancestors.append(ancestor)
         ancestor = dag.parent_of.get(ancestor)
 
-    if not issue.is_open or open_blockers or blocked_ancestors:
+    if not issue.is_open or open_blockers or open_foreign_blockers or blocked_ancestors:
         return ReadinessResult(
             state=ReadinessState.blocked,
             open_blockers=open_blockers,
+            open_foreign_blockers=open_foreign_blockers,
             blocked_ancestors=tuple(blocked_ancestors),
         )
     return ReadinessResult(state=ReadinessState.ready)

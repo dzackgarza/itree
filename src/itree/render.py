@@ -76,11 +76,11 @@ def render_scan(healths: list[RepoHealth], fetch_errors: list[tuple[str, str]]) 
             nxt = f"next #{h.next_work_unit.ref.number}"
         else:
             nxt = "next none"
-        lines.append(f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {nxt}")
+        lines.append(f"{h.slug:<{width}}  {h.open_issues:>3} open  root {h.root_status:<4}  {h.error_count} err  {h.warning_count} warn  {nxt}")
     for slug, message in fetch_errors:
         lines.append(f"{slug:<{width}}  ERROR: {message}")
 
-    worst = [h.slug for h in healths if h.error_count > 0 or h.root_status != "ok"]
+    worst = [h.slug for h in healths if h.error_count > 0 or h.warning_count > 0 or h.root_status != "ok"]
     worst += [slug for slug, _ in fetch_errors]
     lines.append("")
     if worst:
@@ -132,6 +132,7 @@ def render_tree(
             readiness = compute_readiness(dag, node.issue.number)
             if readiness.state == ReadinessState.blocked:
                 blockers = [f"#{b}" for b in readiness.open_blockers]
+                blockers.extend(ref.slug for ref in readiness.open_foreign_blockers)
                 blockers.extend(f"ancestor #{a}" for a in readiness.blocked_ancestors)
                 if blockers:
                     parts.append(f"[blocked by {', '.join(blockers)}]")

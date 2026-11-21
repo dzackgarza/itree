@@ -195,9 +195,12 @@ owner = "OWNER/OTHER-REPO#N"
 role = "grouping"
 ```
 
-`itree doctor` then reports the grouping as informational `I011` ("routes its work to OWNER/OTHER-REPO#N") instead of warning `W030`.
+`itree doctor` then reports the grouping under `I011` ("routes its work to OWNER/OTHER-REPO#N") when its owner is live, and under `W031` when it is not, instead of warning `W030`.
 Only a well-formed fence whose `owner` is a qualified ref to another repository counts; a same-repository owner still warns `W030`, and a malformed fence is `E018` and still warns `W030`.
-Doctor stays offline and does not read the remote owner, so it does not detect a route to a closed or empty owner.
+Doctor reads each distinct routed owner once, with one repository-graph read of the owner issue and its sub-tree.
+A closed owner, an owner whose tree has no open work unit, or an owner that cannot be read (no access, deleted, or transferred) produces warning `W031` (`dead_routed_owner`) instead of `I011`.
+An open owner with open work keeps the informational `I011`.
+`itree doctor --explain W031` gives the repair routes.
 Because a routed grouping has no open local work units, `next` skips past it.
 
 ## Foreign sub-issues and blockers
@@ -209,7 +212,9 @@ Each repository owns one tree, so `itree` keys every edge by repository and numb
 A foreign sub-issue is not a live local descendant: a grouping whose only children are foreign still warns `W030`.
 Detach a child that a transfer left behind.
 When the grouping deliberately hands its work to the other repository, record the route with a coordination contract on the grouping (see Routed groupings).
-A foreign blocker does not gate local readiness.
+An open foreign blocker gates local readiness; a closed foreign blocker does not.
+`itree next` skips a work unit blocked only by an open foreign issue, and `itree tree` names the blocker as `OWNER/REPO#N` in its `[blocked by ...]` annotation.
+Blocker state arrives with the graph query, and the >100-blocker REST fallback carries the same state field.
 
 ## Redo risk between small and large units
 

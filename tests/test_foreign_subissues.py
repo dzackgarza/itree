@@ -8,7 +8,11 @@ collides with the local issue that has the same number (dzackgarza/itree#58).
 
 from __future__ import annotations
 
-from itree.models import GithubIssue, RepoRef
+import pytest
+
+from itree import cli
+from itree.models import GithubIssue, IssueRef, IssueState, RepoRef
+from itree.readiness import ReadinessState, compute_readiness, first_ready_work_unit
 from itree.render import render_tree
 from itree.traversal import dag_from_graph_nodes
 from itree.validate import generate_doctor_report
@@ -99,19 +103,80 @@ def test_grouping_whose_only_child_is_foreign_is_still_dead_locally() -> None:
     assert dead[0].evidence == ['#2 "Milestone: M1" has no open descendants']
 
 
-def test_foreign_blocker_is_not_a_local_dependency() -> None:
-    """A foreign blocker numbered like a local issue does not block the local issue and is named in I012."""
+def _blocker_edge(number: int, state: str, repo: str = FOREIGN) -> dict:
+    return {"blockedBy": {"totalCount": 1, "nodes": [{"number": number, "state": state, "repository": {"nameWithOwner": repo}}]}}
+
+
+def _foreign_ref(number: int) -> IssueRef:
+    return IssueRef(repo_ref=RepoRef.parse(FOREIGN), number=number)
+
+
+def _blocked_split_dag() -> tuple:
+    """Root -> #2 blocked by an open foreign issue, #3 blocked by a closed foreign issue."""
     nodes = (
         _node(1, "Ledger: Root", children=((LOCAL, 2), (LOCAL, 3))),
-        _node(2, "First work unit"),
-        _node(3, "Second work unit") | {"blockedBy": {"totalCount": 1, "nodes": [{"number": 2, "repository": {"nameWithOwner": FOREIGN}}]}},
+        _node(2, "Unit blocked abroad") | _blocker_edge(8, "OPEN"),
+        _node(3, "Unit unblocked abroad") | _blocker_edge(9, "CLOSED"),
     )
-    dag = dag_from_graph_nodes(RepoRef(owner="testowner", repo="testrepo"), nodes, _no_rest)
+    return nodes, dag_from_graph_nodes(RepoRef(owner="testowner", repo="testrepo"), nodes, _no_rest)
+
+
+def test_foreign_blocker_state_is_read_and_gates_readiness() -> None:
+    """An open foreign blocker blocks readiness; a closed one does not, and both stay out of dependencies."""
+    _, dag = _blocked_split_dag()
     report = generate_doctor_report(dag)
 
+    assert 2 not in dag.dependencies
     assert 3 not in dag.dependencies
+    assert dag.foreign_blocker_states == {_foreign_ref(8): IssueState.open, _foreign_ref(9): IssueState.closed}
+    blocked = compute_readiness(dag, 2)
+    assert blocked.state == ReadinessState.blocked
+    assert blocked.open_foreign_blockers == (_foreign_ref(8),)
+    assert compute_readiness(dag, 3).state == ReadinessState.ready
+    assert first_ready_work_unit(dag.materialize_root(1), dag).issue.number == 3
     foreign = [finding for finding in report.findings if finding.code == "I012"]
-    assert foreign[0].evidence == [f"#3 is blocked by foreign issue {FOREIGN}#2"]
+    assert foreign[0].evidence == [f"#2 is blocked by foreign issue {FOREIGN}#8", f"#3 is blocked by foreign issue {FOREIGN}#9"]
+
+
+def test_tree_names_an_open_foreign_blocker_with_its_repository() -> None:
+    """The blocked annotation qualifies a foreign blocker and omits a closed one."""
+    _, dag = _blocked_split_dag()
+
+    lines = render_tree(dag.materialize_root(1), dag=dag).splitlines()
+
+    assert any(line.startswith("├── #2 Unit blocked abroad  [WU]  [blocked by testowner/other#8]") for line in lines), lines
+    assert any(line.startswith("└── #3 Unit unblocked abroad  [WU]") and "[blocked by" not in line for line in lines), lines
+
+
+def test_next_output_skips_a_unit_blocked_only_by_an_open_foreign_issue(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """`next` hands out the ready unit, not the one held by an open foreign blocker."""
+    _, dag = _blocked_split_dag()
+    monkeypatch.setattr(cli, "get_repo_root", lambda repo: (dag.repo_ref, 1))
+    monkeypatch.setattr(cli, "build_dag", lambda repo_ref, api=None: dag)
+
+    cli.next(LOCAL)
+
+    out = capsys.readouterr().out
+    assert "Next work unit:" in out
+    assert "#3 Unit unblocked abroad" in out
+    assert "#2 Unit blocked abroad" not in out
+
+
+def test_next_output_names_the_open_foreign_blocker_when_nothing_is_ready(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """With every unit blocked, `next` names the foreign blocker as OWNER/REPO#N."""
+    nodes = (
+        _node(1, "Ledger: Root", children=((LOCAL, 2),),),
+        _node(2, "Only unit") | _blocker_edge(8, "OPEN"),
+    )
+    dag = dag_from_graph_nodes(RepoRef(owner="testowner", repo="testrepo"), nodes, _no_rest)
+    monkeypatch.setattr(cli, "get_repo_root", lambda repo: (dag.repo_ref, 1))
+    monkeypatch.setattr(cli, "build_dag", lambda repo_ref, api=None: dag)
+
+    cli.next(LOCAL)
+
+    out = capsys.readouterr().out
+    assert "No ready work units found" in out
+    assert f"Blocked by: {FOREIGN}#8" in out
 
 
 def test_repository_match_is_case_insensitive() -> None:

@@ -19,6 +19,24 @@ class IssueState(StrEnum):
     closed = "closed"
 
 
+class RoutedOwnerState(StrEnum):
+    """What a routed grouping's foreign owner currently offers."""
+
+    open_with_work = "open_with_work"
+    closed = "closed"
+    no_open_work = "no_open_work"
+    unreadable = "unreadable"
+
+
+class RoutedOwnerResolution(BaseModel):
+    """One read of a routed owner issue and its sub-tree."""
+
+    model_config = ConfigDict(frozen=True)
+
+    state: RoutedOwnerState
+    detail: str = ""
+
+
 class IssueCloseReason(StrEnum):
     """Valid reasons for closing a GitHub issue."""
 
@@ -642,6 +660,9 @@ class RepoDag(BaseModel):
     # ordered foreign sub-issues, and issue_number -> foreign blockers.
     foreign_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
     foreign_blockers: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
+    # State read with each foreign blocker edge; an unknown state blocks rather
+    # than pretending the prerequisite is satisfied.
+    foreign_blocker_states: dict[IssueRef, IssueState] = Field(default_factory=dict)
     # For each parent with a foreign sub-issue, all its sub-issues in GitHub's
     # sibling order; the foreign sub-issues as read from their own repositories;
     # and issue_number -> its parent in another repository, which owns its order.
@@ -786,6 +807,7 @@ class RepoHealth(BaseModel):
     # root diagnostic code (E001/E002/E004).
     root_status: str
     error_count: int
+    warning_count: int = 0
     # Total by construction: present with the next issue, or absent with a
     # reason. Same representation the doctor report uses for next_issue.
     next_work_unit: ReportRef

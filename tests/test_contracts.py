@@ -9,8 +9,20 @@ from __future__ import annotations
 from itree.cli import doctor_exit_code, render_doctor_report
 from itree.contracts import ContractEvidence, ContractKind, parse_issue_contracts
 from itree.metrics import AbsentCodeSize, MetricsConfig
-from itree.models import DoctorReport, Finding, GithubIssue, IssueRef, IssueState, RepoDag, RepoRef, ReportRef
-from itree.validate import generate_doctor_report
+from itree.models import (
+    DoctorReport,
+    Finding,
+    GithubIssue,
+    IssueRef,
+    IssueState,
+    RepoDag,
+    RepoRef,
+    ReportRef,
+    RoutedOwnerResolution,
+    RoutedOwnerState,
+)
+from itree.render import render_scan
+from itree.validate import DIAGNOSTIC_CATALOG, generate_doctor_report, repo_health
 
 ACCEPTANCE = "## Acceptance Criteria\n- The work is complete."
 
@@ -1007,3 +1019,97 @@ def test_malformed_route_fence_is_invalid_contract_not_routed() -> None:
     assert len(_findings(report, "E018")) == 1
     assert _findings(report, "I011") == []
     assert len(_findings(report, "W030")) == 1
+
+
+def _resolver(state: RoutedOwnerState, detail: str = ""):
+    return lambda ref: RoutedOwnerResolution(state=state, detail=detail)
+
+
+def test_routed_owner_open_with_work_stays_informational() -> None:
+    report = generate_doctor_report(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
+        routed_owner_resolver=_resolver(RoutedOwnerState.open_with_work),
+    )
+
+    assert len(_findings(report, "I011")) == 1
+    assert _findings(report, "W031") == []
+
+
+def test_closed_routed_owner_reports_w031_not_i011() -> None:
+    report = generate_doctor_report(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
+        routed_owner_resolver=_resolver(RoutedOwnerState.closed),
+    )
+
+    assert _findings(report, "I011") == []
+    assert _findings(report, "W030") == []
+    assert [finding.evidence for finding in _findings(report, "W031")] == [
+        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which is closed']
+    ]
+
+
+def test_routed_owner_without_open_work_reports_w031_not_i011() -> None:
+    report = generate_doctor_report(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
+        routed_owner_resolver=_resolver(RoutedOwnerState.no_open_work),
+    )
+
+    assert _findings(report, "I011") == []
+    assert [finding.evidence for finding in _findings(report, "W031")] == [
+        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which has no open work units']
+    ]
+
+
+def test_unreadable_routed_owner_reports_the_failure_not_i011() -> None:
+    report = generate_doctor_report(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
+        routed_owner_resolver=_resolver(RoutedOwnerState.unreadable, "gh api failed: Not Found"),
+    )
+
+    assert _findings(report, "I011") == []
+    assert [finding.evidence for finding in _findings(report, "W031")] == [
+        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which cannot be read: gh api failed: Not Found']
+    ]
+
+
+def test_distinct_routed_owners_are_read_once() -> None:
+    """Two groupings routing to the same owner cost one read, not two."""
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: Root"),
+            2: _issue(2, "Milestone: A", body=_coordination_fence("otherowner/otherrepo#23")),
+            3: _issue(3, "Milestone: B", body=_coordination_fence("otherowner/otherrepo#23")),
+            4: _issue(4, "Local work unit"),
+        },
+        {1: (2, 3, 4)},
+    )
+    calls: list[IssueRef] = []
+
+    def resolver(ref: IssueRef) -> RoutedOwnerResolution:
+        calls.append(ref)
+        return RoutedOwnerResolution(state=RoutedOwnerState.open_with_work)
+
+    report = generate_doctor_report(dag, routed_owner_resolver=resolver)
+
+    assert calls == [IssueRef.parse("otherowner/otherrepo#23")]
+    assert len(_findings(report, "I011")) == 1
+
+
+def test_scan_health_surfaces_a_dead_routed_owner_warning() -> None:
+    """`itree scan` carries the same W031 finding through the health digest."""
+    health = repo_health(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
+        routed_owner_resolver=_resolver(RoutedOwnerState.closed),
+    )
+
+    out = render_scan([health], fetch_errors=[])
+    assert health.warning_count >= 1
+    assert "1 warn" in out
+    assert "Worst repos" in out
+
+
+def test_dead_routed_owner_has_its_own_explain_routes() -> None:
+    details = DIAGNOSTIC_CATALOG["W031"]
+    assert details["title"] == "dead_routed_owner"
+    assert details["severity"] == "warning"
+    assert details["remediation"]
