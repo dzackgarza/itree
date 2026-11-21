@@ -230,11 +230,25 @@ large unit contains the small unit's work       itree absorb SMALL --into LARGE 
 large unit makes the small unit obsolete        superseded label, close         small unit leaves the queue
 small unit builds on what the large unit changes SMALL blocked by LARGE         small unit waits
 large unit consumes what the small unit produces LARGE blocked by SMALL         small unit goes first
-unrelated                                       nothing                         sibling order decides
+unrelated                                       redo_risk record (below)        sibling order decides
 ```
 
 `itree doctor` asks advisory `Q006` when a unit names the same file path as a large unit, `next` can select it before the large unit closes, and no blocker chain links the two.
 A file path named in both bodies is the evidence; a shared topic is not.
+
+When the two units only share a file, record that judgment in the body of either issue, usually the large unit, where an agent reads it before it starts:
+
+```itree-contract
+kind = "redo_risk"
+evidence = "records"
+independent_of = ["#47", "#48"]
+files = ["categories/lattices.py"]
+```
+
+`independent_of` names the other issue of each judged pair, so the record names both issues. `files` names the shared paths that were judged, in the same full or root-relative form a body uses.
+Q006 leaves a recorded pair out while every file the two bodies share is among the recorded `files`.
+When an edit makes the pair share another file, the pair returns, because the judgment did not cover that file.
+A record without `independent_of` or `files`, or with another `evidence` value, is `E018` and removes nothing.
 
 ## Completion contracts
 
@@ -250,7 +264,7 @@ revalidate_on = ["#84"]
 completion = "completed"
 ```
 
-The fence is strict TOML. Valid `kind` values are `implementation`, `proof`, `research`, `audit`, and `coordination`. Valid `evidence` values are `routes`, `records`, `narrows`, and `discharges`. Refs use `#N` for the same repo or `OWNER/REPO#N` for a qualified issue.
+The fence is strict TOML. Valid `kind` values are `implementation`, `proof`, `research`, `audit`, `coordination`, and `redo_risk` (see Redo risk between small and large units). Valid `evidence` values are `routes`, `records`, `narrows`, and `discharges`. Refs use `#N` for the same repo or `OWNER/REPO#N` for a qualified issue.
 
 Use the fields as a small semantic contract:
 

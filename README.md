@@ -221,7 +221,7 @@ completion = "completed"
 ```
 
 The contract surface is intentionally small.
-`kind` is one of `implementation`, `proof`, `research`, `audit`, or `coordination`; `evidence` is one of `routes`, `records`, `narrows`, or `discharges`. Implementation routes require an `owner`. Discharge evidence requires an `origin`. Unknown fields, invalid enum values, malformed TOML, or invalid refs are `E018` findings rather than silent skips.
+`kind` is one of `implementation`, `proof`, `research`, `audit`, `coordination`, or `redo_risk`; `evidence` is one of `routes`, `records`, `narrows`, or `discharges`. Implementation routes require an `owner`. Discharge evidence requires an `origin`. Unknown fields, invalid enum values, malformed TOML, or invalid refs are `E018` findings rather than silent skips.
 
 Use `itree doctor owner/repo --explain CODE` for the meaning and repair routes of any finding code.
 Warnings dispatch `issue-itree-maintenance` asynchronously while substantive work continues.

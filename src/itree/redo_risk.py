@@ -5,7 +5,10 @@ ai-review-ci label-routing taxonomy) tends to rewrite the surface it touches.
 Another open work unit on the same surface is wasted if ``next`` selects it
 first. The tree records that relation natively: absorb the smaller unit,
 supersede it, or add a ``blocked_by`` edge in either direction. Q006 names the
-pairs where none of those exist.
+pairs where none of those exist. A pair judged unrelated is recorded with an
+``itree-contract`` fence of ``kind = "redo_risk"`` on either issue; it stays
+out of Q006 while the files the two bodies share are among the files the
+record names.
 
 The shared surface is a file of the repository's tree that both issue bodies
 name. A path is the concrete evidence an agent can check; topical similarity
@@ -20,6 +23,7 @@ import re
 import networkx as nx
 
 from .audit import _finding
+from .contracts import ContractKind, parse_issue_contracts
 from .models import AuditFindingWitness, Finding, IssueRef, RepoDag, TreeNode
 from .readiness import ReadinessState, compute_readiness
 
@@ -49,6 +53,27 @@ def named_files(body: str | None, suffix_index: dict[str, frozenset[str]]) -> fr
     return frozenset().union(*(suffix_index.get(path, frozenset()) for path in _PATH.findall(body or "")))
 
 
+def recorded_independence(dag: RepoDag, work_units: list[TreeNode], suffix_index: dict[str, frozenset[str]]) -> dict[frozenset[int], frozenset[str]]:
+    """Tree files that a ``redo_risk`` record judged harmless to share, keyed by the unordered pair.
+
+    The record may sit on either issue of the pair. A malformed record is
+    E018 and yields no declaration, so it removes nothing.
+    """
+    judged: dict[frozenset[int], frozenset[str]] = {}
+    for unit in work_units:
+        parsed = parse_issue_contracts(unit.issue.body, repo_ref=dag.repo_ref, issue_number=unit.issue.number)
+        for declaration in parsed.declarations:
+            if declaration.kind != ContractKind.redo_risk:
+                continue
+            files = frozenset().union(*(suffix_index.get(path, frozenset()) for path in declaration.files))
+            for other in declaration.independent_of:
+                if other.repo_ref.slug.casefold() != dag.repo_ref.slug.casefold():
+                    continue
+                pair = frozenset({unit.issue.number, other.number})
+                judged[pair] = judged.get(pair, frozenset()) | files
+    return judged
+
+
 def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: frozenset[str]) -> list[Finding]:
     """Q006: one evidence line per large unit, one witness per (earlier unit, large unit) pair.
 
@@ -64,6 +89,7 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: fr
     suffix_index = tree_suffix_index(repo_files)
     paths = {unit.issue.number: named_files(unit.issue.body, suffix_index) for unit in work_units}
     blockers.add_nodes_from(paths)
+    judged = recorded_independence(dag, work_units, suffix_index)
 
     def linked(a: int, b: int) -> bool:
         return nx.has_path(blockers, a, b) or nx.has_path(blockers, b, a)
@@ -80,7 +106,7 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: fr
         for unit in work_units:
             x = unit.issue.number
             shared = paths[x] & paths[y]
-            if x == y or not shared or linked(x, y):
+            if x == y or not shared or linked(x, y) or shared <= judged.get(frozenset({x, y}), frozenset()):
                 continue
             if position[x] > position[y] and large_ready:
                 continue

@@ -379,7 +379,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "B. The large unit makes the smaller unit obsolete: comment naming LARGE, add the superseded label, close as not planned.",
             "C. The smaller unit builds on what the large unit changes: make SMALL blocked by LARGE.",
             "D. The large unit consumes what the smaller unit produces: make LARGE blocked by SMALL.",
-            "E. The two only share a file and neither changes what the other relies on: no change.",
+            "E. The two only share a file and neither changes what the other relies on: record it with an itree-contract fence on either issue: kind = \"redo_risk\", evidence = \"records\", independent_of = [\"#OTHER\"], files = [the shared paths]. The pair returns when the two bodies come to share a file the record does not name.",
         ],
     },
     "I001": {

@@ -18,6 +18,7 @@ class ContractKind(StrEnum):
     research = "research"
     audit = "audit"
     coordination = "coordination"
+    redo_risk = "redo_risk"
 
 
 class ContractEvidence(StrEnum):
@@ -58,6 +59,8 @@ class ContractDeclaration(BaseModel):
     role: ContractRole | None = None
     decomposition: ContractDecomposition | None = None
     completion: ContractCompletion | None = None
+    independent_of: tuple[IssueRef, ...] = ()
+    files: tuple[str, ...] = ()
 
 
 class ContractParseError(BaseModel):
@@ -93,6 +96,8 @@ class _RawContractBlock(BaseModel):
     role: ContractRole | None = None
     decomposition: ContractDecomposition | None = None
     completion: ContractCompletion | None = None
+    independent_of: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
 
     @field_validator("origin", "owner", mode="before")
     @classmethod
@@ -103,17 +108,17 @@ class _RawContractBlock(BaseModel):
             return value
         raise ValueError("issue ref must be a string")
 
-    @field_validator("requires", "revalidate_on", mode="before")
+    @field_validator("requires", "revalidate_on", "independent_of", "files", mode="before")
     @classmethod
-    def _ref_list_is_text_sequence(cls, value: object) -> tuple[str, ...]:
+    def _text_list(cls, value: object) -> tuple[str, ...]:
         if value is None:
             return ()
         if not isinstance(value, list | tuple):
-            raise ValueError("issue ref list must be an array of strings")
+            raise ValueError("must be an array of strings")
         refs: list[str] = []
         for item in value:
             if not isinstance(item, str):
-                raise ValueError("issue ref list entries must be strings")
+                raise ValueError("entries must be strings")
             refs.append(item)
         return tuple(refs)
 
@@ -127,6 +132,16 @@ class _RawContractBlock(BaseModel):
     def _implementation_route_names_owner(self) -> Self:
         if self.kind == ContractKind.implementation and self.evidence == ContractEvidence.routes and self.owner is None:
             raise ValueError("implementation route evidence must name the downstream owner")
+        return self
+
+    @model_validator(mode="after")
+    def _redo_risk_names_pair_and_files(self) -> Self:
+        if self.kind != ContractKind.redo_risk:
+            if self.independent_of or self.files:
+                raise ValueError('independent_of and files belong to kind = "redo_risk"')
+            return self
+        if self.evidence != ContractEvidence.records or not self.independent_of or not self.files:
+            raise ValueError('a redo_risk record sets evidence = "records", independent_of, and files')
         return self
 
 
@@ -219,6 +234,8 @@ def _parse_contract_block(
             role=block.role,
             decomposition=block.decomposition,
             completion=block.completion,
+            independent_of=tuple(_parse_ref(raw, issue_ref.repo_ref) for raw in block.independent_of),
+            files=block.files,
         )
     except (tomllib.TOMLDecodeError, ValidationError, ValueError) as exc:
         return ContractParseError(
