@@ -179,7 +179,12 @@ def _rest_pages(raw: str) -> list[list[dict]]:
     values = _parse_json_stream(raw)
     if len(values) == 1 and isinstance(values[0], list) and values[0] and isinstance(values[0][0], list):
         return values[0]
-    return [value for value in values if isinstance(value, list)]
+    pages: list[list[dict]] = []
+    for value in values:
+        if not isinstance(value, list):
+            raise TypeError(f"gh api --paginate wrote a non-list REST page: {str(value)[:200]!r}")
+        pages.append(value)
+    return pages
 
 
 def _graphql_pages(raw: str) -> list[dict]:
@@ -188,9 +193,13 @@ def _graphql_pages(raw: str) -> list[dict]:
     Also accepts the older ``--slurp`` shape (one array of documents).
     """
     values = _parse_json_stream(raw)
-    if len(values) == 1 and isinstance(values[0], list):
-        return values[0]
-    return [value for value in values if isinstance(value, dict)]
+    pages: list[object] = list(values[0]) if len(values) == 1 and isinstance(values[0], list) else values
+    documents: list[dict] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            raise TypeError(f"gh api graphql wrote a non-object page: {str(page)[:200]!r}")
+        documents.append(page)
+    return documents
 
 
 def parse_subissues_pages(raw: str) -> tuple[GithubIssue, ...]:
@@ -280,6 +289,8 @@ class GithubApi(BaseModel):
         Bodies can exceed the Linux per-argument limit (``MAX_ARG_STRLEN``,
         ~128 KiB), so they must never travel as ``-F body=...`` arguments.
         """
+        if fields and json_body is not None:
+            raise ValueError("pass fields or json_body, not both: -F arguments and --input - cannot be combined")
         cmd = ["gh", "api", "-X", method]
         if path:
             cmd.append(path)
@@ -597,6 +608,22 @@ class GithubApi(BaseModel):
         cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
         return parse_subissues_pages(proc.stdout)
+
+    def list_tree_files(self) -> frozenset[str]:
+        """Paths of every file in the default branch's tree, from one recursive tree read.
+
+        A repository with no commits has no branches and an empty tree; GitHub
+        answers a tree read there with HTTP 409, so the branch list decides it.
+        GitHub truncates a recursive tree past its size limit; a truncated
+        listing is not the repository's file tree, so it fails loudly.
+        """
+        if not json.loads(self._exec("GET", f"repos/{self.owner}/{self.repo}/branches?per_page=1").stdout):
+            return frozenset()
+        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/git/trees/HEAD?recursive=1", timeout=120)
+        tree = json.loads(proc.stdout)
+        if tree["truncated"]:
+            raise RuntimeError(f"GitHub truncated the recursive tree of {self.owner}/{self.repo}")
+        return frozenset(entry["path"] for entry in tree["tree"] if entry["type"] == "blob")
 
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.

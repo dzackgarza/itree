@@ -26,7 +26,10 @@ import sys
 from pathlib import Path
 from time import strftime
 
-from itree.github import parse_repo_graph_pages, parse_subissues_pages
+import pytest
+
+from itree.github import GithubApi, parse_repo_graph_pages, parse_subissues_pages
+from itree.models import RepoRef
 
 SLUG = "testowner/testrepo"
 TARGET = 69
@@ -46,13 +49,20 @@ if "--slurp" in args:
 if scenario.get("fail"):
     sys.stderr.write(scenario["fail"] + "\\n")
     sys.exit(1)
+if scenario.get("fail_input") and "--input" in args:
+    sys.stderr.write(scenario["fail_input"] + "\\n")
+    sys.exit(1)
 
 path = next((a for a in args if a.startswith("repos/")), "").split("?")[0]
 if "graphql" in args:
-    sys.stdout.write(scenario["graphql"])
+    pages = scenario.get("graphql_pages")
+    sys.stdout.write("\\n".join(pages) if pages else scenario["graphql"])
     sys.exit(0)
 if path.endswith("/sub_issues"):
     sys.stdout.write(scenario["sub_issues"])
+    sys.exit(0)
+if path.endswith("/branches"):
+    sys.stdout.write("[]")
     sys.exit(0)
 number = path.rsplit("/", 1)[-1]
 issue = dict(scenario["issues"][number])
@@ -220,21 +230,31 @@ class TestSlurpFreePagination:
 
         assert [node["number"] for node in nodes] == [1, 2]
 
-    def test_rest_pages_stream_without_slurp_flatten_in_order(self) -> None:
+    def test_rest_pages_flatten_in_order_for_both_gh_shapes(self) -> None:
+        """Older gh streams a REST page per document; current gh merges them into one array."""
         children = [_issue(number, f"Child {number}") for number in range(1, 131)]
-        raw = json.dumps(children[:100]) + "\n" + json.dumps(children[100:])
+        streamed = json.dumps(children[:100]) + "\n" + json.dumps(children[100:])
+        merged = json.dumps(children)
 
-        parsed = parse_subissues_pages(raw)
+        assert [child.number for child in parse_subissues_pages(streamed)] == list(range(1, 131))
+        assert [child.number for child in parse_subissues_pages(merged)] == list(range(1, 131))
 
-        assert [child.number for child in parsed] == list(range(1, 131))
+    def test_unexpected_stream_values_are_rejected_not_dropped(self) -> None:
+        with pytest.raises(TypeError, match="non-list REST page"):
+            parse_subissues_pages(json.dumps({"message": "boom"}))
+        with pytest.raises(TypeError, match="non-object page"):
+            parse_repo_graph_pages(json.dumps([1]), "testowner", "testrepo")
 
-    def test_doctor_reports_the_same_tree_against_gh_without_slurp(self, tmp_path: Path) -> None:
+    def test_doctor_reports_the_same_tree_over_multiple_pages_against_gh_without_slurp(self, tmp_path: Path) -> None:
         gh = GhBoundary(tmp_path)
+        # Split across two streamed documents: the ledger on page 1, the work
+        # unit only on page 2. Reading page 1 alone cannot produce this tree.
         gh.configure(
             {
-                "graphql": _graph_document(
-                    [_graph_node(1, f"Ledger: {SLUG}", [2]), _graph_node(2, "Work unit", [])]
-                )
+                "graphql_pages": [
+                    _graph_document([_graph_node(1, f"Ledger: {SLUG}", [2])]),
+                    _graph_document([_graph_node(2, "Work unit", [])]),
+                ]
             }
         )
 
@@ -258,3 +278,33 @@ class TestFailureReporting:
         assert result.returncode == 3
         assert result.stdout == ""
         assert "HTTP 502: bad gateway" in result.stderr
+
+    def test_absorb_body_rejection_reports_on_stderr_and_exits_nonzero(self, tmp_path: Path) -> None:
+        """The updated body is the very call #63 fixes; its failure must not go to stdout."""
+        gh = GhBoundary(tmp_path)
+        gh.configure({"issues": {str(TARGET): _issue(TARGET, "Work unit")}, "fail_input": "HTTP 422: body too long"})
+
+        result = gh.run("absorb", "--into", f"{SLUG}#{TARGET}", "--title", "Refiled", "--body", "evidence")
+
+        assert result.returncode == 3
+        assert result.stdout == ""
+        assert "HTTP 422: body too long" in result.stderr
+
+    def test_absorb_rejects_from_when_a_whole_issue_source_is_given(self, tmp_path: Path) -> None:
+        """--from describes refiled content; silently discarding it with SOURCE hides user input."""
+        gh = GhBoundary(tmp_path)
+
+        result = gh.run("absorb", f"{SLUG}#17", "--into", f"{SLUG}#{TARGET}", "--from", f"{SLUG}#3")
+
+        assert result.returncode == 1
+        assert "--from" in result.stdout
+        assert result.stderr == ""
+        assert not gh.log.exists()
+
+
+def test_exec_refuses_fields_and_json_body_together() -> None:
+    """A request body and -F arguments are mutually exclusive in gh api."""
+    api = GithubApi.from_repo_ref(RepoRef(owner="owner", repo="repo"))
+
+    with pytest.raises(ValueError, match="not both"):
+        api._exec("PATCH", "repos/owner/repo/issues/1", fields={"state": "closed"}, json_body={"body": "x"})
