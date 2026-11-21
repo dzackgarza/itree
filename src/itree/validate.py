@@ -362,6 +362,20 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
             "2. Preserve provenance in the contract chain; do not hide the originating obligation.",
         ],
     },
+    "Q006": {
+        "title": "redo_risk_unordered",
+        "severity": "question",
+        "meaning": "A work unit names the same file as a large work unit (complexity:high, size:l or size:xl), and `next` can select it "
+        "before the large unit closes: it precedes the large unit in preorder, or the large unit is blocked. "
+        "No blocked_by chain links the two. If the large unit rewrites that surface, the earlier work is redone.",
+        "remediation": [
+            "A. The large unit contains the smaller unit's work: itree absorb SMALL --into LARGE.",
+            "B. The large unit makes the smaller unit obsolete: comment naming LARGE, add the superseded label, close as not planned.",
+            "C. The smaller unit builds on what the large unit changes: make SMALL blocked by LARGE.",
+            "D. The large unit consumes what the smaller unit produces: make LARGE blocked by SMALL.",
+            "E. The two only share a file and neither changes what the other relies on: no change.",
+        ],
+    },
     "I001": {
         "title": "valid_tree",
         "severity": "info",
@@ -983,6 +997,10 @@ def generate_doctor_report(
                     remediation=f_details["remediation"],
                 )
             )
+
+        from .redo_risk import redo_risk_questions
+
+        findings_list.extend(redo_risk_questions(dag, work_unit_nodes))
 
         # W050: work-unit issues own their acceptance/proof boundary.
         missing_ac_findings = []

@@ -211,6 +211,24 @@ Detach a child that a transfer left behind.
 When the grouping deliberately hands its work to the other repository, record the route with a coordination contract on the grouping (see Routed groupings).
 A foreign blocker does not gate local readiness.
 
+## Redo risk between small and large units
+
+A large work unit (`complexity:high`, `size:l` or `size:xl`) usually rewrites the surface it touches.
+A smaller unit on that surface is wasted if `next` hands it out first.
+Labels do not decide this order: the risk is a relation between two issues, so record it on the pair.
+
+```
+RELATION                                        RECORD                          EFFECT ON next
+large unit contains the small unit's work       itree absorb SMALL --into LARGE small unit leaves the queue
+large unit makes the small unit obsolete        superseded label, close         small unit leaves the queue
+small unit builds on what the large unit changes SMALL blocked by LARGE         small unit waits
+large unit consumes what the small unit produces LARGE blocked by SMALL         small unit goes first
+unrelated                                       nothing                         sibling order decides
+```
+
+`itree doctor` asks advisory `Q006` when a unit names the same file path as a large unit, `next` can select it before the large unit closes, and no blocker chain links the two.
+A file path named in both bodies is the evidence; a shared topic is not.
+
 ## Completion contracts
 
 GitHub parentage owns tree shape, native blockers own readiness, and issue bodies own the work contract.
