@@ -150,23 +150,66 @@ def _graphql_data(document: dict, identity: str) -> dict:
     return data
 
 
+def _parse_json_stream(raw: str) -> list[object]:
+    """Decode every JSON value in ``raw``, in order.
+
+    ``gh api --paginate`` writes each page as its own JSON document; the pages
+    are newline-separated, not wrapped in one array. Decoding the stream here
+    removes the ``--slurp`` version dependency: an older ``gh`` that never
+    learned the flag still yields every page.
+    """
+    decoder = json.JSONDecoder()
+    values: list[object] = []
+    index = 0
+    while True:
+        while index < len(raw) and raw[index].isspace():
+            index += 1
+        if index >= len(raw):
+            return values
+        value, index = decoder.raw_decode(raw, index)
+        values.append(value)
+
+
+def _rest_pages(raw: str) -> list[list[dict]]:
+    """Return the REST pages from streamed ``--paginate`` output.
+
+    Also accepts the older ``--slurp`` shape (one array of page arrays) so
+    callers holding captured output are not forced to reshape it.
+    """
+    values = _parse_json_stream(raw)
+    if len(values) == 1 and isinstance(values[0], list) and values[0] and isinstance(values[0][0], list):
+        return values[0]
+    return [value for value in values if isinstance(value, list)]
+
+
+def _graphql_pages(raw: str) -> list[dict]:
+    """Return the GraphQL documents from streamed ``--paginate`` output.
+
+    Also accepts the older ``--slurp`` shape (one array of documents).
+    """
+    values = _parse_json_stream(raw)
+    if len(values) == 1 and isinstance(values[0], list):
+        return values[0]
+    return [value for value in values if isinstance(value, dict)]
+
+
 def parse_subissues_pages(raw: str) -> tuple[GithubIssue, ...]:
-    """Parse ``--slurp`` sub-issue pages (an array of REST page arrays).
+    """Parse paginated sub-issue pages, newest streamed shape or slurped.
 
     Pure counterpart to ``list_subissues``: flattens every page in order so
     >100-child parents keep all their children.
     """
-    pages: list[list[dict]] = json.loads(raw)
+    pages = _rest_pages(raw)
     return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
 
 
 def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
-    """Parse ``--slurp`` GraphQL pages into a flat tuple of issue nodes.
+    """Parse paginated GraphQL pages into a flat tuple of issue nodes.
 
     Pure counterpart to ``fetch_repo_graph``. A ``repository: null`` page means
     the repo is missing or inaccessible; surface the API's own error text.
     """
-    pages: list[dict] = json.loads(raw)
+    pages = _graphql_pages(raw)
     nodes: list[dict] = []
     for page in pages:
         repository = _graphql_data(page, f"{owner}/{repo}")["repository"]
@@ -228,25 +271,35 @@ class GithubApi(BaseModel):
         path: str,
         *,
         fields: dict[str, str] | None = None,
+        json_body: dict[str, object] | None = None,
         timeout: int = 30,
     ) -> subprocess.CompletedProcess[str]:
-        """Execute a GitHub CLI API command. Returns the raw subprocess result."""
+        """Execute a GitHub CLI API command. Returns the raw subprocess result.
+
+        ``json_body`` is the request body, sent on stdin through ``--input -``.
+        Bodies can exceed the Linux per-argument limit (``MAX_ARG_STRLEN``,
+        ~128 KiB), so they must never travel as ``-F body=...`` arguments.
+        """
         cmd = ["gh", "api", "-X", method]
         if path:
             cmd.append(path)
         for key, value in (fields or {}).items():
             cmd += ["-F", f"{key}={value}"]
+        if json_body is not None:
+            cmd += ["--input", "-"]
 
-        return self._run_api_command(cmd, path, timeout)
+        return self._run_api_command(cmd, path, timeout, stdin=None if json_body is None else json.dumps(json_body))
 
     def _run_api_command(
         self,
         cmd: list[str],
         path: str,
         timeout: int,
+        *,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
+            proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout, input=stdin)
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"gh api timed out after {timeout}s: {path}") from e
 
@@ -263,6 +316,7 @@ class GithubApi(BaseModel):
         effect: PlannedMilestoneEffect,
         *,
         timeout: int,
+        stdin: str | None = None,
     ) -> str:
         """Run one concrete mutation while preserving rejected versus unknown outcome."""
         try:
@@ -272,6 +326,7 @@ class GithubApi(BaseModel):
                 capture_output=True,
                 check=False,
                 timeout=timeout,
+                input=stdin,
             )
         except subprocess.TimeoutExpired as error:
             raise GithubIndeterminateError(
@@ -375,9 +430,9 @@ class GithubApi(BaseModel):
     def list_milestones(self) -> tuple[GithubMilestone, ...]:
         """List all open and closed milestones through the typed REST boundary."""
         path = f"repos/{self.owner}/{self.repo}/milestones?state=all&per_page=100"
-        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
-        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_json(proc.stdout)
+        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_python(_rest_pages(proc.stdout))
         return tuple(milestone for page in pages for milestone in page)
 
     def create_planned_milestone(
@@ -420,14 +475,13 @@ class GithubApi(BaseModel):
                 "-X",
                 "POST",
                 path,
-                "-f",
-                f"title={title}",
-                "-f",
-                f"body={body}",
+                "--input",
+                "-",
             ],
             path,
             effect,
             timeout=30,
+            stdin=json.dumps({"title": title, "body": body}),
         )
         return self._parse_issue_mutation(response, effect)
 
@@ -529,18 +583,18 @@ class GithubApi(BaseModel):
         """List ALL sub-issues of a parent issue, following REST pagination.
 
         REST returns 30 items per page by default; this is the >100-children
-        GraphQL fallback, so it must walk every page. ``--slurp`` wraps the
-        per-page arrays in one array.
+        GraphQL fallback, so it must walk every page. ``--paginate`` streams
+        the per-page arrays.
         """
         path = f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues?per_page=100"
-        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
         return parse_subissues_pages(proc.stdout)
 
     def list_blocked_by(self, number: int) -> tuple[GithubIssue, ...]:
         """List ALL native blockers of an issue, following REST pagination."""
         path = f"repos/{self.owner}/{self.repo}/issues/{number}/dependencies/blocked_by?per_page=100"
-        cmd = ["gh", "api", "--paginate", "--slurp", path]
+        cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
         return parse_subissues_pages(proc.stdout)
 
@@ -548,15 +602,13 @@ class GithubApi(BaseModel):
         """Fetch the full issue DAG in one paginated GraphQL query.
 
         Returns the raw issue nodes (open and closed) with sub-issue and
-        blocked-by edges. ``--slurp`` wraps the per-page JSON documents in
-        a single array.
+        blocked-by edges. ``--paginate`` streams one JSON document per page.
         """
         cmd = [
             "gh",
             "api",
             "graphql",
             "--paginate",
-            "--slurp",
             "-f",
             f"query={REPO_GRAPH_QUERY}",
             "-F",
@@ -608,7 +660,7 @@ class GithubApi(BaseModel):
         proc = self._exec(
             "POST",
             f"repos/{self.owner}/{self.repo}/issues",
-            fields={"title": title, "body": body},
+            json_body={"title": title, "body": body},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
@@ -672,7 +724,7 @@ class GithubApi(BaseModel):
         self._exec(
             "POST",
             f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
-            fields={"body": body},
+            json_body={"body": body},
         )
 
     def close_issue(
@@ -697,6 +749,6 @@ class GithubApi(BaseModel):
         proc = self._exec(
             "PATCH",
             f"repos/{self.owner}/{self.repo}/issues/{number}",
-            fields={"body": body},
+            json_body={"body": body},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))

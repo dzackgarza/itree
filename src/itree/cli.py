@@ -163,7 +163,7 @@ def get_repo_root(repo: str) -> tuple[RepoRef, int]:
     try:
         dag = build_dag(repo_ref)
     except Exception as e:
-        print(f"Error fetching issues from GitHub: {e}")
+        print(f"Error fetching issues from GitHub: {e}", file=sys.stderr)
         sys.exit(3)
 
     candidates = find_root_ledger_candidates(dag)
@@ -228,7 +228,7 @@ def init(
         issue = api.create_issue(title, body or "")
         print(f"{repo_ref.slug}#{issue.number}")
     except Exception as e:
-        print(f"Error creating issue: {e}")
+        print(f"Error creating issue: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -429,7 +429,7 @@ def new(
     try:
         parent_issue = api.get_issue(parent_ref.number)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     if not parent_issue.is_open:
@@ -447,7 +447,7 @@ def new(
         api.add_subissue(parent_ref.number, child.id)
         print(f"{parent_ref.repo_ref.slug}#{child.number}")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -536,6 +536,7 @@ def absorb(
     title: Annotated[str | None, Parameter(help="Title for not-yet-filed content (no source issue)")] = None,
     body: Annotated[str, Parameter(help="Body for not-yet-filed content")] = "",
     body_file: Annotated[str | None, Parameter(help="Read the content body from a file")] = None,
+    origin: Annotated[str | None, Parameter(name=["--from"], help="Issue the content was refiled out of, as OWNER/REPO#N")] = None,
 ) -> None:
     """Merge an issue (or not-yet-filed content) into a work unit, verbatim.
 
@@ -547,13 +548,14 @@ def absorb(
     Examples:
         $ itree absorb owner/repo#31 --into owner/repo#14
         $ itree absorb --into owner/repo#14 --title "Small fix" --body "..."
+        $ itree absorb --into owner/repo#14 --title "Small fix" --from owner/repo#17 --body "..."
     """
     target_ref = parse_ref(into)
     api = GithubApi.from_issue_ref(target_ref)
     try:
         target_issue = api.get_issue(target_ref.number)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     if is_grouping_issue(target_issue.title):
@@ -599,7 +601,14 @@ def absorb(
             print("Error: provide SOURCE, or --title for not-yet-filed content")
             sys.exit(1)
         content = read_body(body, body_file)
-        section = f"\n\n## Absorbed: {title}\n\n_Recorded {today}; absorbed at filing time, no separate issue created._\n\n{content or '(no body)'}"
+        # State only what this command observed. A sourceless absorb cannot know
+        # whether a separate issue existed; --from records the real origin.
+        if origin is None:
+            provenance = f"_Recorded {today}; absorbed at filing time._"
+        else:
+            origin_ref = parse_ref(origin)
+            provenance = f"_Recorded {today}; refiled from {origin_ref.slug}._"
+        section = f"\n\n## Absorbed: {title}\n\n{provenance}\n\n{content or '(no body)'}"
         try:
             api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
         except Exception as e:
@@ -627,7 +636,7 @@ def attach(
         api.add_subissue(req.parent.number, child_issue.id)
         print(req.child.slug)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -649,7 +658,7 @@ def detach(
         api.remove_subissue(req.parent.number, child_issue.id)
         print(req.child.slug)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -692,7 +701,7 @@ def move(
             )
         print(req.child.slug)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -714,7 +723,7 @@ def children(
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     if recursive:
@@ -748,7 +757,7 @@ def tree(
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     if as_json:
@@ -787,7 +796,7 @@ def next(
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     node = first_open_work_unit(tree_node, dag)
@@ -845,7 +854,7 @@ def path(
         dag = build_dag(repo_ref)
         tree_node = dag.materialize_root(root_num)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
     path_nodes = tree_node.path_to(issue_ref.number)
@@ -880,7 +889,7 @@ def close(
         api.close_issue(issue_ref.number, comment=comment, reason=reason)
         print(issue_ref.slug)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
 
 
@@ -924,7 +933,7 @@ def triage(
     try:
         dag = build_dag(repo_ref)
     except Exception as e:
-        print(f"Error fetching issues from GitHub: {e}")
+        print(f"Error fetching issues from GitHub: {e}", file=sys.stderr)
         sys.exit(3)
 
     root_num = triage_root(dag)
@@ -1115,7 +1124,7 @@ def doctor(
     try:
         dag = build_dag(repo_ref)
     except Exception as e:
-        print(f"GitHub/auth/API failure: {e}")
+        print(f"GitHub/auth/API failure: {e}", file=sys.stderr)
         sys.exit(3)
 
     config = load_config()
@@ -1199,7 +1208,7 @@ def scan(
     try:
         repos = list_repos(owner)
     except Exception as e:
-        print(f"Error listing repos for {owner}: {e}")
+        print(f"Error listing repos for {owner}: {e}", file=sys.stderr)
         sys.exit(3)
 
     # Read config once at the command boundary (mirrors doctor), then apply the
