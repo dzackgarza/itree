@@ -311,10 +311,11 @@ class TestTruncatedTree:
             }
         )
 
-        result = gh.run("doctor", SLUG)
+        result = gh.run("doctor", SLUG, "--json")
 
         assert result.returncode == 1, result.stderr
-        assert "large unit #2 can be preceded by work on the files it names: #3 (src/pkg/parser.py)" in result.stdout
+        q006 = [f["evidence"] for f in json.loads(result.stdout)["findings"] if f["code"] == "Q006"]
+        assert q006 == [["large unit #2 can be preceded by work on the files it names: #3 (src/pkg/parser.py)"]]
 
 
 class TestFailureReporting:

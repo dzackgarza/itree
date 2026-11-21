@@ -610,20 +610,34 @@ class GithubApi(BaseModel):
         return parse_subissues_pages(proc.stdout)
 
     def list_tree_files(self) -> frozenset[str]:
-        """Paths of every file in the default branch's tree, from one recursive tree read.
+        """Paths of every file in the default branch's tree.
 
         A repository with no commits has no branches and an empty tree; GitHub
         answers a tree read there with HTTP 409, so the branch list decides it.
-        GitHub truncates a recursive tree past its size limit; a truncated
-        listing is not the repository's file tree, so it fails loudly.
         """
         if not json.loads(self._exec("GET", f"repos/{self.owner}/{self.repo}/branches?per_page=1").stdout):
             return frozenset()
-        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/git/trees/HEAD?recursive=1", timeout=120)
-        tree = json.loads(proc.stdout)
-        if tree["truncated"]:
-            raise RuntimeError(f"GitHub truncated the recursive tree of {self.owner}/{self.repo}")
-        return frozenset(entry["path"] for entry in tree["tree"] if entry["type"] == "blob")
+        return self._tree_files("HEAD", "")
+
+    def _tree_files(self, tree_ish: str, prefix: str) -> frozenset[str]:
+        """Files under one tree, each path prefixed with that tree's location.
+
+        GitHub truncates a recursive tree read past its size limit and documents
+        the remedy: read the tree non-recursively and fetch one subtree at a
+        time (https://docs.github.com/en/rest/git/trees#get-a-tree). Each
+        subtree is read recursively first, so a walk descends only where a read
+        is still truncated.
+        """
+        tree_path = f"repos/{self.owner}/{self.repo}/git/trees/{tree_ish}"
+        recursive = json.loads(self._exec("GET", f"{tree_path}?recursive=1", timeout=120).stdout)
+        if not recursive["truncated"]:
+            return frozenset(prefix + e["path"] for e in recursive["tree"] if e["type"] == "blob")
+        entries = json.loads(self._exec("GET", tree_path, timeout=120).stdout)["tree"]
+        files = {prefix + e["path"] for e in entries if e["type"] == "blob"}
+        for e in entries:
+            if e["type"] == "tree":
+                files |= self._tree_files(e["sha"], f"{prefix}{e['path']}/")
+        return frozenset(files)
 
     def fetch_repo_graph(self) -> tuple[dict, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
