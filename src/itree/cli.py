@@ -21,7 +21,7 @@ from typing import Annotated
 
 from cyclopts import App, Parameter
 
-from .github import GithubApi, list_repos, resolve_routed_owner
+from .github import GithubApi, list_repos, resolve_routed_owner, settle_parent
 from .metrics import (
     CodeSizeEvidence,
     MetricsConfig,
@@ -629,15 +629,33 @@ def attach(
 ) -> None:
     """Attach an existing issue as a sub-issue of a parent.
 
+    The child's current parent is replaced, including a parent in another
+    repository. GitHub may re-apply a pre-transfer parent asynchronously, so
+    the command re-reads the child's parent until it reads the target twice,
+    six seconds apart (up to five attempts), and fails if it does not settle.
+
     Example:
         $ itree attach owner/project-alpha#1 owner/project-alpha#5
         owner/project-alpha#5
     """
     req = AttachRequest(parent=parse_ref(parent), child=parse_ref(child))
     api = GithubApi.from_issue_ref(req.parent)
+    child_api = GithubApi.from_issue_ref(req.child)
     try:
-        child_issue = GithubApi.from_issue_ref(req.child).get_issue(req.child.number)
-        api.add_subissue(req.parent.number, child_issue.id)
+        child_issue = child_api.get_issue(req.child.number)
+
+        def replace_parent(current: IssueRef | None) -> None:
+            # Remove the old link in its own repository first: a transferred
+            # issue's retained cross-repository parent makes addSubIssue 422.
+            if current is not None:
+                GithubApi.from_issue_ref(current).remove_subissue(current.number, child_issue.id)
+            api.add_subissue(req.parent.number, child_issue.id)
+
+        settle_parent(
+            target=req.parent,
+            read_parent=lambda: child_api.get_parent(req.child.number),
+            replace_parent=replace_parent,
+        )
         print(req.child.slug)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

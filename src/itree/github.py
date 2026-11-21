@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
+from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
@@ -797,6 +799,47 @@ class GithubApi(BaseModel):
             json_body={"body": body},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
+
+
+def settle_parent(
+    *,
+    target: IssueRef,
+    read_parent: Callable[[], IssueRef | None],
+    replace_parent: Callable[[IssueRef | None], None],
+    settle_seconds: float = 6.0,
+    max_attempts: int = 5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Replace the child's parent and verify the result after GitHub settles.
+
+    GitHub re-applies a pre-transfer parent asynchronously, so one successful
+    write is not evidence of the final state. ``replace_parent`` receives the
+    parent just read. Apply the replacement whenever the read disagrees, then
+    require the target parent on two reads ``settle_seconds`` apart; raise
+    rather than report a state that may revert.
+    """
+    last: IssueRef | None = None
+    for _ in range(max_attempts):
+        current = read_parent()
+        if not _same_issue(current, target):
+            replace_parent(current)
+        sleep(settle_seconds)
+        first = read_parent()
+        if not _same_issue(first, target):
+            last = first
+            continue
+        sleep(settle_seconds)
+        second = read_parent()
+        if _same_issue(second, target):
+            return
+        last = second
+    seen = "no parent" if last is None else last.slug
+    raise RuntimeError(f"could not settle the child's parent on {target.slug} after {max_attempts} attempts (last read: {seen}); reread live GitHub state")
+
+
+def _same_issue(candidate: IssueRef | None, target: IssueRef) -> bool:
+    """Compare refs ignoring GitHub's canonical case for OWNER/REPO."""
+    return candidate is not None and candidate.number == target.number and candidate.repo_ref.slug.casefold() == target.repo_ref.slug.casefold()
 
 
 def resolve_routed_owner(ref: IssueRef) -> RoutedOwnerResolution:

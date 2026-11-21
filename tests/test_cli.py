@@ -17,6 +17,7 @@ from itree.cli import (
     path,
     print_diagnostic,
 )
+from itree.github import settle_parent
 from itree.models import AttachRequest, GithubIssue, IssueRef, IssueState, MoveRequest, RepoDag, RepoRef
 
 
@@ -165,6 +166,46 @@ class TestOrchestrationFunctions:
         after = IssueRef(repo_ref=RepoRef(owner="owner", repo="repo"), number=4)
         with pytest.raises(ValueError, match="either --before or --after"):
             MoveRequest(child=child, parent=parent, before=before, after=after)
+
+
+class TestSettleParent:
+    """Attach replaces a parent, then re-verifies after GitHub's async re-parenting."""
+
+    @staticmethod
+    def _target() -> IssueRef:
+        return IssueRef.parse("owner/repo#2")
+
+    def _run(self, reads: list[IssueRef | None], *, max_attempts: int = 5) -> list[IssueRef | None]:
+        sequence = iter(reads)
+        replaced: list[IssueRef | None] = []
+        settle_parent(
+            target=self._target(),
+            read_parent=lambda: next(sequence),
+            replace_parent=replaced.append,
+            settle_seconds=0,
+            max_attempts=max_attempts,
+            sleep=lambda _: None,
+        )
+        return replaced
+
+    def test_already_settled_writes_nothing_and_verifies_twice(self) -> None:
+        target = self._target()
+        assert self._run([target, target, target]) == []
+
+    def test_a_reapplied_old_parent_is_replaced_again(self) -> None:
+        """The pre-transfer parent reappears once; the loop replaces it again and settles."""
+        target = self._target()
+        old = IssueRef.parse("owner/other#7")
+        assert self._run([old, target, old, old, target, target]) == [old, old]
+
+    def test_no_parent_is_replaced_once(self) -> None:
+        target = self._target()
+        assert self._run([None, target, target]) == [None]
+
+    def test_parent_that_never_settles_raises_after_the_budget(self) -> None:
+        old = IssueRef.parse("owner/other#7")
+        with pytest.raises(RuntimeError, match="could not settle"):
+            self._run([old] * 6, max_attempts=2)
 
 
 class TestCLICommandStructure:
