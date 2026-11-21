@@ -136,3 +136,11 @@ def test_path_inside_a_url_is_not_a_shared_file() -> None:
     report = _report((2, 3), issues)
 
     assert _q006(report) == []
+
+
+def test_complexity_high_alone_does_not_mark_a_large_unit() -> None:
+    issues = _small_then_large()
+    issues[3] = _issue(3, "Interface tweak", "Change one signature in src/pkg/parser.py.", ("complexity:high", "size:m"))
+    report = _report((2, 3), issues)
+
+    assert _q006(report) == []
