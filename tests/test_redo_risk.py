@@ -12,6 +12,7 @@ from itree.validate import generate_doctor_report
 
 LARGE = ("complexity:high", "size:l")
 SMALL = ("complexity:low", "size:xs")
+REPO_FILES = frozenset({"src/pkg/parser.py", "docs/usage.md"})
 
 
 def _repo_ref() -> RepoRef:
@@ -45,7 +46,7 @@ def _report(
         children_of={1: order},
         dependencies=dependencies or {},
     )
-    return generate_doctor_report(dag)
+    return generate_doctor_report(dag, repo_files=REPO_FILES)
 
 
 def _q006(report: DoctorReport) -> list[Finding]:
@@ -144,3 +145,21 @@ def test_complexity_high_alone_does_not_mark_a_large_unit() -> None:
     report = _report((2, 3), issues)
 
     assert _q006(report) == []
+
+
+def test_path_outside_the_repository_tree_is_not_a_shared_file() -> None:
+    cited = "Source: research writing/statement/Statement.md at ac0732d."
+    report = _report((2, 3), _small_then_large(small_body=cited, large_body=cited))
+
+    assert _q006(report) == []
+
+
+def test_q006_is_not_evaluated_without_the_repository_tree() -> None:
+    dag = RepoDag(
+        repo_ref=_repo_ref(),
+        issues={1: _issue(1, "Ledger: testowner/testrepo"), **_small_then_large()},
+        children_of={1: (2, 3)},
+        dependencies={},
+    )
+
+    assert _q006(generate_doctor_report(dag)) == []

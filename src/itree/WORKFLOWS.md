@@ -213,7 +213,8 @@ A foreign blocker does not gate local readiness.
 
 ## Redo risk between small and large units
 
-A large work unit (`complexity:high`, `size:l` or `size:xl`) usually rewrites the surface it touches.
+A large work unit (`size:l` or `size:xl`) usually rewrites the surface it touches.
+`complexity:*` is drift risk, not scope, so it does not make a unit large.
 A smaller unit on that surface is wasted if `next` hands it out first.
 Labels do not decide this order: the risk is a relation between two issues, so record it on the pair.
 

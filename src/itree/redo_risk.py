@@ -1,6 +1,6 @@
 """Q006: work that ``next`` can hand out before a large unit rewrites its surface.
 
-A large work unit (``complexity:high``, ``size:l`` or ``size:xl``; see the
+A large work unit (``size:l`` or ``size:xl``; see the
 ai-review-ci label-routing taxonomy) tends to rewrite the surface it touches.
 Another open work unit on the same surface is wasted if ``next`` selects it
 first. The tree records that relation natively: absorb the smaller unit,
@@ -21,7 +21,7 @@ from .audit import _finding
 from .models import AuditFindingWitness, Finding, IssueRef, RepoDag, TreeNode
 from .readiness import ReadinessState, compute_readiness
 
-LARGE_UNIT_LABELS = frozenset({"complexity:high", "size:l", "size:xl"})
+LARGE_UNIT_LABELS = frozenset({"size:l", "size:xl"})
 
 # A relative path with at least one directory and a file extension. The
 # lookbehind rejects a match that starts inside a URL or a longer path.
@@ -33,7 +33,7 @@ def named_paths(body: str | None) -> frozenset[str]:
     return frozenset(_PATH.findall(body or ""))
 
 
-def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode]) -> list[Finding]:
+def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: frozenset[str]) -> list[Finding]:
     """Q006 for each (earlier-selectable unit, large unit) pair on a shared file.
 
     ``work_units`` are the open work units of the tree in preorder, the order

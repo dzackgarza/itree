@@ -365,7 +365,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
     "Q006": {
         "title": "redo_risk_unordered",
         "severity": "question",
-        "meaning": "A work unit names the same file as a large work unit (complexity:high, size:l or size:xl), and `next` can select it "
+        "meaning": "A work unit names the same file as a large work unit (size:l or size:xl), and `next` can select it "
         "before the large unit closes: it precedes the large unit in preorder, or the large unit is blocked. "
         "No blocked_by chain links the two. If the large unit rewrites that surface, the earlier work is redone.",
         "remediation": [
@@ -572,7 +572,9 @@ def generate_doctor_report(
     deferral_label: str = "deferred",
     decomposition_label: str = "",
     derived_state_labels: tuple[str, ...] = (),
+    repo_files: frozenset[str] | None = None,
 ) -> DoctorReport:
+    """``repo_files`` is the repository's file tree; Q006 is evaluated only when it is given."""
     dag = issue_only_dag(dag)
     findings_list: list[Finding] = []
 
@@ -998,9 +1000,10 @@ def generate_doctor_report(
                 )
             )
 
-        from .redo_risk import redo_risk_questions
+        if repo_files is not None:
+            from .redo_risk import redo_risk_questions
 
-        findings_list.extend(redo_risk_questions(dag, work_unit_nodes))
+            findings_list.extend(redo_risk_questions(dag, work_unit_nodes, repo_files))
 
         # W050: work-unit issues own their acceptance/proof boundary.
         missing_ac_findings = []
