@@ -54,6 +54,9 @@ if "graphql" in args:
 if path.endswith("/sub_issues"):
     sys.stdout.write(scenario["sub_issues"])
     sys.exit(0)
+if path.endswith("/branches"):
+    sys.stdout.write("[]")
+    sys.exit(0)
 number = path.rsplit("/", 1)[-1]
 issue = dict(scenario["issues"][number])
 if "--include" in args:

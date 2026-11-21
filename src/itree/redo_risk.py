@@ -7,8 +7,10 @@ first. The tree records that relation natively: absorb the smaller unit,
 supersede it, or add a ``blocked_by`` edge in either direction. Q006 names the
 pairs where none of those exist.
 
-The shared surface is a repository file path named in both issue bodies. A
-path is the concrete evidence an agent can check; topical similarity is not.
+The shared surface is a file of the repository's tree that both issue bodies
+name. A path is the concrete evidence an agent can check; topical similarity
+is not. A path that is not in the tree, such as a file of another repository
+that a transferred issue cites, does not count.
 """
 
 from __future__ import annotations
@@ -28,13 +30,27 @@ LARGE_UNIT_LABELS = frozenset({"size:l", "size:xl"})
 _PATH = re.compile(r"(?<![\w/.:-])((?:[\w-][\w.-]*/)+[\w-][\w.-]*\.[A-Za-z0-9]+)(?![\w/])")
 
 
-def named_paths(body: str | None) -> frozenset[str]:
-    """File paths named in an issue body."""
-    return frozenset(_PATH.findall(body or ""))
+def tree_suffix_index(repo_files: frozenset[str]) -> dict[str, frozenset[str]]:
+    """Each path suffix of two or more components, mapped to the tree files that end with it.
+
+    Issue bodies often name a path relative to a package or source root
+    (``categories/lattices.py`` for ``src/pkg/categories/lattices.py``).
+    """
+    index: dict[str, set[str]] = {}
+    for file in repo_files:
+        parts = file.split("/")
+        for start in range(len(parts) - 1):
+            index.setdefault("/".join(parts[start:]), set()).add(file)
+    return {suffix: frozenset(files) for suffix, files in index.items()}
+
+
+def named_files(body: str | None, suffix_index: dict[str, frozenset[str]]) -> frozenset[str]:
+    """Tree files that an issue body names, by full or root-relative path."""
+    return frozenset().union(*(suffix_index.get(path, frozenset()) for path in _PATH.findall(body or "")))
 
 
 def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: frozenset[str]) -> list[Finding]:
-    """Q006 for each (earlier-selectable unit, large unit) pair on a shared file.
+    """Q006: one evidence line per large unit, one witness per (earlier unit, large unit) pair.
 
     ``work_units`` are the open work units of the tree in preorder, the order
     ``next`` walks. A unit X is selectable while large unit Y is open when no
@@ -45,7 +61,8 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: fr
     for issue, blocked_by in dag.dependencies.items():
         blockers.add_edges_from((issue, blocker) for blocker in blocked_by)
 
-    paths = {unit.issue.number: named_paths(unit.issue.body) for unit in work_units}
+    suffix_index = tree_suffix_index(repo_files)
+    paths = {unit.issue.number: named_files(unit.issue.body, suffix_index) for unit in work_units}
     blockers.add_nodes_from(paths)
 
     def linked(a: int, b: int) -> bool:
@@ -59,6 +76,7 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: fr
         if not LARGE_UNIT_LABELS & set(large.issue.labels):
             continue
         large_ready = compute_readiness(dag, y).state == ReadinessState.ready
+        earlier: list[str] = []
         for unit in work_units:
             x = unit.issue.number
             shared = paths[x] & paths[y]
@@ -66,13 +84,15 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode], repo_files: fr
                 continue
             if position[x] > position[y] and large_ready:
                 continue
-            evidence.append(f"#{x} can be selected before large unit #{y}; both name {', '.join(sorted(shared))}")
+            earlier.append(f"#{x} ({', '.join(sorted(shared))})")
             witnesses.append(
                 AuditFindingWitness(
                     edge_chain=(IssueRef(repo_ref=dag.repo_ref, number=x), IssueRef(repo_ref=dag.repo_ref, number=y)),
                     unresolved_burden="absorb, supersede, or add a blocked_by edge",
                 )
             )
+        if earlier:
+            evidence.append(f"large unit #{y} can be preceded by work on the files it names: {'; '.join(earlier)}")
     if not evidence:
         return []
     return [_finding("Q006", evidence, witnesses=tuple(witnesses))]

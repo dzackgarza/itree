@@ -1123,6 +1123,7 @@ def doctor(
     repo_ref = parse_repo(repo)
     try:
         dag = build_dag(repo_ref)
+        repo_files = GithubApi.from_repo_ref(repo_ref).list_tree_files()
     except Exception as e:
         print(f"GitHub/auth/API failure: {e}", file=sys.stderr)
         sys.exit(3)
@@ -1133,6 +1134,7 @@ def doctor(
         deferral_label=config.deferral_label,
         decomposition_label=config.decomposition_label,
         derived_state_labels=config.derived_state_labels,
+        repo_files=repo_files,
     )
 
     if as_json:
