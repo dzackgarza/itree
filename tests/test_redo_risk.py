@@ -12,7 +12,7 @@ from itree.validate import generate_doctor_report
 
 LARGE = ("complexity:high", "size:l")
 SMALL = ("complexity:low", "size:xs")
-REPO_FILES = frozenset({"src/pkg/parser.py", "docs/usage.md"})
+REPO_FILES = frozenset({"src/pkg/parser.py", "src/pkg/lexer.py", "docs/usage.md"})
 
 
 def _repo_ref() -> RepoRef:
@@ -177,3 +177,50 @@ def test_path_suffix_must_end_at_a_directory_boundary() -> None:
     report = _report((2, 3), _small_then_large(small_body="Fix a typo in `kg/parser.py`."))
 
     assert _q006(report) == []
+
+
+def _independence(other: int, *files: str) -> str:
+    listed = ", ".join(f'"{file}"' for file in files)
+    return f'```itree-contract\nkind = "redo_risk"\nevidence = "records"\nindependent_of = ["#{other}"]\nfiles = [{listed}]\n```'
+
+
+def test_recorded_independence_on_the_large_unit_removes_the_pair() -> None:
+    large_body = f"Rewrite src/pkg/parser.py around a grammar.\n\n{_independence(2, 'pkg/parser.py')}"
+    report = _report((2, 3), _small_then_large(large_body=large_body))
+
+    assert _q006(report) == []
+    assert [finding.code for finding in report.findings if finding.code == "E018"] == []
+
+
+def test_recorded_independence_on_the_small_unit_removes_the_pair() -> None:
+    small_body = f"Fix a typo in `src/pkg/parser.py`.\n\n{_independence(3, 'src/pkg/parser.py')}"
+    report = _report((2, 3), _small_then_large(small_body=small_body))
+
+    assert _q006(report) == []
+
+
+def test_independence_of_another_unit_keeps_the_pair() -> None:
+    issues = {**_small_then_large(), 4: _issue(4, "Lexer fix", "Fix src/pkg/parser.py tokens.", SMALL)}
+    issues[3] = _issue(3, "Parser rewrite", f"Rewrite src/pkg/parser.py.\n\n{_independence(4, 'src/pkg/parser.py')}", LARGE)
+    report = _report((2, 4, 3), issues)
+
+    findings = _q006(report)
+    assert [witness.edge_chain for witness in findings[0].witnesses] == [(_ref(2), _ref(3))]
+
+
+def test_a_newly_shared_file_brings_the_pair_back() -> None:
+    small_body = "Fix a typo in `src/pkg/parser.py` and `src/pkg/lexer.py`."
+    large_body = f"Rewrite src/pkg/parser.py and src/pkg/lexer.py.\n\n{_independence(2, 'src/pkg/parser.py')}"
+    report = _report((2, 3), _small_then_large(small_body=small_body, large_body=large_body))
+
+    findings = _q006(report)
+    assert len(findings) == 1
+    assert "src/pkg/lexer.py" in findings[0].evidence[0]
+
+
+def test_independence_record_without_files_is_e018_and_keeps_the_pair() -> None:
+    fence = '```itree-contract\nkind = "redo_risk"\nevidence = "records"\nindependent_of = ["#2"]\n```'
+    report = _report((2, 3), _small_then_large(large_body=f"Rewrite src/pkg/parser.py.\n\n{fence}"))
+
+    assert len(_q006(report)) == 1
+    assert [finding.code for finding in report.findings if finding.code == "E018"] == ["E018"]
