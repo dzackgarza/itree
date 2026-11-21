@@ -346,6 +346,9 @@ class ValidatedMilestonePlan(BaseModel):
     parent_issue: GithubIssue
     work_units: tuple[ExistingWorkUnit, ...]
     effects: tuple[PlannedMilestoneEffect, ...]
+    # A pre-existing native milestone with the same title is adopted: the plan
+    # skips creating it and assigns this one instead.
+    adopted_milestone: GithubMilestone | None = None
 
 
 class GithubRejectedOperation(BaseModel):

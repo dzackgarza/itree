@@ -276,7 +276,7 @@ DIAGNOSTIC_CATALOG: dict[str, DiagnosticDetails] = {
         "ideal_model": "Every release-scoped native GitHub milestone has a matching `Milestone: TITLE` direct child of the root ledger.",
         "meaning": "Create a milestone ledger under the root, or deliberately keep milestones outside tree policy.",
         "remediation": [
-            "A. Create a milestone ledger issue under the root ledger representing this milestone.",
+            'A. Run `itree milestone OWNER/REPO "TITLE" --under OWNER/REPO#ROOT --issues ...`; an existing milestone of that title is adopted instead of duplicated.',
             "B. Clear the milestone from the issues if it is not meant to be tracked.",
         ],
         "maintenance": WARNING_MAINTENANCE,

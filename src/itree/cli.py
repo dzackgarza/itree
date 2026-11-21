@@ -480,8 +480,10 @@ def milestone(
     Without --under this creates nothing and prints existing milestone
     ledgers, the root-ledger target, and an exact command with placement.
     With placement supplied, one complete preflight precedes the ordered
-    milestone, ledger, parentage, and assignment writes. A rejected or
-    indeterminate write stops the untouched suffix without rollback.
+    milestone, ledger, parentage, and assignment writes. An existing GitHub
+    Milestone with exactly this title is adopted when no `Milestone: TITLE`
+    issue exists, so it is not created twice. A rejected or indeterminate
+    write stops the untouched suffix without rollback.
 
     Example:
         $ itree milestone owner/project-alpha "release 2" \\

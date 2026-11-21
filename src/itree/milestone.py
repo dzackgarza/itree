@@ -81,13 +81,20 @@ def _malformed_structure_references(dag: RepoDag) -> tuple[str, ...]:
     return tuple(f"{dag.repo_ref.slug}#{number}" for number in malformed)
 
 
-def _planned_effects(work_units: tuple[ExistingWorkUnit, ...]) -> tuple[PlannedMilestoneEffect, ...]:
-    effects: list[PlannedMilestoneEffect] = [
-        MilestoneEffect(kind=MilestoneEffectKind.create_milestone),
-        MilestoneEffect(kind=MilestoneEffectKind.create_ledger),
-        MilestoneEffect(kind=MilestoneEffectKind.attach_ledger),
-        MilestoneEffect(kind=MilestoneEffectKind.assign_ledger),
-    ]
+def _planned_effects(
+    work_units: tuple[ExistingWorkUnit, ...],
+    adopted_milestone: GithubMilestone | None,
+) -> tuple[PlannedMilestoneEffect, ...]:
+    effects: list[PlannedMilestoneEffect] = []
+    if adopted_milestone is None:
+        effects.append(MilestoneEffect(kind=MilestoneEffectKind.create_milestone))
+    effects.extend(
+        (
+            MilestoneEffect(kind=MilestoneEffectKind.create_ledger),
+            MilestoneEffect(kind=MilestoneEffectKind.attach_ledger),
+            MilestoneEffect(kind=MilestoneEffectKind.assign_ledger),
+        )
+    )
     for work_unit in work_units:
         move_kind = MilestoneEffectKind.attach_work_unit if work_unit.placement is WorkUnitPlacement.attach else MilestoneEffectKind.replace_work_unit_parent
         effects.extend(
@@ -119,19 +126,22 @@ def preflight_milestone(
             *malformed_references,
         )
 
-    matching_milestones = tuple(milestone for milestone in milestones if milestone.title.value == request.title.value)
-    if matching_milestones:
-        return _reject(
-            MilestonePreflightErrorKind.milestone_title_collision,
-            *(f"milestone:{milestone.number}" for milestone in matching_milestones),
-        )
-
+    # A ledger already carrying this milestone is genuine malformation; it is
+    # also what makes adopting a pre-existing milestone safe to distinguish.
     matching_ledgers = tuple(issue for issue in dag.issues.values() if issue.title == request.title.ledger_title)
     if matching_ledgers:
         return _reject(
             MilestonePreflightErrorKind.ledger_title_collision,
             *(f"{request.repo_ref.slug}#{issue.number}" for issue in matching_ledgers),
         )
+
+    matching_milestones = tuple(milestone for milestone in milestones if milestone.title.value == request.title.value)
+    if len(matching_milestones) > 1:
+        return _reject(
+            MilestonePreflightErrorKind.milestone_title_collision,
+            *(f"milestone:{milestone.number}" for milestone in matching_milestones),
+        )
+    adopted_milestone = matching_milestones[0] if matching_milestones else None
 
     root_numbers = tuple(number for number, issue in dag.issues.items() if number not in dag.parent_of and issue.is_open and is_root_ledger(issue.title))
     if len(root_numbers) != 1:
@@ -203,7 +213,8 @@ def preflight_milestone(
         request=request,
         parent_issue=parent,
         work_units=typed_work_units,
-        effects=_planned_effects(typed_work_units),
+        effects=_planned_effects(typed_work_units, adopted_milestone),
+        adopted_milestone=adopted_milestone,
     )
 
 
@@ -236,9 +247,11 @@ def execute_milestone(
     """Execute one validated plan in order and stop at the first typed failure."""
     progress = MilestoneExecutionProgress.start(plan.effects, plan.work_units)
     try:
-        effect = _current_effect(progress, MilestoneEffectKind.create_milestone)
-        milestone = api.create_planned_milestone(plan.request.title, effect)
-        progress = progress.confirm(effect)
+        milestone = plan.adopted_milestone
+        if milestone is None:
+            effect = _current_effect(progress, MilestoneEffectKind.create_milestone)
+            milestone = api.create_planned_milestone(plan.request.title, effect)
+            progress = progress.confirm(effect)
 
         effect = _current_effect(progress, MilestoneEffectKind.create_ledger)
         ledger = api.create_planned_issue(

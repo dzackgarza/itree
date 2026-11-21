@@ -132,39 +132,89 @@ def test_preflight_plans_parented_replace_and_parentless_attach_in_order() -> No
     )
 
 
-def test_preflight_rejects_title_collision_before_effects() -> None:
-    """A remote title collision yields a typed rejection with no write plan."""
-    from itree.milestone import preflight_milestone
-    from itree.models import (
-        CreateMilestoneRequest,
-        GithubMilestone,
-        GithubMilestoneState,
-        MilestonePreflightErrorKind,
-        MilestonePreflightRejected,
-        MilestoneTitle,
-    )
-
-    repo_ref = RepoRef(owner="owner", repo="repo")
-    title = MilestoneTitle.parse("release 2")
-    request = CreateMilestoneRequest(
-        repo_ref=repo_ref,
-        title=title,
-        parent=IssueRef(repo_ref=repo_ref, number=2),
-        body="",
-        work_units=(),
-    )
-    existing = GithubMilestone(
+def _existing_milestone() -> models.GithubMilestone:
+    return models.GithubMilestone(
         number=7,
-        title=title,
-        state=GithubMilestoneState.closed,
+        title=models.MilestoneTitle.parse("release 2"),
+        state=models.GithubMilestoneState.open,
         html_url="https://github.com/owner/repo/milestone/7",
     )
 
-    result = preflight_milestone(request, _representative_dag(), (existing,))
 
-    assert isinstance(result, MilestonePreflightRejected)
-    assert result.kind is MilestonePreflightErrorKind.milestone_title_collision
-    assert result.references == ("milestone:7",)
+def test_preflight_adopts_an_exact_milestone_title_without_a_ledger() -> None:
+    """W041's own state plans adoption: skip creating the milestone, keep the ordered writes."""
+    from itree.milestone import preflight_milestone
+    from itree.models import MilestoneEffectKind, ValidatedMilestonePlan
+
+    existing = _existing_milestone()
+
+    result = preflight_milestone(_request(1, (3, 4)), _representative_dag(), (existing,))
+
+    assert isinstance(result, ValidatedMilestonePlan)
+    assert result.adopted_milestone == existing
+    assert tuple(effect.kind for effect in result.effects[:3]) == (
+        MilestoneEffectKind.create_ledger,
+        MilestoneEffectKind.attach_ledger,
+        MilestoneEffectKind.assign_ledger,
+    )
+    assert MilestoneEffectKind.create_milestone not in tuple(effect.kind for effect in result.effects)
+
+
+def test_preflight_rejects_a_milestone_that_already_has_its_ledger() -> None:
+    """Two ledgers for one milestone stay malformed; the adopt path must not widen to it."""
+    from itree.milestone import preflight_milestone
+
+    ledger = _issue(5, "Milestone: release 2")
+    dag = RepoDag(
+        repo_ref=RepoRef(owner="owner", repo="repo"),
+        issues={
+            1: _issue(1, "Ledger: owner/repo"),
+            2: _issue(2, "Milestone: existing"),
+            5: ledger,
+        },
+        children_of={1: (2, 5)},
+    )
+
+    result = preflight_milestone(_request(1, ()), dag, (_existing_milestone(),))
+
+    assert isinstance(result, models.MilestonePreflightRejected)
+    assert result.kind is models.MilestonePreflightErrorKind.ledger_title_collision
+    assert result.references == ("owner/repo#5",)
+
+
+def test_adopted_milestone_tree_has_no_w041_or_w040() -> None:
+    """The adopted ledger and its assigned child satisfy both milestone diagnostics."""
+    from itree.validate import generate_doctor_report
+
+    native = models.Milestone(title="release 2")
+    ledger = GithubIssue(
+        id=2,
+        number=2,
+        title="Milestone: release 2",
+        state=IssueState.open,
+        html_url="https://github.com/owner/repo/issues/2",
+        body="## Outcome\nShip release 2.",
+        milestone=native,
+    )
+    work_unit = GithubIssue(
+        id=3,
+        number=3,
+        title="Release work unit",
+        state=IssueState.open,
+        html_url="https://github.com/owner/repo/issues/3",
+        body="## Acceptance Criteria\n- Ship it.",
+        milestone=native,
+    )
+    dag = RepoDag(
+        repo_ref=RepoRef(owner="owner", repo="repo"),
+        issues={1: _issue(1, "Ledger: owner/repo"), 2: ledger, 3: work_unit},
+        children_of={1: (2,), 2: (3,)},
+    )
+
+    codes = {finding.code for finding in generate_doctor_report(dag).findings}
+
+    assert "W041" not in codes
+    assert "W040" not in codes
 
 
 def test_indeterminate_effect_preserves_confirmed_and_untouched_operations() -> None:

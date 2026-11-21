@@ -142,10 +142,11 @@ Without `--under`, the command creates nothing, lists existing milestone ledgers
 
 With placement supplied, the command fetches the full tree and all open or closed GitHub Milestones before writing.
 It accepts only the unique reachable root ledger as `--under`. A generated `Milestone: TITLE` ledger is its direct child; Backlog is a sibling branch, not a valid parent.
-It rejects every other parent before any GitHub mutation, along with malformed tree state, an exact milestone or `Milestone: TITLE` collision, and duplicate or invalid work-unit leaves.
+It rejects every other parent before any GitHub mutation, along with malformed tree state, a `Milestone: TITLE` collision, and duplicate or invalid work-unit leaves.
+When a native GitHub Milestone with exactly that title already exists and no `Milestone: TITLE` issue does (the `W041` state), the command adopts it instead of creating a second one, and the `W041` repair route names that invocation.
 A successful preflight fixes this effect order:
 
-1. Create the GitHub Milestone.
+1. Create the GitHub Milestone, skipped when adopting an existing one.
 2. Create `Milestone: TITLE`, attach it beneath `PARENT`, and assign the milestone.
 3. In CLI order, attach each parentless supplied work unit or replace the parent of each parented unit, then assign the milestone.
 
