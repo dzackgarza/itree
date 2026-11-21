@@ -17,6 +17,7 @@ import re
 
 import networkx as nx
 
+from .audit import _finding
 from .models import AuditFindingWitness, Finding, IssueRef, RepoDag, TreeNode
 from .readiness import ReadinessState, compute_readiness
 
@@ -40,16 +41,16 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode]) -> list[Findin
     blocker chain links them in either direction and X precedes Y in preorder
     or Y is not ready.
     """
-    from .validate import DIAGNOSTIC_CATALOG
-
     blockers: nx.DiGraph[int] = nx.DiGraph()
     for issue, blocked_by in dag.dependencies.items():
         blockers.add_edges_from((issue, blocker) for blocker in blocked_by)
 
-    def linked(a: int, b: int) -> bool:
-        return blockers.has_node(a) and blockers.has_node(b) and (nx.has_path(blockers, a, b) or nx.has_path(blockers, b, a))
-
     paths = {unit.issue.number: named_paths(unit.issue.body) for unit in work_units}
+    blockers.add_nodes_from(paths)
+
+    def linked(a: int, b: int) -> bool:
+        return nx.has_path(blockers, a, b) or nx.has_path(blockers, b, a)
+
     position = {unit.issue.number: index for index, unit in enumerate(work_units)}
     evidence: list[str] = []
     witnesses: list[AuditFindingWitness] = []
@@ -74,15 +75,4 @@ def redo_risk_questions(dag: RepoDag, work_units: list[TreeNode]) -> list[Findin
             )
     if not evidence:
         return []
-    details = DIAGNOSTIC_CATALOG["Q006"]
-    return [
-        Finding(
-            code="Q006",
-            severity=details["severity"],
-            title=details["title"],
-            evidence=evidence,
-            meaning=details["meaning"],
-            remediation=details["remediation"],
-            witnesses=tuple(witnesses),
-        )
-    ]
+    return [_finding("Q006", evidence, witnesses=tuple(witnesses))]
