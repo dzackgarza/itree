@@ -419,7 +419,7 @@ def new(
         try:
             dag = build_dag(repo_ref)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(3)
         print_placement_menu(repo_ref.slug, title, dag.materialize_root(root_num))
         sys.exit(1)
@@ -550,6 +550,9 @@ def absorb(
         $ itree absorb --into owner/repo#14 --title "Small fix" --body "..."
         $ itree absorb --into owner/repo#14 --title "Small fix" --from owner/repo#17 --body "..."
     """
+    if source is not None and origin is not None:
+        print("Error: --from records the origin of not-yet-filed content; omit it when absorbing SOURCE")
+        sys.exit(1)
     target_ref = parse_ref(into)
     api = GithubApi.from_issue_ref(target_ref)
     try:
@@ -593,7 +596,7 @@ def absorb(
                 api.remove_subissue(parent_number, source_issue.id)
             api.close_issue(source_ref.number, reason=IssueCloseReason.duplicate)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(3)
         print(f"Absorbed {source_ref.slug} -> {target_ref.slug}")
     else:
@@ -612,7 +615,7 @@ def absorb(
         try:
             api.update_issue_body(target_ref.number, (target_issue.body or "") + section)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(3)
         print(f"Absorbed new content -> {target_ref.slug}")
     print(f"Next: itree doctor {target_ref.repo_ref.slug}")
