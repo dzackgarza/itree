@@ -62,7 +62,11 @@ if path.endswith("/sub_issues"):
     sys.stdout.write(scenario["sub_issues"])
     sys.exit(0)
 if path.endswith("/branches"):
-    sys.stdout.write("[]")
+    sys.stdout.write(json.dumps(scenario.get("branches", [])))
+    sys.exit(0)
+if "/git/trees/" in path:
+    request = next(a for a in args if a.startswith("repos/")).split("/git/trees/", 1)[1]
+    sys.stdout.write(json.dumps(scenario["trees"][request]))
     sys.exit(0)
 number = path.rsplit("/", 1)[-1]
 issue = dict(scenario["issues"][number])
@@ -122,17 +126,19 @@ def _issue(number: int, title: str, *, body: str = "") -> dict:
     }
 
 
-def _graph_node(number: int, title: str, children: list[int]) -> dict:
+def _graph_node(
+    number: int, title: str, children: list[int], *, body: str = "", labels: tuple[str, ...] = ()
+) -> dict:
     return {
         "number": number,
         "databaseId": 10_000 + number,
         "title": title,
         "state": "OPEN",
         "stateReason": None,
-        "body": "",
+        "body": body,
         "url": f"https://github.com/{SLUG}/issues/{number}",
         "milestone": None,
-        "labels": {"nodes": []},
+        "labels": {"nodes": [{"name": label} for label in labels]},
         "subIssues": {
             "totalCount": len(children),
             "nodes": [{"number": child, "repository": {"nameWithOwner": SLUG}} for child in children],
@@ -266,6 +272,49 @@ class TestSlurpFreePagination:
         assert "Root ledger:\n  #1 Ledger: testowner/testrepo" in result.stdout
         assert "Next work unit: #2 Work unit" in result.stdout
         assert result.stderr == ""
+
+
+def _blob(path: str) -> dict:
+    return {"path": path, "type": "blob", "sha": f"blob-{path}"}
+
+
+def _subtree(path: str, sha: str) -> dict:
+    return {"path": path, "type": "tree", "sha": sha}
+
+
+class TestTruncatedTree:
+    def test_doctor_reads_a_truncated_tree_one_subtree_at_a_time(self, tmp_path: Path) -> None:
+        """GitHub truncates large recursive trees; doctor must still read every file (#79).
+
+        The recursive read of HEAD is truncated and omits src/pkg/parser.py.
+        That file is visible only through a read of the src subtree, and the
+        src/pkg subtree is itself truncated, so the walk must descend twice.
+        """
+        gh = GhBoundary(tmp_path)
+        gh.configure(
+            {
+                "branches": [{"name": "main"}],
+                "trees": {
+                    "HEAD?recursive=1": {"truncated": True, "tree": [_blob("README.md"), _subtree("src", "t-src")]},
+                    "HEAD": {"truncated": False, "tree": [_blob("README.md"), _subtree("src", "t-src")]},
+                    "t-src?recursive=1": {"truncated": True, "tree": [_subtree("pkg", "t-pkg")]},
+                    "t-src": {"truncated": False, "tree": [_subtree("pkg", "t-pkg")]},
+                    "t-pkg?recursive=1": {"truncated": False, "tree": [_blob("parser.py")]},
+                },
+                "graphql": _graph_document(
+                    [
+                        _graph_node(1, f"Ledger: {SLUG}", [3, 2]),
+                        _graph_node(2, "Rewrite the parser", [], body="Replace src/pkg/parser.py.", labels=("size:l",)),
+                        _graph_node(3, "Fix one parser rule", [], body="Edit pkg/parser.py.", labels=("size:xs",)),
+                    ]
+                ),
+            }
+        )
+
+        result = gh.run("doctor", SLUG)
+
+        assert result.returncode == 1, result.stderr
+        assert "large unit #2 can be preceded by work on the files it names: #3 (src/pkg/parser.py)" in result.stdout
 
 
 class TestFailureReporting:
