@@ -42,6 +42,7 @@ class FixtureState(BaseModel):
     content_shape_gh: Path
     malformed_issue_gh: Path
     governing_shape_gh: Path
+    base64_error_gh: Path
     trace_gh: Path
     large_text_size: int
     pull_number: int
@@ -1110,3 +1111,50 @@ def test_non_commit_tag_targets_are_typed_unsupported(
         assert unresolved.count("reason=unsupported_kind") == 1
         assert "AssertionError" not in selected_package.stderr
         assert "resolved_commit_sha" not in unresolved
+
+
+def test_malformed_governing_base64_exits_three(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "malformed-governing-base64",
+        "T028-malformed-governing-base64",
+        path_gh=fixture_state.base64_error_gh,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "Work package read failure" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+def test_missing_full_sha_commit_is_not_found_and_noncommit_is_unsupported(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    url = fixture_state.source_urls["missing_commit"]
+    _set_citation_body(
+        fixture_state,
+        f"{url}\n{fixture_state.source_urls['lightweight_tree']}\n{fixture_state.source_urls['annotated_tree']}\n",
+    )
+    result = invoke_work(
+        fixture_state,
+        fixture_state.citation_edge,
+        "module",
+        tmp_path / "missing-full-sha",
+        "T029-missing-full-sha",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        _source_section(result.stdout, url, present=False).count("reason=not_found")
+        == 1
+    )
+    for key in ("lightweight_tree", "annotated_tree"):
+        section = _source_section(
+            result.stdout, fixture_state.source_urls[key], present=False
+        )
+        assert section.count("reason=unsupported_kind") == 1
+        assert "resolved_commit_sha" not in section

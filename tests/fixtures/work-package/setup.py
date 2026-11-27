@@ -27,6 +27,10 @@ def run(
         command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
     )
     elapsed = time.perf_counter() - started
+    print(
+        f"FIXTURE-STEP seconds={elapsed:.6f} exit={result.returncode} command={json.dumps(command)}",
+        flush=True,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"command failed after {elapsed:.3f}s: {command!r}\nstdout={result.stdout}\nstderr={result.stderr}"
@@ -75,6 +79,38 @@ def issue_id(slug: str, number: int) -> int:
     return int(
         run(["gh", "api", f"repos/{slug}/issues/{number}", "--jq", ".id"]).stdout
     )
+
+
+def add_ordered_comments(
+    slug: str, number: int, bodies: list[str]
+) -> tuple[list[str], list[int]]:
+    subject_id = run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            slug,
+            "--json",
+            "id",
+            "--jq",
+            ".id",
+        ]
+    ).stdout.strip()
+    fields = [
+        f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId url body}}}}}}"
+        for index, body in enumerate(bodies)
+    ]
+    query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
+    response = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout)
+    assert "errors" not in response and isinstance(response.get("data"), dict), response
+    ids: list[int] = []
+    for index, expected_body in enumerate(bodies):
+        comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
+        assert comment_node["body"] == expected_body, (index, comment_node)
+        ids.append(int(comment_node["databaseId"]))
+    return bodies, ids
 
 
 def attach(slug: str, parent: int, child: int, root: Path) -> None:
@@ -162,7 +198,7 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", "docs/primary.md"], cwd=checkout)
     run(["git", "commit", "-m", "Change the unpinned source"], cwd=checkout)
-    run(["git", "push"], cwd=checkout)
+
     run(
         [
             "git",
@@ -187,7 +223,7 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", ".gitmodules", "vendor/submodule"], cwd=checkout)
     run(["git", "commit", "-m", "Add a real submodule content case"], cwd=checkout)
-    run(["git", "push"], cwd=checkout)
+
     head = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
     run(["git", "checkout", "-b", "feature/work-package"], cwd=checkout)
     run(
@@ -200,34 +236,15 @@ def create(root: Path, output: Path) -> None:
         ],
         cwd=checkout,
     )
-    run(["git", "push", "-u", "origin", "feature/work-package"], cwd=checkout)
+
     run(["git", "tag", "work-package-v1"], cwd=checkout)
-    run(["git", "push", "origin", "work-package-v1"], cwd=checkout)
+
     run(["git", "checkout", "main"], cwd=checkout)
     run(["git", "branch", "shared/work-package-ref"], cwd=checkout)
     run(["git", "tag", "shared/work-package-ref"], cwd=checkout)
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/heads/shared/work-package-ref",
-            "refs/tags/shared/work-package-ref",
-        ],
-        cwd=checkout,
-    )
+
     run(["git", "branch", "ambiguous/work-package-ref", pinned], cwd=checkout)
     run(["git", "tag", "ambiguous/work-package-ref", "HEAD"], cwd=checkout)
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/heads/ambiguous/work-package-ref",
-            "refs/tags/ambiguous/work-package-ref",
-        ],
-        cwd=checkout,
-    )
 
     run(["git", "branch", "shared/annotated-work-package-ref"], cwd=checkout)
     run(
@@ -241,16 +258,7 @@ def create(root: Path, output: Path) -> None:
         ],
         cwd=checkout,
     )
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/heads/shared/annotated-work-package-ref",
-            "refs/tags/shared/annotated-work-package-ref",
-        ],
-        cwd=checkout,
-    )
+
     run(["git", "branch", "ambiguous/annotated-work-package-ref", pinned], cwd=checkout)
     run(
         [
@@ -261,16 +269,6 @@ def create(root: Path, output: Path) -> None:
             "HEAD",
             "-m",
             "Different commit annotated tag",
-        ],
-        cwd=checkout,
-    )
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/heads/ambiguous/annotated-work-package-ref",
-            "refs/tags/ambiguous/annotated-work-package-ref",
         ],
         cwd=checkout,
     )
@@ -289,16 +287,6 @@ def create(root: Path, output: Path) -> None:
         ],
         cwd=checkout,
     )
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/tags/lightweight-tree-tag",
-            "refs/tags/annotated-tree-tag",
-        ],
-        cwd=checkout,
-    )
 
     run(["git", "checkout", "-b", "pull-request-source"], cwd=checkout)
     checkout.joinpath("docs/pull-request.md").write_text(
@@ -306,7 +294,16 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", "docs/pull-request.md"], cwd=checkout)
     run(["git", "commit", "-m", "Create a real pull request"], cwd=checkout)
-    run(["git", "push", "-u", "origin", "pull-request-source"], cwd=checkout)
+    run(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/*:refs/heads/*",
+            "refs/tags/*:refs/tags/*",
+        ],
+        cwd=checkout,
+    )
     pull_url = run(
         [
             "gh",
@@ -370,7 +367,7 @@ def create(root: Path, output: Path) -> None:
     plain_url = (
         f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/pyproject.toml"
     )
-    html_url = "https://docs.github.com/en/rest/issues/comments"
+    html_url = "https://httpbin.org/html"
     external_text: dict[str, str] = {}
     for name, url in (
         ("markdown", markdown_url),
@@ -414,6 +411,7 @@ def create(root: Path, output: Path) -> None:
         "ambiguous": f"https://github.com/{slug}/blob/ambiguous/work-package-ref/docs/primary.md",
         "unknown": f"https://github.com/{slug}/blob/unknown/work-package-ref/docs/primary.md",
         "not_found": f"https://github.com/{slug}/blob/{pinned}/docs/does-not-exist.md",
+        "missing_commit": f"https://github.com/{slug}/blob/{'0' * 40}/docs/primary.md",
         "binary_blob": f"https://github.com/{slug}/blob/{pinned}/docs/binary.dat",
         "invalid_blob": f"https://github.com/{slug}/blob/{pinned}/docs/invalid.txt",
         "large_text": f"https://github.com/{slug}/blob/{head}/docs/large.md",
@@ -454,6 +452,7 @@ def create(root: Path, output: Path) -> None:
         f"Ambiguous different commit: {source_urls['ambiguous']}",
         f"Unknown ref: {source_urls['unknown']}",
         f"Missing file: {source_urls['not_found']}",
+        f"Missing full-SHA commit: {source_urls['missing_commit']}",
         f"Binary blob: {source_urls['binary_blob']}",
         f"Invalid blob: {source_urls['invalid_blob']}",
         f"Large encoding-none text: {source_urls['large_text']}",
@@ -479,13 +478,11 @@ def create(root: Path, output: Path) -> None:
     pagination = issue(
         slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
     )
-    pagination_comments: list[str] = []
-    pagination_ids: list[int] = []
-    for index in range(101):
-        body = f"COMMENT-{index:03d}-BODY-EXACT\n"
-        identifier, _ = comment(slug, pagination, body)
-        pagination_comments.append(body)
-        pagination_ids.append(identifier)
+    pagination_comments, pagination_ids = add_ordered_comments(
+        slug,
+        pagination,
+        [f"COMMENT-{index:03d}-BODY-EXACT\n" for index in range(101)],
+    )
     comment(slug, selected, f"Bare sibling reference: #{pagination}\n")
 
     malformed_bodies = {
@@ -602,6 +599,16 @@ def create(root: Path, output: Path) -> None:
         encoding="utf-8",
     )
     governing_shape_gh.chmod(0o755)
+    base64_error_gh = root / "base64-error-gh.py"
+    base64_error_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        "if any('/contents/AGENTS.md' in argument for argument in sys.argv):\n"
+        '    print(\'{"type": "file", "path": "AGENTS.md", "encoding": "base64", "content": "%%%not-base64%%%", "sha": "0000000000000000000000000000000000000000"}\')\n'
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    base64_error_gh.chmod(0o755)
     trace_gh = root / "trace-gh.py"
     trace_gh.write_text(
         "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"
@@ -637,6 +644,7 @@ def create(root: Path, output: Path) -> None:
         "content_shape_gh": str(content_shape_gh),
         "malformed_issue_gh": str(malformed_issue_gh),
         "governing_shape_gh": str(governing_shape_gh),
+        "base64_error_gh": str(base64_error_gh),
         "trace_gh": str(trace_gh),
         "large_text_size": len(large_text.encode("utf-8")),
         "pull_number": pull_number,
