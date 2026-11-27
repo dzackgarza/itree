@@ -3,29 +3,30 @@ from __future__ import annotations
 import base64
 import http.client
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from enum import StrEnum
 from typing import Annotated, Literal, NoReturn, TypeVar
 
 from markdown_it import MarkdownIt
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .github import GitRefLookupError, GithubApi, GithubApiError
+from .github import GithubApi, GithubApiError, GitRefLookupError
 from .models import (
     CanonicalSourceUrl,
     CommitSha,
-    GitRefResolution,
     GithubContentFile,
     GithubIssue,
     GithubNonFileContent,
+    GitRefResolution,
     IssueComment,
-    MissingGithubContent,
     IssueRef,
+    MissingGithubContent,
     RepoRef,
 )
 
@@ -562,7 +563,13 @@ def _resolve_github_issue(
     comment_id: int | None,
     sub_anchor: str | None,
     loaded: dict[WorkContentIdentity, LoadedGithubContent],
+    load_lock: threading.Lock | None = None,
 ) -> SourceDisposition:
+    if load_lock is not None:
+        with load_lock:
+            return _resolve_github_issue(
+                api, citation, number, comment_id, sub_anchor, loaded
+            )
     key = WorkContentIdentity(
         kind="issue_comment" if comment_id is not None else "issue",
         issue_ref=IssueRef(repo_ref=api.repo_ref, number=number),
@@ -639,7 +646,7 @@ def _resolve_github_blob(
         return _unresolved(citation, _github_source_error(error))
     if isinstance(document, MissingGithubContent):
         return _unresolved(citation, "not_found")
-    if isinstance(document, tuple) or isinstance(document, GithubNonFileContent):
+    if isinstance(document, (tuple, GithubNonFileContent)):
         return _unresolved(citation, "unsupported_kind")
     content_or_reason = _decode_repository_file(api, document)
     if content_or_reason == "binary":
@@ -713,6 +720,7 @@ def _resolve_citation(
     api: GithubApi,
     citation: Citation,
     loaded: dict[WorkContentIdentity, LoadedGithubContent] | None = None,
+    issue_load_lock: threading.Lock | None = None,
 ) -> SourceDisposition:
     if str(citation.canonical_url).startswith("#"):
         return _unresolved(citation, "bare_reference")
@@ -745,6 +753,7 @@ def _resolve_citation(
             comment_id,
             sub_anchor,
             {} if loaded is None else loaded,
+            issue_load_lock,
         )
     if len(segments) >= 5 and segments[2] == "blob":
         return _resolve_github_blob(api, citation, segments)
@@ -755,9 +764,10 @@ def resolve_citation(
     api: GithubApi,
     citation: Citation,
     loaded: dict[WorkContentIdentity, LoadedGithubContent] | None = None,
+    issue_load_lock: threading.Lock | None = None,
 ) -> SourceDisposition:
     try:
-        return _resolve_citation(api, citation, loaded)
+        return _resolve_citation(api, citation, loaded, issue_load_lock)
     except GitRefLookupError as error:
         return _unresolved(citation, error.reason)
     except GithubApiError as error:
@@ -955,18 +965,15 @@ def _content_failure(failure: WorkPackageContentFailure) -> NoReturn:
 
 def _load_governing_documents(api: GithubApi) -> tuple[GoverningDocument, ...]:
     resolution = api.resolve_default_branch()
-    documents: list[GoverningDocument] = []
-    for role in GoverningDocumentRole:
+
+    def load(role: GoverningDocumentRole) -> GoverningDocument:
         path = role.value
         result = api.get_repository_content(path, resolution.resolved_commit_sha)
         if isinstance(result, MissingGithubContent):
-            documents.append(
-                AbsentGoverningDocument(
-                    role=role, path=path, absence_reason="not_found"
-                )
+            return AbsentGoverningDocument(
+                role=role, path=path, absence_reason="not_found"
             )
-            continue
-        if isinstance(result, tuple) or isinstance(result, GithubNonFileContent):
+        if isinstance(result, (tuple, GithubNonFileContent)):
             raise RuntimeError(
                 f"governing document {path} resolved to a non-file response"
             )
@@ -980,27 +987,28 @@ def _load_governing_documents(api: GithubApi) -> tuple[GoverningDocument, ...]:
             raise RuntimeError(
                 f"governing document {path} could not be read as UTF-8 text: {content_or_reason}"
             )
-        documents.append(
-            PresentGoverningDocument(
-                role=role,
-                path=path,
-                resolved_commit_sha=resolution.resolved_commit_sha,
-                content=content_or_reason,
-            )
+        return PresentGoverningDocument(
+            role=role,
+            path=path,
+            resolved_commit_sha=resolution.resolved_commit_sha,
+            content=content_or_reason,
         )
-    return tuple(documents)
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        return tuple(executor.map(load, GoverningDocumentRole))
 
 
 def load_work_package(issue_ref: IssueRef) -> WorkPackage:
     api = GithubApi.from_issue_ref(issue_ref)
-    selected_issue = _required_read(
-        issue_ref, "read selected issue", lambda: api.get_issue(issue_ref.number)
-    )
-    comments = _required_read(
-        issue_ref,
-        "read selected issue comments",
-        lambda: api.list_comments(issue_ref.number),
-    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        selected_read = executor.submit(api.get_issue, issue_ref.number)
+        comments_read = executor.submit(api.list_comments, issue_ref.number)
+        selected_issue = _required_read(
+            issue_ref, "read selected issue", selected_read.result
+        )
+        comments = _required_read(
+            issue_ref, "read selected issue comments", comments_read.result
+        )
     layout = parse_issue_layout(selected_issue.body or "")
     readable = ReadableWorkPackage(
         issue_ref=issue_ref,
@@ -1043,16 +1051,19 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
                 )
             )
         parent_api = GithubApi.from_issue_ref(parent)
-        parent_issue = _required_read(
-            issue_ref,
-            f"read ancestor {parent.slug}",
-            lambda: parent_api.get_issue(parent.number),
-        )
-        parent_comments = _required_read(
-            issue_ref,
-            f"read ancestor comments {parent.slug}",
-            lambda: parent_api.list_comments(parent.number),
-        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            parent_issue_read = executor.submit(parent_api.get_issue, parent.number)
+            parent_comments_read = executor.submit(
+                parent_api.list_comments, parent.number
+            )
+            parent_issue = _required_read(
+                issue_ref, f"read ancestor {parent.slug}", parent_issue_read.result
+            )
+            parent_comments = _required_read(
+                issue_ref,
+                f"read ancestor comments {parent.slug}",
+                parent_comments_read.result,
+            )
         ancestors.append(
             GoverningAncestor(
                 issue_ref=parent, issue=parent_issue, comments=parent_comments
@@ -1089,10 +1100,14 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
                     issue_comment_id=comment.id,
                 )
             ] = LoadedIssueCommentContent(comment=comment)
+    issue_load_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=16) as executor:
         dispositions = tuple(
             executor.map(
-                lambda citation: resolve_citation(api, citation, loaded), citations
+                lambda citation: resolve_citation(
+                    api, citation, loaded, issue_load_lock
+                ),
+                citations,
             )
         )
     return WorkPackage(

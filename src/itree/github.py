@@ -4,6 +4,7 @@ import base64
 import json
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -45,21 +46,21 @@ def _integer(value: JsonValue, context: str) -> int:
 
 from .models import (
     CommitSha,
-    GitRefIdentity,
-    GitRefKind,
-    GitRefResolution,
     GithubBlob,
+    GithubCommit,
     GithubContentFile,
     GithubContentItem,
-    GithubCommit,
     GithubContentObject,
-    GithubNonFileContent,
     GithubIndeterminateOperation,
     GithubIssue,
     GithubMilestone,
+    GithubNonFileContent,
     GithubRefMatch,
-    GithubRepository,
     GithubRejectedOperation,
+    GithubRepository,
+    GitRefIdentity,
+    GitRefKind,
+    GitRefResolution,
     IssueCloseReason,
     IssueComment,
     IssueRef,
@@ -71,7 +72,6 @@ from .models import (
     RoutedOwnerResolution,
     RoutedOwnerState,
 )
-
 
 REPO_GRAPH_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
@@ -386,6 +386,7 @@ class GithubApi(BaseModel):
         default_factory=dict
     )
     _commit_objects: dict[str, CommitSha] = PrivateAttr(default_factory=dict)
+    _object_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     @classmethod
     def from_repo_ref(cls, ref: RepoRef) -> GithubApi:
@@ -754,22 +755,26 @@ class GithubApi(BaseModel):
         cached = self._commit_objects.get(sha)
         if cached is not None:
             return cached
-        endpoint = f"repos/{self.owner}/{self.repo}/git/commits/{sha}"
-        try:
-            proc = self._exec("GET", endpoint)
-        except GithubApiError as error:
-            if error.status == 404:
-                raise GitRefLookupError(
-                    "not_found", requested_ref, repository_path
-                ) from error
-            if error.status == 422:
-                raise GitRefLookupError(
-                    "unsupported_kind", requested_ref, repository_path
-                ) from error
-            raise
-        commit = GithubCommit.model_validate_json(proc.stdout)
-        self._commit_objects[sha] = commit.sha
-        return commit.sha
+        with self._object_lock:
+            cached = self._commit_objects.get(sha)
+            if cached is not None:
+                return cached
+            endpoint = f"repos/{self.owner}/{self.repo}/git/commits/{sha}"
+            try:
+                proc = self._exec("GET", endpoint)
+            except GithubApiError as error:
+                if error.status == 404:
+                    raise GitRefLookupError(
+                        "not_found", requested_ref, repository_path
+                    ) from error
+                if error.status == 422:
+                    raise GitRefLookupError(
+                        "unsupported_kind", requested_ref, repository_path
+                    ) from error
+                raise
+            commit = GithubCommit.model_validate_json(proc.stdout)
+            self._commit_objects[sha] = commit.sha
+            return commit.sha
 
     def _dereference_annotated_tag(
         self, sha: str, requested_ref: str, repository_path: str
@@ -809,26 +814,33 @@ class GithubApi(BaseModel):
         cached = self._ref_matches.get(kind)
         if cached is not None:
             return cached
-        prefix = "heads" if kind == GitRefKind.branch else "tags"
-        path = f"repos/{self.owner}/{self.repo}/git/matching-refs/{prefix}/"
-        proc = self._run_api_command(
-            ["gh", "api", "--paginate", path], path, timeout=30
-        )
-        matches: list[GithubRefMatch] = []
-        for page in _rest_pages(proc.stdout):
-            for item in page:
-                name = _string(item["ref"], "Git ref name")
-                target = _object(item["object"], "Git ref target")
-                sha = _string(target["sha"], "Git ref target SHA")
-                target_type = _string(target["type"], "Git ref target type")
-                matches.append(
-                    GithubRefMatch(
-                        name=name, kind=kind, object_sha=sha, target_type=target_type
+        with self._object_lock:
+            cached = self._ref_matches.get(kind)
+            if cached is not None:
+                return cached
+            prefix = "heads" if kind == GitRefKind.branch else "tags"
+            path = f"repos/{self.owner}/{self.repo}/git/matching-refs/{prefix}/"
+            proc = self._run_api_command(
+                ["gh", "api", "--paginate", path], path, timeout=30
+            )
+            matches: list[GithubRefMatch] = []
+            for page in _rest_pages(proc.stdout):
+                for item in page:
+                    name = _string(item["ref"], "Git ref name")
+                    target = _object(item["object"], "Git ref target")
+                    sha = _string(target["sha"], "Git ref target SHA")
+                    target_type = _string(target["type"], "Git ref target type")
+                    matches.append(
+                        GithubRefMatch(
+                            name=name,
+                            kind=kind,
+                            object_sha=sha,
+                            target_type=target_type,
+                        )
                     )
-                )
-        resolved = tuple(matches)
-        self._ref_matches[kind] = resolved
-        return resolved
+            resolved = tuple(matches)
+            self._ref_matches[kind] = resolved
+            return resolved
 
     def resolve_default_branch(self) -> GitRefResolution:
         repository = self.get_repository()

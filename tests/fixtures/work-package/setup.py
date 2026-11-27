@@ -118,6 +118,88 @@ class FamilyRecord(BaseModel):
     written_at: float
 
 
+def comments(
+    slug: str, number: int, bodies: list[str], root: Path
+) -> list[tuple[int, str]]:
+    _, identifiers = add_ordered_comments(slug, number, bodies, root)
+    return [
+        (
+            identifier,
+            f"https://github.com/{slug}/issues/{number}#issuecomment-{identifier}",
+        )
+        for identifier in identifiers
+    ]
+
+
+def add_comment_tail(
+    slug: str, root: Path, specifications: list[tuple[int, str]]
+) -> None:
+    assert specifications
+    completed = _completed(root)
+    operation_prefix = "addComment:fixture-tail-v1"
+    family_records = [
+        record for key, record in completed.items() if key.startswith(operation_prefix)
+    ]
+    missing: list[tuple[str, int, str]] = []
+    for index, (number, body) in enumerate(specifications):
+        label = f"{number}:{index}"
+        live = _matching_live_comment(slug, number, body, root)
+        saved_versions = [
+            objects[label]
+            for record in family_records
+            if label in (objects := _objects(record))
+        ]
+        if live is None and saved_versions:
+            raise FixtureRecoveryError(
+                f"journaled tail comment is absent from the live family: {label}"
+            )
+        if live is not None and any(
+            saved["id"] != live["id"] or saved["databaseId"] != live["databaseId"]
+            for saved in saved_versions
+        ):
+            raise FixtureRecoveryError(
+                f"journaled tail comment identity changed: {label}"
+            )
+        if live is None:
+            missing.append((label, number, body))
+    batch_serial = len(family_records)
+    for offset in range(0, len(missing), 8):
+        batch = missing[offset : offset + 8]
+        operation_id = f"{operation_prefix}-{batch_serial:03d}"
+        assert operation_id not in completed
+        batch_serial += 1
+        fields = [
+            f"c{index:03d}:addComment(input:{{subjectId:{json.dumps(str(_live_issue(slug, number, root)['id']))},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId id url body}}}}}}"
+            for index, (_label, number, body) in enumerate(batch)
+        ]
+        query = "mutation WorkPackageCommentTail {" + " ".join(fields) + "}"
+        assert len(fields) * 3 <= 500_000
+        assert len(query.encode("utf-8")) < 120_000
+        started = time.perf_counter()
+        response = _json_object(
+            run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
+        )
+        elapsed = time.perf_counter() - started
+        created = _record_family_response(
+            root,
+            "addComment",
+            operation_id,
+            response,
+            {
+                f"c{index:03d}": label
+                for index, (label, _number, _body) in enumerate(batch)
+            },
+            {
+                f"c{index:03d}": body
+                for index, (_label, _number, body) in enumerate(batch)
+            },
+            elapsed,
+        )
+        for (_label, number, body), record in zip(batch, created.values(), strict=True):
+            assert record["body"] == body
+            _live_comments(slug, number, root).append(record)
+
+
 class FixtureRecoveryError(RuntimeError):
     pass
 
@@ -211,6 +293,43 @@ def _json_objects(raw: str) -> list[JsonObject]:
 
 def _json_object(raw: str) -> JsonObject:
     return TypeAdapter(JsonObject).validate_python(json.loads(raw))
+
+
+def _record_family_response(
+    root: Path,
+    family: Literal["createIssue", "addComment"],
+    operation_id: str,
+    response: JsonObject,
+    aliases: dict[str, str],
+    expected_bodies: dict[str, str],
+    api_seconds: float,
+) -> dict[str, JsonObject]:
+    created: dict[str, JsonObject] = {}
+    data = response.get("data")
+    for alias, key in aliases.items():
+        if not isinstance(data, dict):
+            break
+        node = data.get(alias)
+        if not isinstance(node, dict):
+            continue
+        try:
+            result = _response_for_family(family, node)
+        except AssertionError, KeyError, TypeError:
+            continue
+        if result.get("body") != expected_bodies[alias]:
+            continue
+        identifier = result.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        created[key] = result
+    if created:
+        _remember(root, family, operation_id, created, api_seconds, last_pacing_seconds)
+    if len(created) != len(aliases) or response.get("errors"):
+        raise FixtureRecoveryError(
+            f"mutation {operation_id} returned failed or invalid aliases; "
+            f"valid native IDs were persisted before this error: {response}"
+        )
+    return created
 
 
 def _node_id(slug: str, number: int) -> str:
@@ -399,6 +518,81 @@ def ensure_issue_body(slug: str, number: int, body: str, root: Path) -> None:
     existing["body"] = body
 
 
+def create_issue_family(
+    slug: str, root: Path, specifications: list[tuple[str, str]]
+) -> None:
+    live = _live_issues(slug, root)
+    by_title = {str(record["title"]): record for record in live}
+    operation_id = "createIssue:fixture-family-v1"
+    completed = _completed(root)
+    family_records = [
+        completed[key]
+        for key in completed
+        if key == operation_id or key.startswith(f"{operation_id}-recovery-")
+    ]
+    for title, _body in specifications:
+        existing = by_title.get(title)
+        saved_versions = [
+            objects[title]
+            for record in family_records
+            if title in (objects := _objects(record))
+        ]
+        if existing is None and saved_versions:
+            raise FixtureRecoveryError(
+                f"journaled issue is absent from the live family: {title}"
+            )
+        if existing is not None and any(
+            saved["id"] != existing["id"] or saved["number"] != existing["number"]
+            for saved in saved_versions
+        ):
+            raise FixtureRecoveryError(
+                f"journaled issue family identity changed at {title}"
+            )
+    missing = [(title, body) for title, body in specifications if title not in by_title]
+    for title, body in specifications:
+        existing = by_title.get(title)
+        if (
+            existing is not None
+            and title
+            not in (
+                "Roadmap: Work package acceptance",
+                "Work package acceptance unit",
+            )
+            and existing["body"] != body
+        ):
+            raise FixtureRecoveryError(
+                f"immutable issue body differs for {title}: {existing['body']!r}"
+            )
+    if not missing:
+        return
+    if family_records:
+        operation_id = f"{operation_id}-recovery-{len(family_records)}"
+    assert operation_id not in completed
+    repository_id = _repository_id(slug)
+    fields = [
+        f"i{index:03d}:createIssue(input:{{repositoryId:{json.dumps(repository_id)},title:{json.dumps(title)},body:{json.dumps(body)}}}){{issue{{number id body title url}}}}"
+        for index, (title, body) in enumerate(missing)
+    ]
+    query = "mutation WorkPackageIssueFamily {" + " ".join(fields) + "}"
+    assert len(fields) * 2 <= 500_000
+    assert len(query.encode("utf-8")) < 120_000
+    started = time.perf_counter()
+    response = _json_object(
+        run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
+    )
+    elapsed = time.perf_counter() - started
+    created = _record_family_response(
+        root,
+        "createIssue",
+        operation_id,
+        response,
+        {f"i{index:03d}": title for index, (title, _body) in enumerate(missing)},
+        {f"i{index:03d}": body for index, (_title, body) in enumerate(missing)},
+        elapsed,
+    )
+    live.extend(created.values())
+
+
 def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
     operation_id = "createPullRequest:fixture-pull-request"
     started = time.perf_counter()
@@ -571,7 +765,7 @@ def comment(slug: str, number: int, body: str, root: Path) -> tuple[int, str]:
         slug,
         root,
         "addComment",
-        {"subjectId": _node_id(slug, number), "body": body},
+        {"subjectId": str(_live_issue(slug, number, root)["id"]), "body": body},
         operation_id,
         body,
     )
@@ -582,7 +776,8 @@ def comment(slug: str, number: int, body: str, root: Path) -> tuple[int, str]:
 def add_ordered_comments(
     slug: str, number: int, bodies: list[str], root: Path
 ) -> tuple[list[str], list[int]]:
-    subject_id = _node_id(slug, number)
+    assert bodies
+    subject_id = str(_live_issue(slug, number, root)["id"])
     records_by_index: dict[int, JsonObject] = {}
     completed = _completed(root)
     for index, body in enumerate(bodies):
@@ -615,48 +810,43 @@ def add_ordered_comments(
                 )
         if live is not None:
             records_by_index[index] = live
-    for offset in range(0, len(bodies), 5):
+    batch_size = min(10, len(bodies))
+    for offset in range(0, len(bodies), batch_size):
         missing = [
             index
-            for index in range(offset, min(offset + 5, len(bodies)))
+            for index in range(offset, min(offset + batch_size, len(bodies)))
             if index not in records_by_index
         ]
         if not missing:
             continue
         operation_id = f"addComment:{number}:batch-{offset:03d}"
-        if operation_id in completed:
-            raise FixtureRecoveryError(
-                f"journaled comment batch {operation_id} is incomplete; "
-                "reconcile all live pages and its native IDs before retrying"
-            )
+        recovery = 0
+        while operation_id in completed:
+            recovery += 1
+            operation_id = f"addComment:{number}:batch-{offset:03d}-recovery-{recovery}"
         fields = [
             f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(bodies[index])}}}){{commentEdge{{node{{databaseId id url body}}}}}}"
             for index in missing
         ]
         query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
+        assert len(fields) * 3 <= 500_000
+        assert len(query.encode("utf-8")) < 120_000
         started = time.perf_counter()
-        response = json.loads(
+        response = _json_object(
             run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
         )
         elapsed = time.perf_counter() - started
-        assert "errors" not in response and isinstance(response.get("data"), dict), (
-            response
-        )
-        created: dict[str, JsonObject] = {}
-        for index in missing:
-            comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
-            assert comment_node["body"] == bodies[index], (index, comment_node)
-            assert _number(comment_node["databaseId"]) > 0
-            created[str(index)] = comment_node
-            records_by_index[index] = comment_node
-        _remember(
+        created = _record_family_response(
             root,
             "addComment",
             operation_id,
-            created,
+            response,
+            {f"m{index:03d}": str(index) for index in missing},
+            {f"m{index:03d}": bodies[index] for index in missing},
             elapsed,
-            last_pacing_seconds,
         )
+        for raw_index, created_record in created.items():
+            records_by_index[int(raw_index)] = created_record
         _live_comments(slug, number, root).extend(created.values())
     ids = [
         _number(records_by_index[index]["databaseId"]) for index in range(len(bodies))
@@ -833,7 +1023,10 @@ def attach(slug: str, parent: int, child: int, root: Path) -> None:
         slug,
         root,
         "addSubIssue",
-        {"issueId": _node_id(slug, parent), "subIssueId": _node_id(slug, child)},
+        {
+            "issueId": str(_live_issue(slug, parent, root)["id"]),
+            "subIssueId": str(_live_issue(slug, child, root)["id"]),
+        },
         operation_id,
     )
     assert result["number"] == child, {
@@ -1124,6 +1317,43 @@ def complete_fixture_objects(
     run(["git", "checkout", "main"], cwd=checkout)
 
     roadmap_body = "ROADMAP-BODY-CONTRACT-EXACT\n"
+    selected_body = managed(
+        original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
+    )
+    malformed_bodies = {
+        "duplicate": managed()
+        + "<!-- itree:tasks:start -->\nDUPLICATE\n<!-- itree:tasks:end -->\n",
+        "nested": "<!-- itree:original-contract:start -->\n<!-- itree:requirements:start -->\nNESTED\n<!-- itree:original-contract:end -->\n<!-- itree:requirements:end -->\n<!-- itree:plan:start -->\nP\n<!-- itree:plan:end -->\n<!-- itree:tasks:start -->\nT\n<!-- itree:tasks:end -->\n",
+        "unknown": "<!-- itree:unknown:start -->\nUNKNOWN\n<!-- itree:unknown:end -->\n",
+        "partial": "<!-- itree:original-contract:start -->\nO\n<!-- itree:original-contract:end -->\n<!-- itree:requirements:start -->\nR\n<!-- itree:requirements:end -->\n",
+        "reordered": "<!-- itree:requirements:start -->\nR\n<!-- itree:requirements:end -->\n<!-- itree:original-contract:start -->\nO\n<!-- itree:original-contract:end -->\n<!-- itree:plan:start -->\nP\n<!-- itree:plan:end -->\n<!-- itree:tasks:start -->\nT\n<!-- itree:tasks:end -->\n",
+        "unterminated": "<!-- itree:original-contract:start -->\nUNTERMINATED\n",
+    }
+    fenced_body = "LEGACY-FENCED-BODY\n```text\n" + managed() + "```\n"
+    legacy_body = "LEGACY-ZERO-MARKER-BODY-EXACT\n"
+    cycle_a_body = "CYCLE-A-READABLE-BODY\n"
+    cycle_b_body = "CYCLE-B-READABLE-BODY\n"
+    specifications = [
+        ("Roadmap: Work package acceptance", roadmap_body),
+        ("Work package acceptance unit", selected_body),
+        ("Cited issue source", "CITED-ISSUE-BODY-EXACT\n"),
+        (
+            "Citation transport edges",
+            f"Shared source: https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md\n",
+        ),
+        ("Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n"),
+        *(
+            (f"Malformed {name}", f"MALFORMED-{name.upper()}-SELECTED-BODY\n" + body)
+            for name, body in malformed_bodies.items()
+        ),
+        ("Fence-shielded markers", fenced_body),
+        ("Legacy zero-marker body", legacy_body),
+        ("Cycle A", cycle_a_body),
+        ("Cycle B", cycle_b_body),
+    ]
+    create_issue_family(slug, root, specifications)
+    assert len(specifications) == 15
+
     roadmap = issue(
         slug,
         "Roadmap: Work package acceptance",
@@ -1131,15 +1361,17 @@ def complete_fixture_objects(
         root,
         self_referential=True,
     )
-    roadmap_comment_id, roadmap_comment_url = comment(
-        slug, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n", root
-    )
     recursive_url = f"https://github.com/{slug}/blob/{pinned}/docs/recursive.md"
-    comment(slug, roadmap, f"Ancestor-only citation: {recursive_url}\n", root)
-
-    selected_body = managed(
-        original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
+    (roadmap_comment_id, roadmap_comment_url), _ = comments(
+        slug,
+        roadmap,
+        [
+            "ROADMAP-COMMENT-DECISION-EXACT\n",
+            f"Ancestor-only citation: {recursive_url}\n",
+        ],
+        root,
     )
+
     selected = issue(
         slug,
         "Work package acceptance unit",
@@ -1154,16 +1386,16 @@ def complete_fixture_objects(
     ensure_issue_body(slug, selected, selected_body, root)
     ensure_issue_body(slug, roadmap, roadmap_body, root)
     attach(slug, roadmap, selected, root)
-    binding_id, binding_url = comment(
-        slug, selected, "BINDING-PRIOR-DECISION-EXACT\n", root
-    )
-    comment(
+    (binding_id, binding_url), _, _ = comments(
         slug,
         selected,
-        "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
+        [
+            "BINDING-PRIOR-DECISION-EXACT\n",
+            "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
+            "OPEN-VERIFICATION-FINDING-EXACT\n",
+        ],
         root,
     )
-    comment(slug, selected, "OPEN-VERIFICATION-FINDING-EXACT\n", root)
 
     cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
     cited_comment_id, cited_comment_url = comment(
@@ -1286,7 +1518,7 @@ def complete_fixture_objects(
         f"Lightweight tree tag: {source_urls['lightweight_tree']}",
         f"Annotated tree tag: {source_urls['annotated_tree']}",
     ]
-    comment(slug, selected, "\n\n".join(citation_lines) + "\n", root)
+    tail_comments = [(selected, "\n\n".join(citation_lines) + "\n")]
 
     pagination = issue(
         slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
@@ -1297,38 +1529,34 @@ def complete_fixture_objects(
         [f"COMMENT-{index:03d}-BODY-EXACT\n" for index in range(101)],
         root,
     )
-    comment(slug, selected, f"Bare sibling reference: #{pagination}\n", root)
+    tail_comments.append((selected, f"Bare sibling reference: #{pagination}\n"))
 
-    malformed_bodies = {
-        "duplicate": managed()
-        + "<!-- itree:tasks:start -->\nDUPLICATE\n<!-- itree:tasks:end -->\n",
-        "nested": "<!-- itree:original-contract:start -->\n<!-- itree:requirements:start -->\nNESTED\n<!-- itree:original-contract:end -->\n<!-- itree:requirements:end -->\n<!-- itree:plan:start -->\nP\n<!-- itree:plan:end -->\n<!-- itree:tasks:start -->\nT\n<!-- itree:tasks:end -->\n",
-        "unknown": "<!-- itree:unknown:start -->\nUNKNOWN\n<!-- itree:unknown:end -->\n",
-        "partial": "<!-- itree:original-contract:start -->\nO\n<!-- itree:original-contract:end -->\n<!-- itree:requirements:start -->\nR\n<!-- itree:requirements:end -->\n",
-        "reordered": "<!-- itree:requirements:start -->\nR\n<!-- itree:requirements:end -->\n<!-- itree:original-contract:start -->\nO\n<!-- itree:original-contract:end -->\n<!-- itree:plan:start -->\nP\n<!-- itree:plan:end -->\n<!-- itree:tasks:start -->\nT\n<!-- itree:tasks:end -->\n",
-        "unterminated": "<!-- itree:original-contract:start -->\nUNTERMINATED\n",
-    }
     malformed: dict[str, int] = {}
     malformed_text: dict[str, str] = {}
     for name, body in malformed_bodies.items():
         distinctive = f"MALFORMED-{name.upper()}-SELECTED-BODY\n" + body
         malformed[name] = issue(slug, f"Malformed {name}", distinctive, root)
         malformed_text[name] = distinctive
-        comment(slug, malformed[name], f"MALFORMED-{name.upper()}-COMMENT\n", root)
+        tail_comments.append((malformed[name], f"MALFORMED-{name.upper()}-COMMENT\n"))
     fenced_body = "LEGACY-FENCED-BODY\n```text\n" + managed() + "```\n"
     fenced = issue(slug, "Fence-shielded markers", fenced_body, root)
-    comment(slug, fenced, "FENCED-COMMENT-EXACT\n", root)
+    tail_comments.append((fenced, "FENCED-COMMENT-EXACT\n"))
     legacy_body = "LEGACY-ZERO-MARKER-BODY-EXACT\n"
     legacy = issue(slug, "Legacy zero-marker body", legacy_body, root)
-    comment(slug, legacy, "LEGACY-COMMENT-EXACT\n", root)
+    tail_comments.append((legacy, "LEGACY-COMMENT-EXACT\n"))
 
     cycle_a_body = "CYCLE-A-READABLE-BODY\n"
     cycle_b_body = "CYCLE-B-READABLE-BODY\n"
     cycle_a = issue(slug, "Cycle A", cycle_a_body, root)
     cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
     attach(slug, cycle_b, cycle_a, root)
-    comment(slug, cycle_a, "CYCLE-A-READABLE-COMMENT\n", root)
-    comment(slug, cycle_b, "CYCLE-B-READABLE-COMMENT\n", root)
+    tail_comments.extend(
+        (
+            (cycle_a, "CYCLE-A-READABLE-COMMENT\n"),
+            (cycle_b, "CYCLE-B-READABLE-COMMENT\n"),
+        )
+    )
+    add_comment_tail(slug, root, tail_comments)
 
     real_gh = shutil.which("gh")
     assert real_gh is not None

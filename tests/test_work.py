@@ -9,10 +9,12 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
 import pytest
+
 from itree.models import FixtureState
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -379,27 +381,21 @@ def test_all_comment_pages_preserve_every_body_and_identifier_in_order(
 def test_managed_and_legacy_layout_indexing_preserves_body_bytes(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
-    managed = invoke_work(
-        fixture_state,
-        fixture_state.selected,
-        "module",
-        tmp_path / "managed",
-        "T005-managed",
-    )
-    legacy = invoke_work(
-        fixture_state,
-        fixture_state.legacy,
-        "module",
-        tmp_path / "legacy",
-        "T005-legacy",
-    )
-    fenced = invoke_work(
-        fixture_state,
-        fixture_state.fenced,
-        "module",
-        tmp_path / "fenced",
-        "T005-fenced",
-    )
+    def read_layout(job: tuple[int, str]) -> subprocess.CompletedProcess[str]:
+        number, name = job
+        return invoke_work(
+            fixture_state, number, "module", tmp_path / name, f"T005-{name}"
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        managed, legacy, fenced = executor.map(
+            read_layout,
+            (
+                (fixture_state.selected, "managed"),
+                (fixture_state.legacy, "legacy"),
+                (fixture_state.fenced, "fenced"),
+            ),
+        )
 
     for result, body in (
         (managed, fixture_state.selected_body),
@@ -545,16 +541,26 @@ def test_all_public_entry_points_emit_the_same_live_package(
         assert warmup.returncode == 0, (
             f"direct entry dependency setup failed\nstdout={warmup.stdout}\nstderr={warmup.stderr}"
         )
-    outputs: dict[EntryPoint, subprocess.CompletedProcess[str]] = {}
-    for candidate in ("installed", "module", "direct-cli", "direct-main"):
-        outputs[candidate] = invoke_work(
+    entries: tuple[EntryPoint, ...] = (
+        "installed",
+        "module",
+        "direct-cli",
+        "direct-main",
+    )
+
+    def invoke(candidate: EntryPoint) -> subprocess.CompletedProcess[str]:
+        return invoke_work(
             fixture_state,
             fixture_state.selected,
             candidate,
             tmp_path / f"parity-{candidate}",
             f"T010-parity-{candidate}",
         )
-        assert outputs[candidate].returncode == 0, outputs[candidate].stderr
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        outputs = dict(zip(entries, executor.map(invoke, entries), strict=True))
+    for candidate, result in outputs.items():
+        assert result.returncode == 0, result.stderr
 
     baseline = outputs["module"]
     for candidate, result in outputs.items():
@@ -1014,22 +1020,34 @@ def test_citation_transport_and_parse_failures_have_typed_outcomes(
 def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
-    for entry in ("installed", "module", "direct-cli", "direct-main"):
-        issue_before = _live_issue(fixture_state.repo, fixture_state.selected)
-        comments_before = _live_comments(fixture_state.repo, fixture_state.selected)
-        status_before = subprocess.check_output(
-            ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
-        )
-        trace = tmp_path / f"mutation-trace-{entry}.jsonl"
-        result = invoke_work(
+    entries: tuple[EntryPoint, ...] = (
+        "installed",
+        "module",
+        "direct-cli",
+        "direct-main",
+    )
+    issue_before = _live_issue(fixture_state.repo, fixture_state.selected)
+    comments_before = _live_comments(fixture_state.repo, fixture_state.selected)
+    status_before = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
+    )
+
+    def invoke(entry: EntryPoint) -> subprocess.CompletedProcess[str]:
+        return invoke_work(
             fixture_state,
             fixture_state.selected,
             entry,
             tmp_path / f"zero-mutation-{entry}",
             f"T021-zero-mutation-{entry}",
             path_gh=fixture_state.trace_gh,
-            trace_log=trace,
+            trace_log=tmp_path / f"mutation-trace-{entry}.jsonl",
         )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        outputs = dict(zip(entries, executor.map(invoke, entries), strict=True))
+    for entry in entries:
+        trace = tmp_path / f"mutation-trace-{entry}.jsonl"
+        result = outputs[entry]
 
         assert result.returncode == 0, result.stderr
         events = [
@@ -1063,17 +1081,14 @@ def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
             for argument in event["argv"]:
                 if argument.startswith("query("):
                     assert "mutation" not in argument.lower()
-        assert _live_issue(fixture_state.repo, fixture_state.selected) == issue_before
-        assert (
-            _live_comments(fixture_state.repo, fixture_state.selected)
-            == comments_before
+    assert _live_issue(fixture_state.repo, fixture_state.selected) == issue_before
+    assert _live_comments(fixture_state.repo, fixture_state.selected) == comments_before
+    assert (
+        subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
         )
-        assert (
-            subprocess.check_output(
-                ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
-            )
-            == status_before
-        )
+        == status_before
+    )
 
 
 def test_selected_and_ancestor_content_emits_once_with_all_citation_provenance(
