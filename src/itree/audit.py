@@ -171,13 +171,13 @@ def _unresolved_implementation_routes(
         ):
             walked_chains.append((origin, chain))
 
+    proper_suffixes = {
+        (other_origin, tuple(other_chain[start:]))
+        for other_origin, other_chain in walked_chains
+        for start in range(1, len(other_chain))
+    }
     for origin, chain in walked_chains:
-        if any(
-            other_origin == origin
-            and len(other_chain) > len(chain)
-            and other_chain[-len(chain) :] == chain
-            for other_origin, other_chain in walked_chains
-        ):
+        if (origin, tuple(chain)) in proper_suffixes:
             continue
         terminal = chain[-1]
         chain_text = _format_chain(chain)
