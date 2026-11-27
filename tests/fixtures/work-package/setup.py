@@ -15,15 +15,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-import sys
+from typing import Literal
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
     __package__ = "itree"
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+
 from itree.models import FixtureState
 
 PIN = "0e80c9679e6f6bfd55e13cbcf193d297c5207117"
@@ -32,6 +35,7 @@ type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
 last_mutation_at = 0.0
+last_pacing_seconds = 0.0
 
 
 def _is_mutation(command: list[str]) -> bool:
@@ -55,7 +59,7 @@ def _is_mutation(command: list[str]) -> bool:
 def run(
     command: list[str], *, cwd: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    global last_mutation_at
+    global last_mutation_at, last_pacing_seconds
     mutates = _is_mutation(command)
     pace_started = time.perf_counter()
     if mutates:
@@ -70,6 +74,7 @@ def run(
     elapsed = time.perf_counter() - started
     if mutates:
         last_mutation_at = time.perf_counter()
+        last_pacing_seconds = pace_seconds
     print(
         f"FIXTURE-STEP seconds={elapsed:.6f} pacing_seconds={pace_seconds:.6f} exit={result.returncode} command={json.dumps(command)}",
         flush=True,
@@ -81,10 +86,131 @@ def run(
     return result
 
 
+type Family = Literal[
+    "createIssue",
+    "createPullRequest",
+    "addComment",
+    "addSubIssue",
+    "readIssueCatalog",
+    "readCommentCatalog",
+    "readPullRequestCatalog",
+]
+type JsonObject = dict[str, JsonValue]
+
+
+class FamilyResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    objects: dict[str, JsonObject]
+
+
+class FamilyRecord(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    schema_version: Literal[1]
+    family: Family
+    operation_id: str = Field(min_length=1)
+    object_ids: dict[str, str]
+    object_count: int = Field(ge=0)
+    result: FamilyResult
+    api_seconds: float = Field(gt=0)
+    pacing_seconds: float = Field(ge=0)
+    written_at: float
+
+
+class FixtureRecoveryError(RuntimeError):
+    pass
+
+
 def _journal_path(root: Path) -> Path:
     if root.name != "acceptance":
         return root / "family-journal.jsonl"
     return root.parent.parent / f"{root.parent.name}-family-journal.jsonl"
+
+
+def _records(root: Path) -> list[FamilyRecord]:
+    path = _journal_path(root)
+    if not path.exists():
+        return []
+    try:
+        return [
+            FamilyRecord.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        ]
+    except ValueError as error:
+        raise FixtureRecoveryError(
+            f"recovery requires schema_version=1 native-ID request records in {path}; "
+            "the preserved legacy journal is not sufficient for no-duplicate resume"
+        ) from error
+
+
+def _completed(root: Path) -> dict[str, FamilyRecord]:
+    creations = [
+        record
+        for record in _records(root)
+        if record.family
+        in ("createIssue", "createPullRequest", "addComment", "addSubIssue")
+    ]
+    records: dict[str, FamilyRecord] = {}
+    for record in creations:
+        if record.operation_id in records:
+            raise FixtureRecoveryError(
+                f"duplicate completed operation id: {record.operation_id}"
+            )
+        records[record.operation_id] = record
+    return records
+
+
+def _remember(
+    root: Path,
+    family: Family,
+    operation_id: str,
+    objects: dict[str, JsonObject],
+    api_seconds: float,
+    pacing_seconds: float,
+) -> None:
+    object_ids: dict[str, str] = {}
+    for alias, result in objects.items():
+        identifier = result.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            raise FixtureRecoveryError(
+                f"operation {operation_id} has no native GraphQL id for {alias}: {result}"
+            )
+        object_ids[alias] = identifier
+    record = FamilyRecord(
+        schema_version=1,
+        family=family,
+        operation_id=operation_id,
+        object_ids=object_ids,
+        object_count=len(object_ids),
+        result=FamilyResult(objects=objects),
+        api_seconds=api_seconds,
+        pacing_seconds=pacing_seconds,
+        written_at=time.time(),
+    )
+    path = _journal_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as journal:
+        journal.write(
+            json.dumps(
+                record.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        )
+        journal.flush()
+        os.fsync(journal.fileno())
+
+
+def _objects(record: FamilyRecord) -> dict[str, JsonObject]:
+    return record.result.objects
+
+
+def _json_objects(raw: str) -> list[JsonObject]:
+    return TypeAdapter(list[JsonObject]).validate_python(json.loads(raw))
+
+
+def _json_object(raw: str) -> JsonObject:
+    return TypeAdapter(JsonObject).validate_python(json.loads(raw))
 
 
 def _node_id(slug: str, number: int) -> str:
@@ -139,16 +265,17 @@ def _number(value: JsonValue) -> int:
 def _batch_graphql(
     slug: str,
     root: Path,
-    family: str,
-    input_value: dict[str, JsonValue],
+    family: Literal["createIssue", "createPullRequest", "addComment", "addSubIssue"],
+    input_value: JsonObject,
+    key: str,
     expected_body: str | None = None,
-) -> dict[str, JsonValue]:
+) -> JsonObject:
     if family == "createIssue":
         result_selection = "issue{number id body title url}"
     elif family == "createPullRequest":
-        result_selection = "pullRequest{number url body}"
+        result_selection = "pullRequest{number id url body}"
     elif family == "addComment":
-        result_selection = "commentEdge{node{databaseId url body}}"
+        result_selection = "commentEdge{node{databaseId id url body}}"
     else:
         result_selection = "subIssue{number id}"
     arguments = ",".join(
@@ -167,19 +294,21 @@ def _batch_graphql(
             "operation": family,
             "result": result,
         }
-    result["family"] = family
-    result["elapsed_seconds"] = elapsed
-    journal_path = _journal_path(root)
-    with journal_path.open("a", encoding="utf-8") as journal:
-        journal.write(
-            json.dumps({"arguments": input_value, "result": result}, sort_keys=True)
-            + "\n"
-        )
+    _remember(root, family, key, {"m000": result}, elapsed, last_pacing_seconds)
     return result
 
 
-def _existing_issue(slug: str, title: str, body: str) -> int | None:
-    records = json.loads(
+_issue_catalogs: dict[tuple[str, Path], list[JsonObject]] = {}
+_comment_catalogs: dict[tuple[str, Path, int], list[JsonObject]] = {}
+
+
+def _live_issues(slug: str, root: Path) -> list[JsonObject]:
+    cache_key = (slug, root)
+    cached = _issue_catalogs.get(cache_key)
+    if cached is not None:
+        return cached
+    started = time.perf_counter()
+    records = _json_objects(
         run(
             [
                 "gh",
@@ -192,39 +321,88 @@ def _existing_issue(slug: str, title: str, body: str) -> int | None:
                 "--limit",
                 "100",
                 "--json",
-                "number,title,body",
+                "number,id,title,body,url",
             ]
         ).stdout
     )
-    matches = [
-        record
-        for record in records
-        if record["title"] == title and record["body"] == body
-    ]
-    assert len(matches) <= 1, (slug, title, len(matches))
-    if not matches:
-        return None
-    return int(matches[0]["number"])
+    elapsed = time.perf_counter() - started
+    objects = {str(record["title"]): record for record in records}
+    if len(objects) != len(records):
+        raise FixtureRecoveryError("fixture issue titles are not unique")
+    _remember(
+        root,
+        "readIssueCatalog",
+        f"readIssueCatalog:{time.time_ns()}",
+        objects,
+        elapsed,
+        0.0,
+    )
+    _issue_catalogs[cache_key] = records
+    return records
 
 
-def issue(slug: str, title: str, body: str, root: Path) -> int:
-    existing = _existing_issue(slug, title, body)
+def _live_issue(slug: str, number: int, root: Path) -> JsonObject:
+    return run_json_view(slug, number, root)
+
+
+def run_json_view(slug: str, number: int, root: Path) -> JsonObject:
+    for record in _live_issues(slug, root):
+        if record["number"] == number:
+            return record
+    raise FixtureRecoveryError(f"journaled issue #{number} is absent from {slug}")
+
+
+def issue(
+    slug: str, title: str, body: str, root: Path, *, self_referential: bool = False
+) -> int:
+    operation_id = f"createIssue:{title}"
+    existing = next(
+        (record for record in _live_issues(slug, root) if record["title"] == title),
+        None,
+    )
     if existing is not None:
-        return existing
+        number = _number(existing["number"])
+        if not self_referential and existing["body"] != body:
+            raise FixtureRecoveryError(
+                f"immutable issue body differs for {title}: {existing['body']!r}"
+            )
+        completed = _completed(root).get(operation_id)
+        if completed is not None:
+            recorded = _objects(completed)["m000"]
+            if recorded["id"] != existing["id"] or recorded["number"] != number:
+                raise FixtureRecoveryError(
+                    f"journaled issue identity changed for {title}: "
+                    f"journal={recorded}, live={existing}"
+                )
+        return number
+    if operation_id in _completed(root):
+        raise FixtureRecoveryError(
+            f"journaled issue is absent before mutation: {operation_id}"
+        )
     result = _batch_graphql(
         slug,
         root,
         "createIssue",
         {"repositoryId": _repository_id(slug), "title": title, "body": body},
+        operation_id,
         body,
     )
-    number = _number(result["number"])
-    assert number > 0, result
-    return number
+    _live_issues(slug, root).append(result)
+    return _number(result["number"])
+
+
+def ensure_issue_body(slug: str, number: int, body: str, root: Path) -> None:
+    existing = _live_issue(slug, number, root)
+    if existing["body"] == body:
+        return
+    run(["gh", "issue", "edit", str(number), "--repo", slug, "--body", body])
+    existing["body"] = body
 
 
 def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
-    records = json.loads(
+    operation_id = "createPullRequest:fixture-pull-request"
+    started = time.perf_counter()
+    records = _json_objects(
         run(
             [
                 "gh",
@@ -237,9 +415,18 @@ def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
                 "--head",
                 "pull-request-source",
                 "--json",
-                "number,body,title,url,headRefName,baseRefName",
+                "number,id,body,title,url,headRefName,baseRefName",
             ]
         ).stdout
+    )
+    elapsed = time.perf_counter() - started
+    _remember(
+        root,
+        "readPullRequestCatalog",
+        f"readPullRequestCatalog:{time.time_ns()}",
+        {str(record["number"]): record for record in records},
+        elapsed,
+        0.0,
     )
     matches = [
         record
@@ -247,11 +434,22 @@ def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
         if record["headRefName"] == "pull-request-source"
         and record["baseRefName"] == "main"
         and record["title"] == "Fixture pull request"
-        and record["body"] == "Real pull request for source classification."
     ]
-    assert len(matches) <= 1, matches
+    if len(matches) > 1:
+        raise FixtureRecoveryError(f"duplicate fixture pull requests: {matches}")
     if matches:
-        return int(matches[0]["number"]), str(matches[0]["url"])
+        existing = matches[0]
+        if existing["body"] != "Real pull request for source classification.":
+            raise FixtureRecoveryError(f"fixture pull request body changed: {existing}")
+        completed = _completed(root).get(operation_id)
+        if (
+            completed is not None
+            and _objects(completed)["m000"]["id"] != existing["id"]
+        ):
+            raise FixtureRecoveryError("journaled pull request identity changed")
+        return _number(existing["number"]), str(existing["url"])
+    if operation_id in _completed(root):
+        raise FixtureRecoveryError("journaled pull request is absent before mutation")
     result = _batch_graphql(
         slug,
         root,
@@ -263,44 +461,177 @@ def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
             "title": "Fixture pull request",
             "body": "Real pull request for source classification.",
         },
+        operation_id,
         "Real pull request for source classification.",
     )
     return _number(result["number"]), str(result["url"])
 
 
+def _live_comments(slug: str, number: int, root: Path) -> list[JsonObject]:
+    cache_key = (slug, root, number)
+    cached = _comment_catalogs.get(cache_key)
+    if cached is not None:
+        return cached
+    owner, name = slug.split("/", 1)
+    comments: list[JsonObject] = []
+    objects: dict[str, JsonObject] = {}
+    cursor: str | None = None
+    api_seconds = 0.0
+    while True:
+        started = time.perf_counter()
+        response = _json_object(
+            run(
+                [
+                    "gh",
+                    "api",
+                    "graphql",
+                    "-f",
+                    "query=query WorkPackageComments($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){issue(number:$number){comments(first:100,after:$after){nodes{id databaseId body url}pageInfo{hasNextPage endCursor}}}}}",
+                    "-F",
+                    f"owner={owner}",
+                    "-F",
+                    f"name={name}",
+                    "-F",
+                    f"number={number}",
+                    *(["-f", f"after={cursor}"] if cursor is not None else []),
+                ]
+            ).stdout
+        )
+        api_seconds += time.perf_counter() - started
+        data = response["data"]
+        assert isinstance(data, dict), response
+        repository = data["repository"]
+        assert isinstance(repository, dict), response
+        issue_record = repository["issue"]
+        assert isinstance(issue_record, dict), response
+        connection = issue_record["comments"]
+        assert isinstance(connection, dict), response
+        nodes = TypeAdapter(list[JsonObject]).validate_python(connection["nodes"])
+        comments.extend(nodes)
+        for comment_record in nodes:
+            objects[str(comment_record["databaseId"])] = comment_record
+        page_info = connection["pageInfo"]
+        assert isinstance(page_info, dict), response
+        if page_info["hasNextPage"] is not True:
+            break
+        next_cursor = page_info["endCursor"]
+        assert isinstance(next_cursor, str) and next_cursor, response
+        cursor = next_cursor
+    _remember(
+        root,
+        "readCommentCatalog",
+        f"readCommentCatalog:{number}:{time.time_ns()}",
+        objects,
+        api_seconds,
+        0.0,
+    )
+    _comment_catalogs[cache_key] = comments
+    return comments
+
+
+def _matching_live_comment(
+    slug: str, number: int, body: str, root: Path
+) -> JsonObject | None:
+    matches = [
+        record
+        for record in _live_comments(slug, number, root)
+        if record["body"] == body
+    ]
+    if len(matches) > 1:
+        raise FixtureRecoveryError(
+            f"duplicate live comments for issue #{number} and expected body"
+        )
+    return matches[0] if matches else None
+
+
+def _validate_completed_comment(
+    record: FamilyRecord, live: JsonObject | None
+) -> JsonObject:
+    if live is None:
+        raise FixtureRecoveryError(
+            f"journaled comment is absent before mutation: {record.operation_id}"
+        )
+    for saved in _objects(record).values():
+        if saved["id"] != live["id"] or saved["databaseId"] != live["databaseId"]:
+            raise FixtureRecoveryError(
+                f"journaled comment identity changed: saved={saved}, live={live}"
+            )
+    return live
+
+
 def comment(slug: str, number: int, body: str, root: Path) -> tuple[int, str]:
+    operation_id = f"addComment:{number}:{body}"
+    completed = _completed(root).get(operation_id)
+    live = _matching_live_comment(slug, number, body, root)
+    if completed is not None:
+        live = _validate_completed_comment(completed, live)
+    if live is not None:
+        return _number(live["databaseId"]), str(live["url"])
     result = _batch_graphql(
         slug,
         root,
         "addComment",
         {"subjectId": _node_id(slug, number), "body": body},
+        operation_id,
         body,
     )
+    _live_comments(slug, number, root).append(result)
     return _number(result["databaseId"]), str(result["url"])
 
 
 def add_ordered_comments(
     slug: str, number: int, bodies: list[str], root: Path
 ) -> tuple[list[str], list[int]]:
-    subject_id = run(
-        [
-            "gh",
-            "issue",
-            "view",
-            str(number),
-            "--repo",
-            slug,
-            "--json",
-            "id",
-            "--jq",
-            ".id",
+    subject_id = _node_id(slug, number)
+    records_by_index: dict[int, JsonObject] = {}
+    completed = _completed(root)
+    for index, body in enumerate(bodies):
+        live = _matching_live_comment(slug, number, body, root)
+        records = [
+            record
+            for record in completed.values()
+            if record.family == "addComment"
+            and record.operation_id.startswith(f"addComment:{number}:batch-")
+            and str(index) in record.object_ids
         ]
-    ).stdout.strip()
-    ids: list[int] = []
+        if len(records) > 1:
+            raise FixtureRecoveryError(
+                f"duplicate completed batch ownership for comment {index}"
+            )
+        if records:
+            record = records[0]
+            saved = _objects(record)[str(index)]
+            if live is None:
+                raise FixtureRecoveryError(
+                    f"journaled ordered comment {index} is absent: {record.operation_id}"
+                )
+            if saved["body"] != body:
+                raise FixtureRecoveryError(
+                    f"journaled ordered comment body changed: {saved}, {body}"
+                )
+            if record.object_ids[str(index)] != live["id"] or saved["id"] != live["id"]:
+                raise FixtureRecoveryError(
+                    f"journaled ordered comment identity changed: {saved}, {live}"
+                )
+        if live is not None:
+            records_by_index[index] = live
     for offset in range(0, len(bodies), 5):
+        missing = [
+            index
+            for index in range(offset, min(offset + 5, len(bodies)))
+            if index not in records_by_index
+        ]
+        if not missing:
+            continue
+        operation_id = f"addComment:{number}:batch-{offset:03d}"
+        if operation_id in completed:
+            raise FixtureRecoveryError(
+                f"journaled comment batch {operation_id} is incomplete; "
+                "reconcile all live pages and its native IDs before retrying"
+            )
         fields = [
-            f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId url body}}}}}}"
-            for index, body in enumerate(bodies[offset : offset + 5], start=offset)
+            f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(bodies[index])}}}){{commentEdge{{node{{databaseId id url body}}}}}}"
+            for index in missing
         ]
         query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
         started = time.perf_counter()
@@ -311,30 +642,158 @@ def add_ordered_comments(
         assert "errors" not in response and isinstance(response.get("data"), dict), (
             response
         )
-        for index, expected_body in enumerate(
-            bodies[offset : offset + 5], start=offset
-        ):
+        created: dict[str, JsonObject] = {}
+        for index in missing:
             comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
-            assert comment_node["body"] == expected_body, (index, comment_node)
-            identifier = int(comment_node["databaseId"])
-            assert identifier > 0
-            ids.append(identifier)
-            with _journal_path(root).open("a", encoding="utf-8") as journal:
-                journal.write(
-                    json.dumps(
-                        {
-                            "family": "addComment",
-                            "alias": f"m{index:03d}",
-                            "request_count": len(fields),
-                            "elapsed_seconds": elapsed,
-                            "result": comment_node,
-                        },
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
+            assert comment_node["body"] == bodies[index], (index, comment_node)
+            assert _number(comment_node["databaseId"]) > 0
+            created[str(index)] = comment_node
+            records_by_index[index] = comment_node
+        _remember(
+            root,
+            "addComment",
+            operation_id,
+            created,
+            elapsed,
+            last_pacing_seconds,
+        )
+        _live_comments(slug, number, root).extend(created.values())
+    ids = [
+        _number(records_by_index[index]["databaseId"]) for index in range(len(bodies))
+    ]
     assert ids == sorted(ids), f"comment database IDs are not ordered: {ids}"
     return bodies, ids
+
+
+def _assert_origin(slug: str, checkout: Path) -> None:
+    origin = run(["git", "remote", "get-url", "origin"], cwd=checkout).stdout.strip()
+    if origin.startswith("git@"):
+        origin_slug = origin.split(":", 1)[1].removesuffix(".git")
+    else:
+        origin_slug = (
+            urllib.parse.urlsplit(origin).path.removeprefix("/").removesuffix(".git")
+        )
+    if origin_slug.casefold() != slug.casefold():
+        raise FixtureRecoveryError(
+            f"recovery slug does not match origin: expected={slug}, found={origin_slug}"
+        )
+
+
+def _assert_default_main(slug: str, checkout: Path) -> str:
+    remote = _json_object(
+        run(
+            ["gh", "repo", "view", slug, "--json", "nameWithOwner,defaultBranchRef"]
+        ).stdout
+    )
+    assert remote["nameWithOwner"] == slug, remote
+    default_branch = remote["defaultBranchRef"]
+    assert isinstance(default_branch, dict), remote
+    if default_branch["name"] != "main":
+        run(["gh", "repo", "edit", slug, "--default-branch", "main"])
+        remote = _json_object(
+            run(
+                [
+                    "gh",
+                    "repo",
+                    "view",
+                    slug,
+                    "--json",
+                    "nameWithOwner,defaultBranchRef",
+                ]
+            ).stdout
+        )
+        default_branch = remote["defaultBranchRef"]
+        assert isinstance(default_branch, dict), remote
+    if default_branch["name"] != "main":
+        raise FixtureRecoveryError(f"remote default branch is not main: {remote}")
+    local_main = run(
+        ["git", "rev-parse", "refs/heads/main"], cwd=checkout
+    ).stdout.strip()
+    remote_main = run(
+        ["gh", "api", f"repos/{slug}/git/ref/heads/main", "--jq", ".object.sha"]
+    ).stdout.strip()
+    if remote_main != local_main:
+        raise FixtureRecoveryError(
+            f"main SHA differs: local={local_main}, remote={remote_main}"
+        )
+    return local_main
+
+
+def _refs(output: str) -> dict[str, str]:
+    return {
+        parts[1]: parts[0]
+        for line in output.splitlines()
+        if len(parts := line.split("\t", 1)) == 2
+    }
+
+
+def _verify_required_refs(slug: str, checkout: Path) -> None:
+    _assert_origin(slug, checkout)
+    local = _refs(
+        run(
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(objectname)%09%(refname)",
+                "refs/heads",
+                "refs/tags",
+            ],
+            cwd=checkout,
+        ).stdout
+    )
+    expected = {
+        "refs/heads/main",
+        "refs/heads/feature/work-package",
+        "refs/heads/shared/work-package-ref",
+        "refs/heads/ambiguous/work-package-ref",
+        "refs/heads/shared/annotated-work-package-ref",
+        "refs/heads/ambiguous/annotated-work-package-ref",
+        "refs/heads/pull-request-source",
+        "refs/tags/work-package-v1",
+        "refs/tags/shared/work-package-ref",
+        "refs/tags/ambiguous/work-package-ref",
+        "refs/tags/shared/annotated-work-package-ref",
+        "refs/tags/ambiguous/annotated-work-package-ref",
+        "refs/tags/lightweight-tree-tag",
+        "refs/tags/annotated-tree-tag",
+    }
+    if set(local) != expected:
+        raise FixtureRecoveryError(
+            f"required local refs differ: missing={sorted(expected - set(local))}, "
+            f"unexpected={sorted(set(local) - expected)}"
+        )
+    remote = _refs(
+        run(
+            ["git", "ls-remote", "--refs", "--heads", "--tags", "origin"], cwd=checkout
+        ).stdout
+    )
+    unexpected_remote = set(remote) - expected
+    if unexpected_remote:
+        raise FixtureRecoveryError(
+            f"unexpected remote refs: {sorted(unexpected_remote)}"
+        )
+    changed = {
+        name for name in expected if name in remote and remote[name] != local[name]
+    }
+    if changed:
+        raise FixtureRecoveryError(
+            f"remote ref object IDs differ from preserved local refs: {sorted(changed)}"
+        )
+    missing = sorted(expected - set(remote))
+    if missing:
+        run(["git", "push", "origin", *missing], cwd=checkout)
+        remote = _refs(
+            run(
+                ["git", "ls-remote", "--refs", "--heads", "--tags", "origin"],
+                cwd=checkout,
+            ).stdout
+        )
+    for name in sorted(expected):
+        if remote.get(name) != local[name]:
+            raise FixtureRecoveryError(
+                f"required ref is unpublished or changed: {name}; "
+                f"local={local[name]}, remote={remote.get(name)}"
+            )
 
 
 def _parent_number(slug: str, number: int) -> int | None:
@@ -356,13 +815,26 @@ def _parent_number(slug: str, number: int) -> int | None:
 
 
 def attach(slug: str, parent: int, child: int, root: Path) -> None:
+    operation_id = f"addSubIssue:{parent}->{child}"
+    completed = _completed(root).get(operation_id)
     if _parent_number(slug, child) == parent:
+        if completed is not None:
+            saved = _objects(completed)["m000"]
+            if saved["id"] != _node_id(slug, child) or saved["number"] != child:
+                raise FixtureRecoveryError(
+                    f"journaled parent link identity changed: {operation_id}"
+                )
         return
+    if completed is not None:
+        raise FixtureRecoveryError(
+            f"journaled parent link is absent or different: {operation_id}"
+        )
     result = _batch_graphql(
         slug,
         root,
         "addSubIssue",
         {"issueId": _node_id(slug, parent), "subIssueId": _node_id(slug, child)},
+        operation_id,
     )
     assert result["number"] == child, {
         "parent": parent,
@@ -468,7 +940,6 @@ def create(root: Path, output: Path) -> None:
     run(["git", "add", ".gitmodules", "vendor/submodule"], cwd=checkout)
     run(["git", "commit", "-m", "Add a real submodule content case"], cwd=checkout)
 
-    head = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
     run(["git", "checkout", "-b", "feature/work-package"], cwd=checkout)
     run(
         [
@@ -548,6 +1019,9 @@ def create(root: Path, output: Path) -> None:
         ],
         cwd=checkout,
     )
+    run(["git", "checkout", "main"], cwd=checkout)
+    _verify_required_refs(slug, checkout)
+    head = _assert_default_main(slug, checkout)
     state = complete_fixture_objects(
         slug, root, checkout, pinned, head, large_text, started
     )
@@ -574,7 +1048,9 @@ def resume(slug: str, root: Path, output: Path) -> None:
     pinned = run(
         ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=checkout
     ).stdout.strip()
-    head = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
+    run(["git", "checkout", "main"], cwd=checkout)
+    _verify_required_refs(slug, checkout)
+    head = _assert_default_main(slug, checkout)
     previous = (
         FixtureState.model_validate_json(output.read_text(encoding="utf-8"))
         if output.exists()
@@ -589,12 +1065,17 @@ def resume(slug: str, root: Path, output: Path) -> None:
         checkout.joinpath("docs/large.md").read_text(encoding="utf-8"),
         started,
     )
-    state = (
-        recovered
-        if previous is None
-        else previous.model_copy(update=recovered.model_dump())
-    )
-    state = state.model_copy(
+    if previous is not None:
+        previous_values = previous.model_dump(mode="json")
+        recovered_values = recovered.model_dump(mode="json")
+        previous_values.pop("setup_elapsed_seconds")
+        recovered_values.pop("setup_elapsed_seconds")
+        if previous_values != recovered_values:
+            raise FixtureRecoveryError(
+                "recovered live state differs from persisted fixture identity or content; "
+                "inspect the difference instead of overwriting persisted object IDs"
+            )
+    state = recovered.model_copy(
         update={"setup_elapsed_seconds": time.perf_counter() - started}
     )
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -639,11 +1120,17 @@ def complete_fixture_objects(
     large_text: str,
     started: float,
 ) -> FixtureState:
-    pull_number, pull_url = create_pull_request(slug, root)
+    pull_number, _pull_url = create_pull_request(slug, root)
     run(["git", "checkout", "main"], cwd=checkout)
 
     roadmap_body = "ROADMAP-BODY-CONTRACT-EXACT\n"
-    roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body, root)
+    roadmap = issue(
+        slug,
+        "Roadmap: Work package acceptance",
+        roadmap_body,
+        root,
+        self_referential=True,
+    )
     roadmap_comment_id, roadmap_comment_url = comment(
         slug, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n", root
     )
@@ -653,13 +1140,19 @@ def complete_fixture_objects(
     selected_body = managed(
         original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
     )
-    selected = issue(slug, "Work package acceptance unit", selected_body, root)
+    selected = issue(
+        slug,
+        "Work package acceptance unit",
+        selected_body,
+        root,
+        self_referential=True,
+    )
     selected_body += f"Selected issue self-citation: https://github.com/{slug}/issues/{selected}\nParent citation: https://github.com/{slug}/issues/{roadmap}\n"
     roadmap_body += (
         f"Roadmap self-citation: https://github.com/{slug}/issues/{roadmap}\n"
     )
-    run(["gh", "issue", "edit", str(selected), "--repo", slug, "--body", selected_body])
-    run(["gh", "issue", "edit", str(roadmap), "--repo", slug, "--body", roadmap_body])
+    ensure_issue_body(slug, selected, selected_body, root)
+    ensure_issue_body(slug, roadmap, roadmap_body, root)
     attach(slug, roadmap, selected, root)
     binding_id, binding_url = comment(
         slug, selected, "BINDING-PRIOR-DECISION-EXACT\n", root

@@ -30,87 +30,195 @@ def _load_or_create_fixture() -> Iterator[FixtureState]:
     parent = Path(tempfile.mkdtemp(prefix="itree-work-test-", dir="/tmp/opencode"))
     root = parent / "acceptance"
     state_path = parent / "state.json"
-    operation_started = time.perf_counter()
-    setup_started = time.perf_counter()
-    setup = subprocess.run(
-        [
-            sys.executable,
-            str(SETUP),
-            "create",
-            "--root",
-            str(root),
-            "--output",
-            str(state_path),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=1200,
-    )
-    assert setup.returncode == 0, (
-        f"fixture setup failed\nstdout={setup.stdout}\nstderr={setup.stderr}"
-    )
-    setup_seconds = time.perf_counter() - setup_started
-    yield FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
-    state = FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
-    deletion_started = time.perf_counter()
-    deletion = subprocess.run(
-        ["gh", "repo", "delete", state.repo, "--yes"],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    remote_delete_seconds = time.perf_counter() - deletion_started
-    assert deletion.returncode == 0, (
-        f"fixture deletion failed\nstdout={deletion.stdout}\nstderr={deletion.stderr}"
-    )
-    absence_started = time.perf_counter()
-    absent = subprocess.run(
-        ["gh", "repo", "view", state.repo],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    absence_seconds = time.perf_counter() - absence_started
-    assert absent.returncode != 0, f"fixture remote remains: {state.repo}"
-    scratch_started = time.perf_counter()
-    trashed = subprocess.run(
-        ["trash", str(parent)], text=True, capture_output=True, check=False, timeout=120
-    )
-    assert trashed.returncode == 0, (
-        f"fixture scratch cleanup failed\nstdout={trashed.stdout}\nstderr={trashed.stderr}"
-    )
-    scratch_seconds = time.perf_counter() - scratch_started
-    finished = time.perf_counter()
+    evidence_prefix = parent.parent / parent.name
     journal_path = parent.parent.joinpath(f"{parent.name}-family-journal.jsonl")
-    families: dict[str, dict[str, float | int]] = {}
-    if journal_path.exists():
-        for line in journal_path.read_text(encoding="utf-8").splitlines():
-            row = json.loads(line)
+    raw_path = parent.parent.joinpath(f"{parent.name}-raw-timings.json")
+    final_path = parent.parent.joinpath(f"{parent.name}-teardown-timings.json")
+    operation_started = time.perf_counter()
+    setup: subprocess.CompletedProcess[str] | None = None
+    setup_seconds: float | None = None
+    case_seconds: float | None = None
+    families_complete = False
+    complete = False
+    try:
+        setup_started = time.perf_counter()
+        setup = subprocess.run(
+            [
+                sys.executable,
+                str(SETUP),
+                "create",
+                "--root",
+                str(root),
+                "--output",
+                str(state_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=1200,
+        )
+        setup_seconds = time.perf_counter() - setup_started
+        evidence_prefix.with_name(f"{parent.name}-setup.stdout.log").write_text(
+            setup.stdout, encoding="utf-8"
+        )
+        evidence_prefix.with_name(f"{parent.name}-setup.stderr.log").write_text(
+            setup.stderr, encoding="utf-8"
+        )
+        assert setup.returncode == 0, (
+            f"fixture setup failed\nstdout={setup.stdout}\nstderr={setup.stderr}"
+        )
+        case_started = time.perf_counter()
+        yield FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
+        case_seconds = time.perf_counter() - case_started
+        state = FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
+        families: dict[str, dict[str, float | int]] = {}
+        journal_rows = [
+            json.loads(line)
+            for line in journal_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for row in journal_rows:
             family = families.setdefault(
                 row["family"],
-                {"requests": 0, "objects": 0, "elapsed_seconds": 0.0},
+                {
+                    "requests": 0,
+                    "objects": 0,
+                    "api_seconds": 0.0,
+                    "pacing_seconds": 0.0,
+                },
             )
             family["requests"] += 1
-            family["objects"] += 1
-            family["elapsed_seconds"] += row["elapsed_seconds"]
-    timings = {
-        "setup_seconds": setup_seconds,
-        "remote_delete_seconds": remote_delete_seconds,
-        "absence_verification_seconds": absence_seconds,
-        "scratch_trash_seconds": scratch_seconds,
-        "cleanup_seconds": finished - deletion_started,
-        "total_seconds": finished - operation_started,
-        "families": families,
-        "journal": str(journal_path) if journal_path.exists() else None,
-    }
-    parent.parent.joinpath(f"{parent.name}-teardown-timings.json").write_text(
-        json.dumps(timings, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    assert not parent.exists()
+            family["objects"] += row["object_count"]
+            family["api_seconds"] += row["api_seconds"]
+            family["pacing_seconds"] += row["pacing_seconds"]
+        expected_objects = {
+            "createIssue": 15,
+            "createPullRequest": 1,
+            "addComment": 119,
+            "addSubIssue": 2,
+        }
+        actual_objects = {
+            name: families.get(name, {}).get("objects") for name in expected_objects
+        }
+        assert actual_objects == expected_objects, (
+            f"incomplete fixture families; cleanup is forbidden: {actual_objects}"
+        )
+        families_complete = True
+        case_logs = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(root.joinpath("logs").iterdir())
+            if path.is_file()
+        }
+        raw = {
+            "complete_families": True,
+            "setup_seconds": setup_seconds,
+            "case_seconds": case_seconds,
+            "setup_returncode": setup.returncode,
+            "families": families,
+            "journal": str(journal_path),
+            "case_logs": case_logs,
+        }
+        raw_path.write_text(
+            json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        retained_raw = json.loads(raw_path.read_text(encoding="utf-8"))
+
+        deletion_started = time.perf_counter()
+        deletion = subprocess.run(
+            ["gh", "repo", "delete", state.repo, "--yes"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        remote_delete_seconds = time.perf_counter() - deletion_started
+        evidence_prefix.with_name(f"{parent.name}-remote-delete.json").write_text(
+            json.dumps(
+                {
+                    "exit": deletion.returncode,
+                    "stdout": deletion.stdout,
+                    "stderr": deletion.stderr,
+                    "elapsed_seconds": remote_delete_seconds,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert deletion.returncode == 0, (
+            f"fixture deletion failed\nstdout={deletion.stdout}\nstderr={deletion.stderr}"
+        )
+        absence_started = time.perf_counter()
+        absent = subprocess.run(
+            ["gh", "repo", "view", state.repo],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        absence_seconds = time.perf_counter() - absence_started
+        assert absent.returncode != 0, f"fixture remote remains: {state.repo}"
+        scratch_started = time.perf_counter()
+        trashed = subprocess.run(
+            ["trash", str(parent)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        scratch_seconds = time.perf_counter() - scratch_started
+        assert trashed.returncode == 0, (
+            f"fixture scratch cleanup failed\nstdout={trashed.stdout}\nstderr={trashed.stderr}"
+        )
+        finished = time.perf_counter()
+        assert not parent.exists()
+        timings = {
+            **retained_raw,
+            "remote_delete_seconds": remote_delete_seconds,
+            "absence_verification_seconds": absence_seconds,
+            "scratch_trash_seconds": scratch_seconds,
+            "cleanup_seconds": finished - deletion_started,
+            "total_seconds": finished - operation_started,
+            "remote_delete_exit": deletion.returncode,
+            "remote_absence_exit": absent.returncode,
+            "scratch_trash_exit": trashed.returncode,
+            "raw_record": str(raw_path),
+        }
+        durations = [
+            timings["setup_seconds"],
+            timings["case_seconds"],
+            timings["cleanup_seconds"],
+            timings["total_seconds"],
+            timings["remote_delete_seconds"],
+            timings["absence_verification_seconds"],
+            timings["scratch_trash_seconds"],
+        ]
+        assert all(isinstance(value, (float, int)) and value > 0 for value in durations)
+        final_path.write_text(
+            json.dumps(timings, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        complete = True
+        assert timings["total_seconds"] < 300, (
+            f"complete cold invocation exceeds 300 seconds: {timings['total_seconds']}; "
+            f"evidence={final_path}"
+        )
+    finally:
+        if not complete:
+            failure = {
+                "complete_families": families_complete,
+                "setup_seconds": setup_seconds,
+                "case_seconds": case_seconds,
+                "measured_until_seconds": time.perf_counter() - operation_started,
+                "setup_returncode": setup.returncode if setup is not None else None,
+                "setup_stdout": setup.stdout if setup is not None else None,
+                "setup_stderr": setup.stderr if setup is not None else None,
+                "journal": str(journal_path) if journal_path.exists() else None,
+            }
+            evidence_prefix.with_name(
+                f"{parent.name}-incomplete-timings.json"
+            ).write_text(
+                json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
 
 
 @pytest.fixture(scope="session")
