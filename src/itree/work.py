@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, NoReturn, TypeVar
 
 from markdown_it import MarkdownIt
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .github import GitRefLookupError, GithubApi, GithubApiError
 from .models import (
@@ -758,7 +758,7 @@ def _required_read(
 ) -> ReadResult:
     try:
         return read()
-    except (RuntimeError, ValueError, TypeError, KeyError, AssertionError) as error:
+    except (RuntimeError, ValidationError) as error:
         failure = WorkPackageReadFailure(
             issue_ref=issue_ref,
             operation=operation,
