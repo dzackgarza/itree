@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from pathlib import Path
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     RootModel,
     field_validator,
     model_validator,
@@ -491,19 +492,28 @@ class GithubIssue(BaseModel):
     body: str | None = None
     state_reason: str | None = None
     milestone: Milestone | None = None
-    pull_request: dict | None = None
+    pull_request: dict[str, JsonValue] | None = None
     labels: tuple[str, ...] = ()
 
     @field_validator("labels", mode="before")
     @classmethod
-    def _normalize_labels(cls, value: Any) -> tuple[str, ...]:
+    def _normalize_labels(cls, value: JsonValue) -> tuple[str, ...]:
         """Accept REST (``[{"name": ...}]``) and plain-string label shapes alike."""
         if value is None:
             return ()
-        return tuple(item["name"] if isinstance(item, dict) else item for item in value)
+        assert isinstance(value, (list, tuple)), value
+        labels: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                name = item["name"]
+            else:
+                name = item
+            assert isinstance(name, str), name
+            labels.append(name)
+        return tuple(labels)
 
     @classmethod
-    def from_graphql(cls, node: dict) -> GithubIssue:
+    def from_graphql(cls, node: dict[str, JsonValue]) -> GithubIssue:
         """Build an issue from a GraphQL ``repository.issues`` node.
 
         GraphQL field names differ from REST: url vs html_url, databaseId
@@ -511,18 +521,37 @@ class GithubIssue(BaseModel):
         never pull requests.
         """
         milestone = node.get("milestone")
+        assert milestone is None or isinstance(milestone, dict)
         state_reason = node.get("stateReason")
-        label_nodes = node["labels"]["nodes"]
+        assert state_reason is None or isinstance(state_reason, str)
+        labels = node["labels"]
+        assert isinstance(labels, dict)
+        label_nodes = labels["nodes"]
+        assert isinstance(label_nodes, list)
+        database_id = node["databaseId"]
+        assert isinstance(database_id, int) and not isinstance(database_id, bool)
+        number = node["number"]
+        assert isinstance(number, int) and not isinstance(number, bool)
+        title = node["title"]
+        assert isinstance(title, str)
+        state = node["state"]
+        assert isinstance(state, str)
+        html_url = node["url"]
+        assert isinstance(html_url, str)
+        body = node.get("body")
+        assert body is None or isinstance(body, str)
+        milestone_title = None if milestone is None else milestone["title"]
+        assert milestone_title is None or isinstance(milestone_title, str)
         return cls(
-            id=node["databaseId"],
-            number=node["number"],
-            title=node["title"],
-            state=IssueState(node["state"].lower()),
-            html_url=node["url"],
-            body=node.get("body") or None,
+            id=database_id,
+            number=number,
+            title=title,
+            state=IssueState(state.lower()),
+            html_url=html_url,
+            body=body or None,
             state_reason=state_reason.lower() if state_reason else None,
-            milestone=Milestone(title=milestone["title"]) if milestone else None,
-            labels=tuple(label["name"] for label in label_nodes),
+            milestone=Milestone(title=milestone_title) if milestone_title else None,
+            labels=cls._normalize_labels(label_nodes),
         )
 
     @property
@@ -934,6 +963,14 @@ class IssueComment(BaseModel):
     @classmethod
     def _author_login(cls, value: dict[str, str]) -> str:
         return value["login"]
+
+
+class GithubIssueFamily(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    issue: GithubIssue
+    comments: tuple[IssueComment, ...]
+    parent: IssueRef | None
 
 
 class GithubRepository(BaseModel):

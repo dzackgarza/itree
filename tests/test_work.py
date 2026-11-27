@@ -361,9 +361,40 @@ def test_all_comment_pages_preserve_every_body_and_identifier_in_order(
         "module",
         tmp_path / "pagination",
         "T005-pagination",
+        path_gh=fixture_state.root / "live-page-edit-gh.py",
     )
 
     assert result.returncode == 0, result.stderr
+    live = json.loads(
+        subprocess.check_output(
+            [
+                "gh",
+                "issue",
+                "view",
+                str(fixture_state.pagination),
+                "--repo",
+                fixture_state.repo,
+                "--json",
+                "body,labels",
+            ],
+            text=True,
+        )
+    )
+    assert live["body"] == "LIVE-BODY-EDIT-AFTER-FIRST-COMMENT-PAGE\n"
+    assert {label["name"] for label in live["labels"]} == {"live-comment-page"}
+    assert "LEGACY-PAGINATION-BODY-EXACT\n" in result.stdout
+    assert "LIVE-BODY-EDIT-AFTER-FIRST-COMMENT-PAGE" not in result.stdout
+    malformed = invoke_work(
+        fixture_state,
+        fixture_state.pagination,
+        "module",
+        tmp_path / "pagination-malformed-page",
+        "T005-pagination-malformed-page",
+        path_gh=fixture_state.malformed_issue_gh,
+    )
+    assert malformed.returncode == 3
+    assert "Work package read failure" in malformed.stderr
+    assert "read selected issue, comments, and native parent" in malformed.stderr
     previous = -1
     for index, body in enumerate(fixture_state.pagination_comments):
         assert result.stdout.count(body) == 1, f"comment {index} is missing or repeated"
@@ -1059,7 +1090,14 @@ def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
             for argument in event["argv"]
             if argument == f"repos/{fixture_state.repo}/issues/{fixture_state.selected}"
         ]
-        assert len(issue_endpoints) == 1, issue_endpoints
+        assert issue_endpoints == [], issue_endpoints
+        family_reads = [
+            argument
+            for event in events
+            for argument in event["argv"]
+            if "WorkPackageIssueFamily" in argument
+        ]
+        assert len(family_reads) == 2, family_reads
         methods = [method for event in events for method in event["http"]]
         assert any(method.startswith("> POST /graphql ") for method in methods), entry
         assert not any(

@@ -964,15 +964,21 @@ def _content_failure(failure: WorkPackageContentFailure) -> NoReturn:
 
 
 def _load_governing_documents(api: GithubApi) -> tuple[GoverningDocument, ...]:
-    resolution = api.resolve_default_branch()
-
-    def load(role: GoverningDocumentRole) -> GoverningDocument:
+    roles = tuple(GoverningDocumentRole)
+    resolution, responses = api.get_repository_documents(
+        tuple(role.value for role in roles)
+    )
+    documents: list[GoverningDocument] = []
+    for role in roles:
         path = role.value
-        result = api.get_repository_content(path, resolution.resolved_commit_sha)
+        result = responses[path]
         if isinstance(result, MissingGithubContent):
-            return AbsentGoverningDocument(
-                role=role, path=path, absence_reason="not_found"
+            documents.append(
+                AbsentGoverningDocument(
+                    role=role, path=path, absence_reason="not_found"
+                )
             )
+            continue
         if isinstance(result, (tuple, GithubNonFileContent)):
             raise RuntimeError(
                 f"governing document {path} resolved to a non-file response"
@@ -987,28 +993,26 @@ def _load_governing_documents(api: GithubApi) -> tuple[GoverningDocument, ...]:
             raise RuntimeError(
                 f"governing document {path} could not be read as UTF-8 text: {content_or_reason}"
             )
-        return PresentGoverningDocument(
-            role=role,
-            path=path,
-            resolved_commit_sha=resolution.resolved_commit_sha,
-            content=content_or_reason,
+        documents.append(
+            PresentGoverningDocument(
+                role=role,
+                path=path,
+                resolved_commit_sha=resolution.resolved_commit_sha,
+                content=content_or_reason,
+            )
         )
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        return tuple(executor.map(load, GoverningDocumentRole))
+    return tuple(documents)
 
 
 def load_work_package(issue_ref: IssueRef) -> WorkPackage:
     api = GithubApi.from_issue_ref(issue_ref)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        selected_read = executor.submit(api.get_issue, issue_ref.number)
-        comments_read = executor.submit(api.list_comments, issue_ref.number)
-        selected_issue = _required_read(
-            issue_ref, "read selected issue", selected_read.result
-        )
-        comments = _required_read(
-            issue_ref, "read selected issue comments", comments_read.result
-        )
+    family = _required_read(
+        issue_ref,
+        "read selected issue, comments, and native parent",
+        lambda: api.get_issue_family(issue_ref.number),
+    )
+    selected_issue = family.issue
+    comments = family.comments
     layout = parse_issue_layout(selected_issue.body or "")
     readable = ReadableWorkPackage(
         issue_ref=issue_ref,
@@ -1029,14 +1033,9 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
         )
     ancestors: list[GoverningAncestor] = []
     chain = [issue_ref]
-    current = issue_ref
+    current_family = family
     while True:
-        current_api = GithubApi.from_issue_ref(current)
-        parent = _required_read(
-            issue_ref,
-            f"read native parent of {current.slug}",
-            lambda: current_api.get_parent(current.number),
-        )
+        parent = current_family.parent
         if parent is None:
             break
         if parent in chain:
@@ -1051,26 +1050,20 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
                 )
             )
         parent_api = GithubApi.from_issue_ref(parent)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            parent_issue_read = executor.submit(parent_api.get_issue, parent.number)
-            parent_comments_read = executor.submit(
-                parent_api.list_comments, parent.number
-            )
-            parent_issue = _required_read(
-                issue_ref, f"read ancestor {parent.slug}", parent_issue_read.result
-            )
-            parent_comments = _required_read(
-                issue_ref,
-                f"read ancestor comments {parent.slug}",
-                parent_comments_read.result,
-            )
+        parent_family = _required_read(
+            issue_ref,
+            f"read ancestor issue, comments, and native parent {parent.slug}",
+            lambda: parent_api.get_issue_family(parent.number),
+        )
         ancestors.append(
             GoverningAncestor(
-                issue_ref=parent, issue=parent_issue, comments=parent_comments
+                issue_ref=parent,
+                issue=parent_family.issue,
+                comments=parent_family.comments,
             )
         )
         chain.append(parent)
-        current = parent
+        current_family = parent_family
     governing_documents = _required_read(
         issue_ref, "read governing documents", lambda: _load_governing_documents(api)
     )

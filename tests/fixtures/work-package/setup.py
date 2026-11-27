@@ -38,6 +38,20 @@ last_mutation_at = 0.0
 last_pacing_seconds = 0.0
 
 
+class FixtureCommandError(RuntimeError):
+    def __init__(
+        self,
+        command: list[str],
+        result: subprocess.CompletedProcess[str],
+        elapsed: float,
+    ) -> None:
+        self.result = result
+        super().__init__(
+            f"command failed after {elapsed:.3f}s: {command!r}\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+
+
 def _is_mutation(command: list[str]) -> bool:
     if command[0] == "git" and command[1] == "push":
         return True
@@ -56,6 +70,18 @@ def _is_mutation(command: list[str]) -> bool:
     )
 
 
+def _content_units(command: list[str]) -> int:
+    if command[:3] != ["gh", "api", "graphql"]:
+        return 1
+    text = "\n".join(command[3:])
+    return max(
+        1,
+        text.count(":createIssue(input:")
+        + text.count(":addComment(input:")
+        + text.count(":addSubIssue(input:"),
+    )
+
+
 def run(
     command: list[str], *, cwd: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -63,7 +89,8 @@ def run(
     mutates = _is_mutation(command)
     pace_started = time.perf_counter()
     if mutates:
-        remaining = 1.0 - (time.perf_counter() - last_mutation_at)
+        interval = max(1.0, 0.75 * _content_units(command))
+        remaining = interval - (time.perf_counter() - last_mutation_at)
         if remaining > 0 and last_mutation_at != 0.0:
             time.sleep(remaining)
     pace_seconds = time.perf_counter() - pace_started
@@ -80,9 +107,7 @@ def run(
         flush=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"command failed after {elapsed:.3f}s: {command!r}\nstdout={result.stdout}\nstderr={result.stderr}"
-        )
+        raise FixtureCommandError(command, result, elapsed)
     return result
 
 
@@ -163,8 +188,8 @@ def add_comment_tail(
         if live is None:
             missing.append((label, number, body))
     batch_serial = len(family_records)
-    for offset in range(0, len(missing), 8):
-        batch = missing[offset : offset + 8]
+    for offset in range(0, len(missing), 15):
+        batch = missing[offset : offset + 15]
         operation_id = f"{operation_prefix}-{batch_serial:03d}"
         assert operation_id not in completed
         batch_serial += 1
@@ -176,9 +201,7 @@ def add_comment_tail(
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
         started = time.perf_counter()
-        response = _json_object(
-            run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
-        )
+        response = _graphql_response(query)
         elapsed = time.perf_counter() - started
         created = _record_family_response(
             root,
@@ -381,6 +404,21 @@ def _number(value: JsonValue) -> int:
     return value
 
 
+def _graphql_response(query: str) -> JsonObject:
+    try:
+        return _json_object(
+            run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
+        )
+    except FixtureCommandError as error:
+        try:
+            document = _json_object(error.result.stdout)
+        except UnicodeDecodeError, json.JSONDecodeError, ValueError:
+            raise error
+        if "data" not in document and "errors" not in document:
+            raise error
+        return document
+
+
 def _batch_graphql(
     slug: str,
     root: Path,
@@ -403,10 +441,13 @@ def _batch_graphql(
     alias = "m000"
     query = f"mutation WorkPackageFamily {{{alias}:{family}(input:{{{arguments}}}){{{result_selection}}}}}"
     started = time.perf_counter()
-    response = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout)
+    response = _graphql_response(query)
     elapsed = time.perf_counter() - started
     assert "errors" not in response and isinstance(response.get("data"), dict), response
-    node = response["data"][alias]
+    data = response["data"]
+    assert isinstance(data, dict), response
+    node = data[alias]
+    assert isinstance(node, dict), response
     result = _response_for_family(family, node)
     if expected_body is not None:
         assert result.get("body") == expected_body, {
@@ -577,9 +618,7 @@ def create_issue_family(
     assert len(fields) * 2 <= 500_000
     assert len(query.encode("utf-8")) < 120_000
     started = time.perf_counter()
-    response = _json_object(
-        run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
-    )
+    response = _graphql_response(query)
     elapsed = time.perf_counter() - started
     created = _record_family_response(
         root,
@@ -591,6 +630,8 @@ def create_issue_family(
         elapsed,
     )
     live.extend(created.values())
+    for result in created.values():
+        _comment_catalogs.setdefault((slug, root, _number(result["number"])), [])
 
 
 def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
@@ -810,7 +851,7 @@ def add_ordered_comments(
                 )
         if live is not None:
             records_by_index[index] = live
-    batch_size = min(10, len(bodies))
+    batch_size = min(15, len(bodies))
     for offset in range(0, len(bodies), batch_size):
         missing = [
             index
@@ -832,9 +873,7 @@ def add_ordered_comments(
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
         started = time.perf_counter()
-        response = _json_object(
-            run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
-        )
+        response = _graphql_response(query)
         elapsed = time.perf_counter() - started
         created = _record_family_response(
             root,
@@ -1215,6 +1254,7 @@ def create(root: Path, output: Path) -> None:
     run(["git", "checkout", "main"], cwd=checkout)
     _verify_required_refs(slug, checkout)
     head = _assert_default_main(slug, checkout)
+    _issue_catalogs[(slug, root)] = []
     state = complete_fixture_objects(
         slug, root, checkout, pinned, head, large_text, started
     )
@@ -1561,10 +1601,44 @@ def complete_fixture_objects(
     real_gh = shutil.which("gh")
     assert real_gh is not None
     cycle_gh = root / "cycle-gh.py"
+    cycle_family_response = {
+        "data": {
+            "repository": {
+                "issue": {
+                    "number": cycle_b,
+                    "databaseId": cycle_b,
+                    "title": "Cycle B",
+                    "state": "OPEN",
+                    "stateReason": None,
+                    "body": "CYCLE-B-READABLE-BODY\n",
+                    "url": f"https://github.com/{slug}/issues/{cycle_b}",
+                    "milestone": None,
+                    "labels": {"nodes": []},
+                    "parent": {
+                        "number": cycle_a,
+                        "repository": {"nameWithOwner": slug},
+                    },
+                    "comments": {
+                        "nodes": [
+                            {
+                                "databaseId": 1,
+                                "body": "CYCLE-B-READABLE-COMMENT\n",
+                                "author": {"login": "itree-fixture"},
+                                "createdAt": "2026-01-01T00:00:00Z",
+                                "updatedAt": "2026-01-01T00:00:00Z",
+                                "url": f"https://github.com/{slug}/issues/{cycle_b}#issuecomment-1",
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    },
+                }
+            }
+        }
+    }
     cycle_gh.write_text(
         "#!/usr/bin/env python3\nimport json, os, sys\n"
         f"if 'graphql' in sys.argv and '-F' in sys.argv and 'number={cycle_b}' in sys.argv:\n"
-        f"    print(json.dumps({{'data': {{'repository': {{'issue': {{'parent': {{'number': {cycle_a}, 'repository': {{'nameWithOwner': '{slug}'}}}}}}}}}}}}))\n"
+        f"    print({json.dumps(json.dumps(cycle_family_response))})\n"
         "else:\n"
         f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
         encoding="utf-8",
@@ -1573,7 +1647,7 @@ def complete_fixture_objects(
     fail_comments_gh = root / "fail-comments-gh.py"
     fail_comments_gh.write_text(
         "#!/usr/bin/env python3\nimport os, sys\n"
-        f"if any('issues/{selected}/comments?' in argument for argument in sys.argv):\n"
+        f"if 'graphql' in sys.argv and 'number={selected}' in sys.argv and any('comments(first:100' in argument for argument in sys.argv):\n"
         "    sys.stderr.write('FIXTURE-REQUIRED-COMMENT-READ-FAILURE\\n')\n"
         "    sys.exit(1)\n"
         "else:\n"
@@ -1624,7 +1698,7 @@ def complete_fixture_objects(
     malformed_issue_gh = root / "malformed-issue-gh.py"
     malformed_issue_gh.write_text(
         "#!/usr/bin/env python3\nimport os, sys\n"
-        f"if any(argument.endswith('issues/{selected}') for argument in sys.argv if argument.startswith('repos/')):\n"
+        f"if 'graphql' in sys.argv and ('number={selected}' in sys.argv or any(argument.startswith(('after=', 'endCursor=')) and argument not in {{'after=', 'endCursor='}} for argument in sys.argv)):\n"
         "    print('{not-json')\n"
         "else:\n"
         f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
@@ -1632,25 +1706,80 @@ def complete_fixture_objects(
     )
     malformed_issue_gh.chmod(0o755)
     governing_shape_gh = root / "governing-shape-gh.py"
+    malformed_governing_response = {
+        "data": {
+            "repository": {
+                "defaultBranchRef": {"name": "main", "target": {"oid": head}},
+                "d000": {
+                    "__typename": "Blob",
+                    "oid": head,
+                    "isTruncated": False,
+                },
+            }
+        }
+    }
     governing_shape_gh.write_text(
         "#!/usr/bin/env python3\nimport os, sys\n"
-        "if any('/contents/AGENTS.md' in argument for argument in sys.argv):\n"
-        '    print(\'{"type": "file", "path": "AGENTS.md"}\')\n'
+        "if any('WorkPackageGoverningDocuments' in argument for argument in sys.argv):\n"
+        f"    print({json.dumps(json.dumps(malformed_governing_response))})\n"
         "else:\n"
         f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
         encoding="utf-8",
     )
     governing_shape_gh.chmod(0o755)
     base64_error_gh = root / "base64-error-gh.py"
+    invalid_governing_text_response = {
+        "data": {
+            "repository": {
+                "defaultBranchRef": {"name": "main", "target": {"oid": head}},
+                "d000": {
+                    "__typename": "Blob",
+                    "oid": head,
+                    "text": None,
+                    "isTruncated": False,
+                },
+            }
+        }
+    }
     base64_error_gh.write_text(
         "#!/usr/bin/env python3\nimport os, sys\n"
-        "if any('/contents/AGENTS.md' in argument for argument in sys.argv):\n"
-        '    print(\'{"type": "file", "path": "AGENTS.md", "encoding": "base64", "content": "%%%not-base64%%%", "sha": "0000000000000000000000000000000000000000"}\')\n'
+        "if any('WorkPackageGoverningDocuments' in argument for argument in sys.argv):\n"
+        f"    print({json.dumps(json.dumps(invalid_governing_text_response))})\n"
         "else:\n"
         f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
         encoding="utf-8",
     )
     base64_error_gh.chmod(0o755)
+    live_page_edit_gh = root / "live-page-edit-gh.py"
+    live_page_edit_gh.write_text(
+        "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"
+        f"real_gh = {real_gh!r}\n"
+        f"expected_number = {pagination}\n"
+        "is_family = any('WorkPackageIssueFamily' in argument for argument in sys.argv)\n"
+        "after = any(argument.startswith(('after=', 'endCursor=')) and argument not in {'after=', 'endCursor='} for argument in sys.argv)\n"
+        "if is_family and not after:\n"
+        "    first = subprocess.run([real_gh, *sys.argv[1:]], text=True, capture_output=True, check=False)\n"
+        "    if first.returncode != 0:\n"
+        "        sys.stdout.write(first.stdout)\n"
+        "        sys.stderr.write(first.stderr)\n"
+        "        sys.exit(first.returncode)\n"
+        "    label = subprocess.run([real_gh, 'api', '-X', 'POST', "
+        f"'repos/{slug}/labels', '-f', 'name=live-comment-page', '-f', 'color=0366d6'], text=True, capture_output=True, check=False)\n"
+        "    if label.returncode != 0:\n"
+        "        sys.stderr.write(label.stdout + label.stderr)\n"
+        "        sys.exit(label.returncode)\n"
+        "    edit = subprocess.run([real_gh, 'issue', 'edit', str(expected_number), '--repo', "
+        f"{slug!r}, '--body', 'LIVE-BODY-EDIT-AFTER-FIRST-COMMENT-PAGE\\n', '--add-label', 'live-comment-page'], text=True, capture_output=True, check=False)\n"
+        "    if edit.returncode != 0:\n"
+        "        sys.stderr.write(edit.stdout + edit.stderr)\n"
+        "        sys.exit(edit.returncode)\n"
+        "    sys.stdout.write(first.stdout)\n"
+        "    sys.stderr.write(first.stderr)\n"
+        "    sys.exit(0)\n"
+        "os.execv(real_gh, [real_gh, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    live_page_edit_gh.chmod(0o755)
     trace_gh = root / "trace-gh.py"
     trace_gh.write_text(
         "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"

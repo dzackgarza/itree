@@ -53,6 +53,7 @@ from .models import (
     GithubContentObject,
     GithubIndeterminateOperation,
     GithubIssue,
+    GithubIssueFamily,
     GithubMilestone,
     GithubNonFileContent,
     GithubRefMatch,
@@ -97,6 +98,37 @@ query($owner: String!, $name: String!, $endCursor: String) {
           totalCount
           nodes { number state repository { nameWithOwner } }
         }
+      }
+    }
+  }
+}
+"""
+
+
+ISSUE_FAMILY_QUERY = """
+query WorkPackageIssueFamily($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      number
+      databaseId
+      title
+      state
+      stateReason
+      body
+      url
+      milestone { title }
+      labels(first: 100) { nodes { name } }
+      parent { number repository { nameWithOwner } }
+      comments(first: 100, after: $endCursor) {
+        nodes {
+          databaseId
+          body
+          author { login }
+          createdAt
+          updatedAt
+          url
+        }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -914,6 +946,92 @@ class GithubApi(BaseModel):
             matched_refs=identities,
         )
 
+    def get_repository_documents(
+        self, paths: tuple[str, ...]
+    ) -> tuple[GitRefResolution, dict[str, GithubContentObject | MissingGithubContent]]:
+        fields = [
+            f"d{index:03d}:object(expression:{json.dumps(f'HEAD:{path}')}){{"
+            "__typename ... on Blob{oid text isTruncated} ... on Tree{oid} ... on Commit{oid}}"
+            for index, path in enumerate(paths)
+        ]
+        query = (
+            "query WorkPackageGoverningDocuments($owner:String!,$name:String!){"
+            "repository(owner:$owner,name:$name){"
+            "defaultBranchRef{name target{oid}} " + " ".join(fields) + "}}"
+        )
+        result = self._run_api_command(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"owner={self.owner}",
+                "-F",
+                f"name={self.repo}",
+            ],
+            "graphql",
+            timeout=120,
+        )
+        documents = _graphql_pages(result.stdout)
+        assert len(documents) == 1
+        page = documents[0]
+        data = _graphql_data(page, f"governing documents for {self.repo_ref.slug}")
+        if page.get("errors"):
+            raise RuntimeError(_graphql_error_text(page))
+        repository = _object(data["repository"], "governing document repository")
+        branch = _object(repository["defaultBranchRef"], "default branch reference")
+        target = _object(branch["target"], "default branch target")
+        name = _string(branch["name"], "default branch name")
+        commit_sha = _string(target["oid"], "default branch commit SHA")
+        resolution = GitRefResolution(
+            requested_ref=name,
+            resolved_commit_sha=commit_sha,
+            repository_path="",
+            matched_refs=(
+                GitRefIdentity(name=f"refs/heads/{name}", kind=GitRefKind.branch),
+            ),
+        )
+        documents_by_path: dict[str, GithubContentObject | MissingGithubContent] = {}
+        for index, path in enumerate(paths):
+            node = repository[f"d{index:03d}"]
+            if node is None:
+                documents_by_path[path] = MissingGithubContent(
+                    path=path, ref=commit_sha
+                )
+                continue
+            try:
+                item = _object(node, f"governing document {path}")
+                typename = _string(item["__typename"], "document object type")
+                sha = _string(item["oid"], "document object SHA")
+                if typename != "Blob":
+                    documents_by_path[path] = GithubNonFileContent(
+                        type=typename.lower(), path=path, sha=sha
+                    )
+                    continue
+                truncated = item["isTruncated"]
+                assert isinstance(truncated, bool)
+                text = item["text"]
+                assert text is None or isinstance(text, str)
+                content = (
+                    None
+                    if truncated or text is None
+                    else base64.b64encode(text.encode("utf-8")).decode("ascii")
+                )
+                documents_by_path[path] = GithubContentFile(
+                    type="file",
+                    path=path,
+                    encoding="none" if truncated else "base64",
+                    content=content,
+                    sha=sha,
+                )
+            except (KeyError, TypeError, ValueError, AssertionError) as error:
+                raise RuntimeError(
+                    f"invalid governing document response for {self.repo_ref.slug}:{path}: {error}"
+                ) from error
+        return resolution, documents_by_path
+
     def get_repository_content(
         self, path: str, ref: str
     ) -> GithubContentObject | tuple[GithubContentItem, ...] | MissingGithubContent:
@@ -943,6 +1061,101 @@ class GithubApi(BaseModel):
             "GET", f"repos/{self.owner}/{self.repo}/issues/comments/{comment_id}"
         )
         return IssueComment.model_validate_json(proc.stdout)
+
+    def get_issue_family(self, number: int) -> GithubIssueFamily:
+        issue: GithubIssue | None = None
+        parent: IssueRef | None = None
+        comments: list[IssueComment] = []
+        cursor: str | None = None
+        while True:
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={ISSUE_FAMILY_QUERY}",
+                "-F",
+                f"owner={self.owner}",
+                "-F",
+                f"name={self.repo}",
+                "-F",
+                f"number={number}",
+            ]
+            if cursor is not None:
+                command.extend(["-F", f"endCursor={cursor}"])
+            result = self._run_api_command(command, "graphql", timeout=120)
+            pages = _graphql_pages(result.stdout)
+            if len(pages) != 1:
+                raise RuntimeError(
+                    f"expected one GraphQL page for {self.repo_ref.slug}#{number}; "
+                    f"found={len(pages)}"
+                )
+            page = pages[0]
+            data = _graphql_data(page, f"{self.repo_ref.slug}#{number}")
+            if page.get("errors"):
+                raise RuntimeError(_graphql_error_text(page))
+            repository = _object(data["repository"], "issue family repository")
+            raw_issue = repository["issue"]
+            if raw_issue is None:
+                raise RuntimeError(
+                    f"no issue family exists for {self.repo_ref.slug}#{number}"
+                )
+            issue_node = _object(raw_issue, "issue family issue")
+            if issue is None:
+                try:
+                    issue = GithubIssue.from_graphql(issue_node)
+                    parent = parse_issue_parent(
+                        json.dumps(page), self.owner, self.repo, number
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RuntimeError(
+                        f"invalid issue or parent in {self.repo_ref.slug}#{number}: {error}"
+                    ) from error
+            connection = _object(issue_node["comments"], "issue family comments")
+            for raw_comment in _array(
+                connection["nodes"], "issue family comment nodes"
+            ):
+                node = _object(raw_comment, "issue family comment")
+                author = _object(node["author"], "issue family comment author")
+                comments.append(
+                    IssueComment.model_validate(
+                        {
+                            "id": _integer(node["databaseId"], "comment database ID"),
+                            "body": _string(node["body"], "comment body"),
+                            "user": {
+                                "login": _string(author["login"], "comment author")
+                            },
+                            "created_at": _string(
+                                node["createdAt"], "comment creation time"
+                            ),
+                            "updated_at": _string(
+                                node["updatedAt"], "comment update time"
+                            ),
+                            "html_url": _string(node["url"], "comment URL"),
+                        }
+                    )
+                )
+            page_info = _object(connection["pageInfo"], "issue family page info")
+            has_next = page_info["hasNextPage"]
+            if not isinstance(has_next, bool):
+                raise RuntimeError(
+                    f"invalid hasNextPage for {self.repo_ref.slug}#{number}: {has_next!r}"
+                )
+            next_cursor = page_info["endCursor"]
+            if not has_next:
+                break
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor == cursor
+            ):
+                raise RuntimeError(
+                    f"invalid comment-page cursor for {self.repo_ref.slug}#{number}: {next_cursor!r}"
+                )
+            cursor = next_cursor
+        if issue is None:
+            raise RuntimeError(f"no issue family pages were returned for {number}")
+        return GithubIssueFamily(issue=issue, comments=tuple(comments), parent=parent)
 
     def get_issue(self, number: int) -> GithubIssue:
         """Fetch a single GitHub issue by number."""
