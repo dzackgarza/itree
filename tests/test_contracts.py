@@ -77,6 +77,18 @@ def _findings(report: DoctorReport, code: str) -> list[Finding]:
     return [finding for finding in report.findings if finding.code == code]
 
 
+def _contract_body(**fields: str | list[str]) -> str:
+    lines = []
+    for name, value in fields.items():
+        toml_value = (
+            f'"{value}"'
+            if isinstance(value, str)
+            else "[" + ", ".join(f'"{item}"' for item in value) + "]"
+        )
+        lines.append(f"{name} = {toml_value}")
+    return ACCEPTANCE + "\n\n```itree-contract\n" + "\n".join(lines) + "\n```\n"
+
+
 def test_contract_parser_preserves_typed_valid_declarations_and_ref_order() -> None:
     body = """
 Prose links such as #99 are ordinary issue-body text.
@@ -104,7 +116,9 @@ evidence = "routes"
         "testowner/testrepo#4",
         "other/repo#5",
     )
-    assert tuple(ref.slug for ref in declaration.revalidate_on) == ("testowner/testrepo#6",)
+    assert tuple(ref.slug for ref in declaration.revalidate_on) == (
+        "testowner/testrepo#6",
+    )
 
 
 def test_contract_parser_accepts_indented_markdown_contract_fences() -> None:
@@ -121,7 +135,9 @@ evidence = "routes"
     parsed = parse_issue_contracts(body, repo_ref=_repo_ref(), issue_number=2)
 
     assert parsed.errors == ()
-    assert tuple((declaration.kind, declaration.owner) for declaration in parsed.declarations) == ((ContractKind.implementation, _ref(3)),)
+    assert tuple(
+        (declaration.kind, declaration.owner) for declaration in parsed.declarations
+    ) == ((ContractKind.implementation, _ref(3)),)
 
 
 def test_contract_parser_ignores_contract_examples_inside_ordinary_fences() -> None:
@@ -195,7 +211,11 @@ evidence = "routes"
     report = generate_doctor_report(dag)
     findings = _findings(report, "E018")
 
-    assert tuple(finding.witness.current_owner for finding in findings if finding.witness is not None) == (_ref(2),)
+    assert tuple(
+        finding.witness.current_owner
+        for finding in findings
+        if finding.witness is not None
+    ) == (_ref(2),)
 
 
 def test_closed_implementation_route_reports_each_parallel_unresolved_owner() -> None:
@@ -218,7 +238,12 @@ evidence = "routes"
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
-            2: _issue(2, "Original implementation obligation", body=body, state=IssueState.closed),
+            2: _issue(
+                2,
+                "Original implementation obligation",
+                body=body,
+                state=IssueState.closed,
+            ),
             3: _issue(3, "Owner branch A"),
             4: _issue(4, "Owner branch B"),
         },
@@ -255,7 +280,12 @@ evidence = "routes"
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
-            2: _issue(2, "Original implementation obligation", body=body, state=IssueState.closed),
+            2: _issue(
+                2,
+                "Original implementation obligation",
+                body=body,
+                state=IssueState.closed,
+            ),
             3: _issue(3, "Owner branch A"),
             4: _issue(4, "Owner branch B"),
         },
@@ -266,7 +296,10 @@ evidence = "routes"
     payload = report.model_dump(mode="json")
     e016 = next(finding for finding in payload["findings"] if finding["code"] == "E016")
 
-    assert [[ref["number"] for ref in witness["edge_chain"]] for witness in e016["witnesses"]] == [[2, 3], [2, 4]]
+    assert [
+        [ref["number"] for ref in witness["edge_chain"]]
+        for witness in e016["witnesses"]
+    ] == [[2, 3], [2, 4]]
 
 
 def test_incoming_owner_route_can_be_its_own_unresolved_obligation() -> None:
@@ -528,11 +561,18 @@ evidence = "discharges"
     payload = report.model_dump(mode="json")
     e019 = next(finding for finding in payload["findings"] if finding["code"] == "E019")
 
-    assert [witness["current_owner"]["number"] for witness in e019["witnesses"]] == [3, 4]
-    assert [witness["originating_obligation"]["number"] for witness in e019["witnesses"]] == [2, 2]
+    assert [witness["current_owner"]["number"] for witness in e019["witnesses"]] == [
+        3,
+        4,
+    ]
+    assert [
+        witness["originating_obligation"]["number"] for witness in e019["witnesses"]
+    ] == [2, 2]
 
 
-def test_completed_implementation_route_claim_on_open_issue_reports_unresolved_owner() -> None:
+def test_completed_implementation_route_claim_on_open_issue_reports_unresolved_owner() -> (
+    None
+):
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
@@ -612,6 +652,130 @@ completion = "completed"
     assert tuple(ref.number for ref in findings[0].witness.edge_chain) == (3, 4)
 
 
+def test_issue_46_continuation_closed_route_reports_e016() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Open original route",
+                body=_contract_body(
+                    kind="implementation", owner="#3", evidence="routes"
+                ),
+            ),
+            3: _issue(
+                3,
+                "Closed continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#4", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            4: _issue(4, "Open terminal owner"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E016")
+    payload = report.model_dump(mode="json")
+    e016 = [finding for finding in payload["findings"] if finding["code"] == "E016"]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+
+    assert len(findings) == 1
+    assert len(e016) == 1
+    assert len(findings[0].evidence) == 1
+    assert "#3 -> #4" in findings[0].evidence[0]
+    assert len(e016[0]["witnesses"]) == 1
+    witness = e016[0]["witnesses"][0]
+    assert witness["originating_obligation"]["number"] == 2
+    assert witness["current_owner"]["number"] == 4
+    assert [ref["number"] for ref in witness["edge_chain"][-2:]] == [3, 4]
+    assert doctor_exit_code(report) == 2
+    assert rendered.count("E016:") == 1
+
+
+def test_issue_46_continuation_open_without_claim_has_no_e016() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Open original route",
+                body=_contract_body(
+                    kind="implementation", owner="#3", evidence="routes"
+                ),
+            ),
+            3: _issue(
+                3,
+                "Open continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#4", evidence="routes"
+                ),
+            ),
+            4: _issue(4, "Open terminal owner"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    payload = report.model_dump(mode="json")
+
+    assert _findings(report, "E016") == []
+    assert [
+        finding for finding in payload["findings"] if finding["code"] == "E016"
+    ] == []
+    assert doctor_exit_code(report) == 0
+
+
+def test_issue_46_continuation_inside_reported_chain_is_listed_once() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Closed original route",
+                body=_contract_body(
+                    kind="implementation", owner="#3", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Closed continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#4", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            4: _issue(4, "Open terminal owner"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    findings = _findings(report, "E016")
+    payload = report.model_dump(mode="json")
+    e016 = [finding for finding in payload["findings"] if finding["code"] == "E016"]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+
+    assert len(findings) == 1
+    assert len(findings[0].evidence) == 1
+    assert "#2 -> #3 -> #4" in findings[0].evidence[0]
+    assert (
+        findings[0].evidence[0] != "#3 -> #4 remains unresolved at open terminal owner"
+    )
+    assert len(e016) == 1
+    assert len(e016[0]["witnesses"]) == 1
+    assert [ref["number"] for ref in e016[0]["witnesses"][0]["edge_chain"]] == [2, 3, 4]
+    assert doctor_exit_code(report) == 2
+    assert rendered.count("E016:") == 1
+
+
 def test_completed_implementation_record_with_owner_is_not_a_route() -> None:
     dag = _dag(
         {
@@ -669,10 +833,16 @@ completion = "complete-ish"
     report = generate_doctor_report(dag)
     findings = _findings(report, "E018")
 
-    assert tuple(finding.witness.current_owner for finding in findings if finding.witness is not None) == (_ref(2),)
+    assert tuple(
+        finding.witness.current_owner
+        for finding in findings
+        if finding.witness is not None
+    ) == (_ref(2),)
 
 
-def test_required_grouping_without_executable_descendants_is_e017_even_when_deferred() -> None:
+def test_required_grouping_without_executable_descendants_is_e017_even_when_deferred() -> (
+    None
+):
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
@@ -692,7 +862,9 @@ evidence = "routes"
 """,
                 state=IssueState.closed,
             ),
-            3: _issue(3, "Milestone: deferred shell", body=ACCEPTANCE, labels=("deferred",)),
+            3: _issue(
+                3, "Milestone: deferred shell", body=ACCEPTANCE, labels=("deferred",)
+            ),
             4: _issue(4, "Implementation owner"),
         },
         {1: (2, 3, 4)},
@@ -733,8 +905,14 @@ evidence = "records"
     payload = report.model_dump(mode="json")
     e017 = next(finding for finding in payload["findings"] if finding["code"] == "E017")
 
-    assert [witness["current_owner"]["number"] for witness in e017["witnesses"]] == [3, 4]
-    assert [[ref["number"] for ref in witness["edge_chain"]] for witness in e017["witnesses"]] == [[2, 3], [2, 4]]
+    assert [witness["current_owner"]["number"] for witness in e017["witnesses"]] == [
+        3,
+        4,
+    ]
+    assert [
+        [ref["number"] for ref in witness["edge_chain"]]
+        for witness in e017["witnesses"]
+    ] == [[2, 3], [2, 4]]
 
 
 def test_role_declaration_contradicting_tree_shape_is_w060() -> None:
@@ -890,7 +1068,12 @@ evidence = "routes"
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
-            2: _issue(2, "Original implementation obligation", body=first_route, state=IssueState.closed),
+            2: _issue(
+                2,
+                "Original implementation obligation",
+                body=first_route,
+                state=IssueState.closed,
+            ),
             3: _issue(3, "Coordination hop A", body=route(4), state=IssueState.closed),
             4: _issue(4, "Coordination hop B", body=route(5), state=IssueState.closed),
             5: _issue(5, "Still unresolved owner"),
@@ -905,7 +1088,9 @@ evidence = "routes"
     assert "#2 -> #3 -> #4 -> #5" in findings[0].evidence[0]
 
 
-def test_contract_findings_have_matching_json_witness_data_and_single_text_render() -> None:
+def test_contract_findings_have_matching_json_witness_data_and_single_text_render() -> (
+    None
+):
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
@@ -947,7 +1132,9 @@ evidence = "routes"
     assert rendered.count("E016:") == 1
 
 
-def test_doctor_compares_reported_next_to_independent_native_readiness_selection() -> None:
+def test_doctor_compares_reported_next_to_independent_native_readiness_selection() -> (
+    None
+):
     dag = _dag(
         {
             1: _issue(1, "Ledger: testowner/testrepo"),
@@ -994,12 +1181,16 @@ def _coordination_fence(owner: str) -> str:
 
 def test_grouping_routed_to_another_repository_is_informational() -> None:
     """A grouping whose coordination contract routes to a foreign owner reports I011, not W030."""
-    report = generate_doctor_report(_routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")))
+    report = generate_doctor_report(
+        _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23"))
+    )
 
     assert _findings(report, "W030") == []
     routed = _findings(report, "I011")
     assert len(routed) == 1
-    assert routed[0].evidence == ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23']
+    assert routed[0].evidence == [
+        '#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23'
+    ]
 
 
 def test_grouping_without_route_still_reports_dead_grouping() -> None:
@@ -1008,7 +1199,9 @@ def test_grouping_without_route_still_reports_dead_grouping() -> None:
         report = generate_doctor_report(_routed_grouping_dag(body))
 
         assert _findings(report, "I011") == []
-        assert [finding.evidence for finding in _findings(report, "W030")] == [['#2 "Milestone: Routed" has no open descendants']]
+        assert [finding.evidence for finding in _findings(report, "W030")] == [
+            ['#2 "Milestone: Routed" has no open descendants']
+        ]
 
 
 def test_malformed_route_fence_is_invalid_contract_not_routed() -> None:
@@ -1044,7 +1237,9 @@ def test_closed_routed_owner_reports_w031_not_i011() -> None:
     assert _findings(report, "I011") == []
     assert _findings(report, "W030") == []
     assert [finding.evidence for finding in _findings(report, "W031")] == [
-        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which is closed']
+        [
+            '#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which is closed'
+        ]
     ]
 
 
@@ -1056,19 +1251,25 @@ def test_routed_owner_without_open_work_reports_w031_not_i011() -> None:
 
     assert _findings(report, "I011") == []
     assert [finding.evidence for finding in _findings(report, "W031")] == [
-        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which has no open work units']
+        [
+            '#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which has no open work units'
+        ]
     ]
 
 
 def test_unreadable_routed_owner_reports_the_failure_not_i011() -> None:
     report = generate_doctor_report(
         _routed_grouping_dag(_coordination_fence("otherowner/otherrepo#23")),
-        routed_owner_resolver=_resolver(RoutedOwnerState.unreadable, "gh api failed: Not Found"),
+        routed_owner_resolver=_resolver(
+            RoutedOwnerState.unreadable, "gh api failed: Not Found"
+        ),
     )
 
     assert _findings(report, "I011") == []
     assert [finding.evidence for finding in _findings(report, "W031")] == [
-        ['#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which cannot be read: gh api failed: Not Found']
+        [
+            '#2 "Milestone: Routed" routes its work to otherowner/otherrepo#23, which cannot be read: gh api failed: Not Found'
+        ]
     ]
 
 
@@ -1077,8 +1278,12 @@ def test_distinct_routed_owners_are_read_once() -> None:
     dag = _dag(
         {
             1: _issue(1, "Ledger: Root"),
-            2: _issue(2, "Milestone: A", body=_coordination_fence("otherowner/otherrepo#23")),
-            3: _issue(3, "Milestone: B", body=_coordination_fence("otherowner/otherrepo#23")),
+            2: _issue(
+                2, "Milestone: A", body=_coordination_fence("otherowner/otherrepo#23")
+            ),
+            3: _issue(
+                3, "Milestone: B", body=_coordination_fence("otherowner/otherrepo#23")
+            ),
             4: _issue(4, "Local work unit"),
         },
         {1: (2, 3, 4)},
