@@ -230,12 +230,13 @@ def _required_groupings_without_work(
     deferral_label: str,
 ) -> list[Finding]:
     required_groupings: dict[int, list[ContractDeclaration]] = {}
-    for declaration in _implementation_declarations(declarations_by_issue):
-        for required in declaration.requires:
-            if _is_local(dag, required):
-                if required.number not in required_groupings:
-                    required_groupings[required.number] = []
-                required_groupings[required.number].append(declaration)
+    for declarations in declarations_by_issue.values():
+        for declaration in declarations:
+            for required in declaration.requires:
+                if _is_local(dag, required):
+                    if required.number not in required_groupings:
+                        required_groupings[required.number] = []
+                    required_groupings[required.number].append(declaration)
 
     evidence: list[str] = []
     first_witness: AuditFindingWitness | None = None
@@ -251,20 +252,20 @@ def _required_groupings_without_work(
             if deferral_label.casefold() in _label_set(issue.labels)
             else ""
         )
-        evidence.append(
-            f"#{required_number} {issue.title!r} is required but has no executable work-unit descendants{label_note}"
-        )
-        declaration = declarations[0]
-        witness = AuditFindingWitness(
-            originating_obligation=declaration.origin or declaration.issue,
-            current_owner=_issue_ref(dag, required_number),
-            edge_chain=(declaration.issue, _issue_ref(dag, required_number)),
-            conflicting_state=issue.state.value,
-            obligation_kind=declaration.kind.value,
-            unresolved_burden="required grouping has no executable work-unit descendants",
-        )
-        witnesses.append(witness)
-        first_witness = first_witness or witness
+        for declaration in declarations:
+            evidence.append(
+                f"#{required_number} {issue.title!r} is required but has no executable work-unit descendants{label_note}"
+            )
+            witness = AuditFindingWitness(
+                originating_obligation=declaration.origin or declaration.issue,
+                current_owner=_issue_ref(dag, required_number),
+                edge_chain=(declaration.issue, _issue_ref(dag, required_number)),
+                conflicting_state=issue.state.value,
+                obligation_kind=declaration.kind.value,
+                unresolved_burden="required grouping has no executable work-unit descendants",
+            )
+            witnesses.append(witness)
+            first_witness = first_witness or witness
 
     return (
         [_finding("E017", evidence, first_witness, tuple(witnesses))]
