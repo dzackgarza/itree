@@ -26,18 +26,36 @@ def audit_completion_contracts(
 ) -> list[Finding]:
     """Evaluate explicit completion contracts without mutating repository state."""
     parsed = {
-        number: parse_issue_contracts(issue.body, repo_ref=dag.repo_ref, issue_number=number) for number, issue in sorted(dag.issues.items()) if not issue.is_pull_request
+        number: parse_issue_contracts(
+            issue.body, repo_ref=dag.repo_ref, issue_number=number
+        )
+        for number, issue in sorted(dag.issues.items())
+        if not issue.is_pull_request
     }
-    declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]] = {number: parsed_issue.declarations for number, parsed_issue in parsed.items()}
+    declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]] = {
+        number: parsed_issue.declarations for number, parsed_issue in parsed.items()
+    }
 
     findings: list[Finding] = []
     findings.extend(_parse_findings(parsed))
     findings.extend(_invalid_implementation_discharges(dag, declarations_by_issue))
     findings.extend(_unresolved_implementation_routes(dag, declarations_by_issue))
-    findings.extend(_required_groupings_without_work(dag, declarations_by_issue, deferral_label=deferral_label))
+    findings.extend(
+        _required_groupings_without_work(
+            dag, declarations_by_issue, deferral_label=deferral_label
+        )
+    )
     findings.extend(_role_contradictions(dag, declarations_by_issue))
-    findings.extend(_decomposition_label_contradictions(dag, declarations_by_issue, decomposition_label=decomposition_label))
-    findings.extend(_derived_state_label_duplications(dag, derived_state_labels=derived_state_labels))
+    findings.extend(
+        _decomposition_label_contradictions(
+            dag, declarations_by_issue, decomposition_label=decomposition_label
+        )
+    )
+    findings.extend(
+        _derived_state_label_duplications(
+            dag, derived_state_labels=derived_state_labels
+        )
+    )
     findings.extend(_non_monotone_revalidation_questions(dag, declarations_by_issue))
     return findings
 
@@ -93,13 +111,19 @@ def _invalid_implementation_discharges(
     witnesses: list[AuditFindingWitness] = []
     for owner_number, declarations in sorted(declarations_by_issue.items()):
         for declaration in declarations:
-            if declaration.kind == ContractKind.implementation or declaration.evidence != ContractEvidence.discharges or declaration.origin is None:
+            if (
+                declaration.kind == ContractKind.implementation
+                or declaration.evidence != ContractEvidence.discharges
+                or declaration.origin is None
+            ):
                 continue
             if not _is_local(dag, declaration.origin):
                 continue
             if declaration.origin.number not in implementation_origins:
                 continue
-            evidence.append(f"#{owner_number} presents {declaration.kind.value} evidence as discharge for implementation obligation #{declaration.origin.number}")
+            evidence.append(
+                f"#{owner_number} presents {declaration.kind.value} evidence as discharge for implementation obligation #{declaration.origin.number}"
+            )
             witness = AuditFindingWitness(
                 originating_obligation=declaration.origin,
                 current_owner=declaration.issue,
@@ -111,7 +135,11 @@ def _invalid_implementation_discharges(
             witnesses.append(witness)
             first_witness = first_witness or witness
 
-    return [_finding("E019", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("E019", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _unresolved_implementation_routes(
@@ -124,51 +152,74 @@ def _unresolved_implementation_routes(
     churn_witness: AuditFindingWitness | None = None
     witnesses: list[AuditFindingWitness] = []
     churn_witnesses: list[AuditFindingWitness] = []
+    walked_chains: list[tuple[IssueRef, list[IssueRef]]] = []
 
     for declaration in _implementation_routes(declarations_by_issue):
-        if not _is_route_root(declaration) and declaration.completion != ContractCompletion.completed:
+        if (
+            not _is_route_root(declaration)
+            and declaration.completion != ContractCompletion.completed
+            and dag.issues[declaration.issue.number].is_open
+        ):
             continue
         origin = declaration.origin or declaration.issue
         if not _is_local(dag, origin):
             continue
         if not _starts_from_closed_route(dag, declaration, origin):
             continue
-        for chain in _walk_implementation_chain(dag, declarations_by_issue, origin, declaration):
-            terminal = chain[-1]
-            if _chain_is_discharged(dag, declarations_by_issue, origin, terminal):
-                continue
-            chain_text = _format_chain(chain)
-            terminal_issue = dag.issues.get(terminal.number)
-            terminal_state = terminal_issue.state.value if terminal_issue else "missing"
-            evidence.append(f"{chain_text} remains unresolved at {terminal_state} terminal owner")
-            witness = AuditFindingWitness(
+        for chain in _walk_implementation_chain(
+            dag, declarations_by_issue, origin, declaration
+        ):
+            walked_chains.append((origin, chain))
+
+    for origin, chain in walked_chains:
+        if any(
+            other_origin == origin
+            and len(other_chain) > len(chain)
+            and other_chain[-len(chain) :] == chain
+            for other_origin, other_chain in walked_chains
+        ):
+            continue
+        terminal = chain[-1]
+        if _chain_is_discharged(dag, declarations_by_issue, origin, terminal):
+            continue
+        chain_text = _format_chain(chain)
+        terminal_issue = dag.issues.get(terminal.number)
+        terminal_state = terminal_issue.state.value if terminal_issue else "missing"
+        evidence.append(
+            f"{chain_text} remains unresolved at {terminal_state} terminal owner"
+        )
+        witness = AuditFindingWitness(
+            originating_obligation=origin,
+            current_owner=terminal,
+            edge_chain=tuple(chain),
+            conflicting_state=terminal_state,
+            obligation_kind=ContractKind.implementation.value,
+            unresolved_burden="implementation obligation lacks a matching implementation discharge",
+        )
+        witnesses.append(witness)
+        first_witness = first_witness or witness
+        if len(chain) >= 4:
+            churn_evidence.append(
+                f"{chain_text} has {len(chain) - 1} routing hops before implementation discharge"
+            )
+            churn_route_witness = AuditFindingWitness(
                 originating_obligation=origin,
                 current_owner=terminal,
                 edge_chain=tuple(chain),
                 conflicting_state=terminal_state,
                 obligation_kind=ContractKind.implementation.value,
-                unresolved_burden="implementation obligation lacks a matching implementation discharge",
+                unresolved_burden="routing chain churns before implementation-bearing owner",
             )
-            witnesses.append(witness)
-            first_witness = first_witness or witness
-            if len(chain) >= 4:
-                churn_evidence.append(f"{chain_text} has {len(chain) - 1} routing hops before implementation discharge")
-                churn_route_witness = AuditFindingWitness(
-                    originating_obligation=origin,
-                    current_owner=terminal,
-                    edge_chain=tuple(chain),
-                    conflicting_state=terminal_state,
-                    obligation_kind=ContractKind.implementation.value,
-                    unresolved_burden="routing chain churns before implementation-bearing owner",
-                )
-                churn_witnesses.append(churn_route_witness)
-                churn_witness = churn_witness or churn_route_witness
+            churn_witnesses.append(churn_route_witness)
+            churn_witness = churn_witness or churn_route_witness
 
     findings: list[Finding] = []
     if evidence:
         findings.append(_finding("E016", evidence, first_witness, tuple(witnesses)))
     if churn_evidence:
-        findings.append(_finding("Q005", churn_evidence, churn_witness, tuple(churn_witnesses)))
+        findings.append(
+            _finding("Q005", churn_evidence, churn_witness, tuple(churn_witnesses))
+        )
     return findings
 
 
@@ -195,8 +246,14 @@ def _required_groupings_without_work(
             continue
         if _has_open_executable_descendant(dag, required_number):
             continue
-        label_note = " including deferred shell" if deferral_label.casefold() in _label_set(issue.labels) else ""
-        evidence.append(f"#{required_number} {issue.title!r} is required but has no executable work-unit descendants{label_note}")
+        label_note = (
+            " including deferred shell"
+            if deferral_label.casefold() in _label_set(issue.labels)
+            else ""
+        )
+        evidence.append(
+            f"#{required_number} {issue.title!r} is required but has no executable work-unit descendants{label_note}"
+        )
         declaration = declarations[0]
         witness = AuditFindingWitness(
             originating_obligation=declaration.origin or declaration.issue,
@@ -209,7 +266,11 @@ def _required_groupings_without_work(
         witnesses.append(witness)
         first_witness = first_witness or witness
 
-    return [_finding("E017", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("E017", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _role_contradictions(
@@ -220,14 +281,24 @@ def _role_contradictions(
     first_witness: AuditFindingWitness | None = None
     witnesses: list[AuditFindingWitness] = []
     for number, declarations in sorted(declarations_by_issue.items()):
-        declared_roles = tuple(declaration.role for declaration in declarations if declaration.role is not None)
+        declared_roles = tuple(
+            declaration.role
+            for declaration in declarations
+            if declaration.role is not None
+        )
         if not declared_roles:
             continue
-        actual_role = ContractRole.grouping if _is_structural_grouping(dag, number) else ContractRole.work_unit
+        actual_role = (
+            ContractRole.grouping
+            if _is_structural_grouping(dag, number)
+            else ContractRole.work_unit
+        )
         for declared_role in declared_roles:
             if declared_role == actual_role:
                 continue
-            evidence.append(f"#{number} declares role={declared_role.value} but tree/title structure is {actual_role.value}")
+            evidence.append(
+                f"#{number} declares role={declared_role.value} but tree/title structure is {actual_role.value}"
+            )
             witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state=f"declared={declared_role.value} actual={actual_role.value}",
@@ -235,7 +306,11 @@ def _role_contradictions(
             )
             witnesses.append(witness)
             first_witness = first_witness or witness
-    return [_finding("W060", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("W060", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _decomposition_label_contradictions(
@@ -249,8 +324,15 @@ def _decomposition_label_contradictions(
     witnesses: list[AuditFindingWitness] = []
     normalized_label = decomposition_label.casefold()
     for number, issue in sorted(dag.issues.items()):
-        if normalized_label and issue.is_open and normalized_label in _label_set(issue.labels) and not _is_structural_grouping(dag, number):
-            evidence.append(f"#{number} carries decomposition label {decomposition_label!r} but is a work-unit leaf")
+        if (
+            normalized_label
+            and issue.is_open
+            and normalized_label in _label_set(issue.labels)
+            and not _is_structural_grouping(dag, number)
+        ):
+            evidence.append(
+                f"#{number} carries decomposition label {decomposition_label!r} but is a work-unit leaf"
+            )
             witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state=f"label={decomposition_label}",
@@ -260,9 +342,15 @@ def _decomposition_label_contradictions(
             first_witness = first_witness or witness
         if not _is_grouping(issue.title):
             continue
-        complete_declarations = [declaration for declaration in declarations_by_issue[number] if declaration.decomposition == ContractDecomposition.complete]
+        complete_declarations = [
+            declaration
+            for declaration in declarations_by_issue[number]
+            if declaration.decomposition == ContractDecomposition.complete
+        ]
         if complete_declarations and not _has_open_executable_descendant(dag, number):
-            evidence.append(f"#{number} claims decomposition=complete but has no executable owner descendant")
+            evidence.append(
+                f"#{number} claims decomposition=complete but has no executable owner descendant"
+            )
             witness = AuditFindingWitness(
                 current_owner=_issue_ref(dag, number),
                 conflicting_state="decomposition=complete",
@@ -270,7 +358,11 @@ def _decomposition_label_contradictions(
             )
             witnesses.append(witness)
             first_witness = first_witness or witness
-    return [_finding("W061", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("W061", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _derived_state_label_duplications(
@@ -288,7 +380,9 @@ def _derived_state_label_duplications(
         overlapping = sorted(_label_set(issue.labels) & configured)
         if not issue.is_open or not overlapping:
             continue
-        evidence.append(f"#{number} carries derived-state label(s): {', '.join(overlapping)}")
+        evidence.append(
+            f"#{number} carries derived-state label(s): {', '.join(overlapping)}"
+        )
         witness = AuditFindingWitness(
             current_owner=_issue_ref(dag, number),
             conflicting_state=f"labels={','.join(overlapping)}",
@@ -296,7 +390,11 @@ def _derived_state_label_duplications(
         )
         witnesses.append(witness)
         first_witness = first_witness or witness
-    return [_finding("W062", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("W062", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _non_monotone_revalidation_questions(
@@ -311,11 +409,19 @@ def _non_monotone_revalidation_questions(
         for declaration in declarations:
             if issue.is_open and declaration.completion != ContractCompletion.completed:
                 continue
-            live_refs = [ref for ref in declaration.revalidate_on if _is_local(dag, ref) and ref.number in dag.issues and dag.issues[ref.number].is_open]
+            live_refs = [
+                ref
+                for ref in declaration.revalidate_on
+                if _is_local(dag, ref)
+                and ref.number in dag.issues
+                and dag.issues[ref.number].is_open
+            ]
             if not live_refs:
                 continue
             live_text = ", ".join(f"#{ref.number}" for ref in live_refs)
-            evidence.append(f"closure claim #{number} declares revalidate_on live issue(s): {live_text}")
+            evidence.append(
+                f"closure claim #{number} declares revalidate_on live issue(s): {live_text}"
+            )
             witness = AuditFindingWitness(
                 originating_obligation=declaration.origin or declaration.issue,
                 current_owner=declaration.issue,
@@ -326,7 +432,11 @@ def _non_monotone_revalidation_questions(
             )
             witnesses.append(witness)
             first_witness = first_witness or witness
-    return [_finding("Q004", evidence, first_witness, tuple(witnesses))] if evidence else []
+    return (
+        [_finding("Q004", evidence, first_witness, tuple(witnesses))]
+        if evidence
+        else []
+    )
 
 
 def _implementation_declarations(
@@ -342,7 +452,10 @@ def _implementation_routes(
     declarations_by_issue: dict[int, tuple[ContractDeclaration, ...]],
 ) -> Iterable[ContractDeclaration]:
     for declaration in _implementation_declarations(declarations_by_issue):
-        if declaration.owner is not None and declaration.evidence == ContractEvidence.routes:
+        if (
+            declaration.owner is not None
+            and declaration.evidence == ContractEvidence.routes
+        ):
             yield declaration
 
 
@@ -369,7 +482,9 @@ def _transitive_implementation_owner_origins(
         origin = declaration.origin or declaration.issue
         if not _is_local(dag, origin):
             continue
-        for chain in _walk_implementation_chain(dag, declarations_by_issue, origin, declaration):
+        for chain in _walk_implementation_chain(
+            dag, declarations_by_issue, origin, declaration
+        ):
             for owner in chain[1:]:
                 if not _is_local(dag, owner):
                     continue
@@ -383,7 +498,9 @@ def _is_route_root(declaration: ContractDeclaration) -> bool:
     return declaration.origin is None or declaration.origin == declaration.issue
 
 
-def _starts_from_closed_route(dag: RepoDag, declaration: ContractDeclaration, origin: IssueRef) -> bool:
+def _starts_from_closed_route(
+    dag: RepoDag, declaration: ContractDeclaration, origin: IssueRef
+) -> bool:
     if declaration.completion == ContractCompletion.completed:
         return True
     declaration_issue = dag.issues.get(declaration.issue.number)
@@ -401,7 +518,14 @@ def _walk_implementation_chain(
 ) -> list[list[IssueRef]]:
     if declaration.owner is None:
         return [[declaration.issue]]
-    return _walk_owner(dag, declarations_by_issue, origin, declaration.owner, [declaration.issue], set())
+    return _walk_owner(
+        dag,
+        declarations_by_issue,
+        origin,
+        declaration.owner,
+        [declaration.issue],
+        set(),
+    )
 
 
 def _walk_owner(
@@ -435,7 +559,16 @@ def _walk_owner(
     for route in next_routes:
         next_owner = route.owner
         if next_owner is not None:
-            chains.extend(_walk_owner(dag, declarations_by_issue, origin, next_owner, chain + [owner], seen_with_owner))
+            chains.extend(
+                _walk_owner(
+                    dag,
+                    declarations_by_issue,
+                    origin,
+                    next_owner,
+                    chain + [owner],
+                    seen_with_owner,
+                )
+            )
     return chains
 
 
@@ -450,7 +583,11 @@ def _chain_is_discharged(
     if owner.number not in declarations_by_issue:
         return False
     for declaration in declarations_by_issue[owner.number]:
-        if declaration.kind == ContractKind.implementation and declaration.evidence == ContractEvidence.discharges and declaration.origin == origin:
+        if (
+            declaration.kind == ContractKind.implementation
+            and declaration.evidence == ContractEvidence.discharges
+            and declaration.origin == origin
+        ):
             return True
     return False
 
@@ -472,7 +609,9 @@ def _has_open_executable_descendant(dag: RepoDag, issue_number: int) -> bool:
 
 def _is_structural_grouping(dag: RepoDag, issue_number: int) -> bool:
     issue = dag.issues[issue_number]
-    return _is_grouping(issue.title) or any(dag.issues[child].is_open for child in dag.children_of[issue_number])
+    return _is_grouping(issue.title) or any(
+        dag.issues[child].is_open for child in dag.children_of[issue_number]
+    )
 
 
 def _is_grouping(title: str) -> bool:
@@ -490,7 +629,10 @@ def _issue_ref(dag: RepoDag, number: int) -> IssueRef:
 
 
 def _format_chain(chain: list[IssueRef]) -> str:
-    return " -> ".join(f"#{ref.number}" if ref.repo_ref == chain[0].repo_ref else ref.slug for ref in chain)
+    return " -> ".join(
+        f"#{ref.number}" if ref.repo_ref == chain[0].repo_ref else ref.slug
+        for ref in chain
+    )
 
 
 def _label_set(labels: tuple[str, ...]) -> set[str]:
