@@ -61,9 +61,10 @@ for stages of the selected issue. itree supplies the issue context and records e
 accepted result on GitHub. A stage that loses a concurrent edit or whose result cannot
 be confirmed remains incomplete.
 
-A repository with its own work-selection policy retains authority over that policy.
-Adopting a different task order requires a decision in the repository that owns it.
-The integration specification defines the boundary and its acceptance cases.
+Every project uses this workflow. Express its priorities and prerequisites in the
+itree issue tree and the selected issue's Spec Kit tasks. When another instruction
+assigns planning or execution state elsewhere, correct its source immediately.
+Preserve outstanding obligations and their evidence when transferring work.
 [Issue-owned execution](../../specs/001-issue-owned-execution/spec.md)
 
 ## Specification and review
@@ -100,4 +101,4 @@ Increase the major version when an existing principle changes meaning or is remo
 Increase the minor version when adding a goal or principle. Use a patch version for
 clarifications that preserve the obligation.
 
-**Version**: 1.1.0 | **Ratified**: 2026-11-27 | **Last Amended**: 2026-11-27
+**Version**: 2.0.0 | **Ratified**: 2026-11-27 | **Last Amended**: 2026-11-27

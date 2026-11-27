@@ -85,5 +85,5 @@ local prerequisite graph in the work unit; Pydantic and NetworkX are already pro
 dependencies. Use stable task IDs and declared order among ready tasks. Promoting an
 interleaved dependency between tasks of two issues to a whole-issue blocker can
 create a cycle. An external prerequisite is outside the issue-local selector's domain.
-The definition-first ordering of lean-categories remains a policy of that repository.
-[Readiness implementation](../../src/itree/readiness.py) · [Issue-local scheduling](https://github.com/dzackgarza/itree/issues/67) · [Consumer policy](spec.md#repository-policy-boundary)
+Adoption must preserve the definition-first order required by lean-categories in the shared workflow.
+[Readiness implementation](../../src/itree/readiness.py) · [Issue-local scheduling](https://github.com/dzackgarza/itree/issues/67) · [Project adoption](spec.md#project-adoption)

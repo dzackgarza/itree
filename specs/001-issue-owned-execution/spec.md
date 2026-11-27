@@ -92,6 +92,7 @@ and the evidence required by NS-003. [Resume contract](https://github.com/dzackg
 | FR-003 | Use native blockers for whole-work-unit prerequisites and tree preorder among eligible work units. Resolve internal prerequisites within their owning issue. Report a cycle or missing task by identifier. | US3 |
 | FR-004 | Compare delivered work with every original acceptance condition and the claimed contribution to the project's goal. Identify the exact contract version, code revision, and evidence reviewed. An independent reviewer must be able to retrieve them after the issue changes. | US4 |
 | FR-005 | Reuse the pinned upstream prompts, templates, harness adapters, and workflow engine. Add itree commands through an extension and adapt prompt or template behavior through a preset where needed. Bind mandatory hooks to an executing workflow step. | US1, US5 |
+| FR-006 | Correct competing planning instructions at their source. Transfer active obligations to the owning issues with their task identities, order, prerequisites and evidence intact. | US1, US3 |
 
 ### Decision on storage and review
 
@@ -127,21 +128,23 @@ fork. Reconsider that decision only against a specific, demonstrated incompatibi
   adaptations, and harness used. It shows a mandatory hook stopping the stage, a
   successful resume from GitHub, and independent review before closure.
 
-## Repository policy boundary
+- **SC-005 (US1, US3).** After transfer, a fresh session can recover each open obligation and its previous evidence from the owning issue and select the required next task. Regenerating project instructions sends that session to the same workflow.
 
-The integration above applies to repositories that use itree to select work. A
-consumer's constitution can assign selection and task state to a different owner.
-At revision `e40aeed`, lean-categories M11 assigns execution state to each feature's
-`tasks.md`. Feature 002 orders work across features. Issues retain the original
-request and acceptance conditions. Inserting issue-tree priority between a priority
-band and its listed tasks changes M11's choice whenever the orders disagree.
-Giving definition-bearing tasks priority across ready issues would also change
-itree's choice when the first ready leaf in preorder owns different work.
+## Project adoption
+
+Every project uses itree for work selection and Spec Kit for planning and executing
+the selected issue. A vault can hold reusable knowledge. When a vault plan card,
+harness instruction, or separate task list directs current work, correct its source. Transfer the original scope, outstanding tasks, completion
+evidence and prerequisites to their work-unit owners before retiring a tracker.
+
+The lean-categories order at revision `e40aeed` supplies a migration case. Its
+feature task IDs and definition-first ordering carry requirements that the transfer
+must preserve.
 [M11](https://github.com/dzackgarza/lean-categories/blob/e40aeed54c2289d7a13db8b9014c5da49b2b9b83/.specify/memory/constitution.md#m11-definition-first-spec-kit-execution) · [Execution order](https://github.com/dzackgarza/lean-categories/blob/e40aeed54c2289d7a13db8b9014c5da49b2b9b83/specs/002-foundational-corpus-sweeps/tasks.md#repository-wide-execution-order)
 
-Any proposed generator for that table must reproduce M11's choices at the same input
-state. Check genuine groundwork, definition-bearing tasks, then independent proofs and
-delivery work. Preserve the listed order within each band and follow actual prerequisites
-across features. A proof needed to construct a definition runs before that definition;
-an unrelated theorem waits. Compare a case where tree order differs from the table as
-well. Adoption or amendment of this policy belongs to lean-categories.
+Validate the issue-owned order against the same input state: genuine groundwork,
+definition-bearing tasks, then independent proofs and delivery work. Preserve the
+specified order within each band. A proof needed to construct a definition runs first;
+an unrelated theorem waits. Where the issue-local selector cannot express a genuine
+cross-issue task dependency, that is a defect in the common workflow. Repair it at
+its owner and demonstrate the required sequence before declaring the transfer complete.

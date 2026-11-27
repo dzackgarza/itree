@@ -121,3 +121,14 @@ independent review at its full commit SHA. Repeat audit and close, then verify
 `CLOSED` and retrieve the exact contract and evidence from the disposition. Edit an
 unrelated body passage in the fixture and confirm the earlier review is still
 reproducible. Publish acceptance evidence on the owning work unit during implementation.
+
+## Transfer an existing plan (US1, US3)
+
+Start with a vault plan card or feature task list that has an unfinished task,
+a prerequisite and evidence for a completed task. Locate the original work-unit
+issue and reconcile each entry against it. Keep its identifier, acceptance
+condition, order, dependency and evidence link. Correct the instruction that
+directed contributors to the old tracker, then regenerate the project instructions.
+In a fresh checkout, follow those instructions. Confirm that the issue returns
+the original outstanding work, links to the prior evidence and selects the
+expected next task. Compare with the source plan before retiring it.

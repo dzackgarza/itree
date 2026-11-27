@@ -23,7 +23,7 @@ issue owns its current plan, task ordering, progress, findings and acceptance ev
 | State and identity | Work-unit body and comments, selected by qualified GitHub reference. Use issue node ID for identity at write time. Git contains code and durable design or proof artifacts. Materialize a temporary feature directory on each stage invocation. |
 | Write authority | During a stage, **one writer per issue** applies body edits from contributors, maintainers and other automation. Use a repository-owned Actions workflow to drain durable proposals. Native GitHub edits between managed sessions remain possible. [Writer contract](contracts/issue-writer.md) |
 | Execution | Pinned Spec Kit extension, preset, harness adapters and workflow engine. The shell or command step executes mandatory hooks. Bind each attempt, hook, and receipt to its issue. |
-| Scope | Existing CLI and supported agent harnesses. Work-unit choice retains itree's repository preorder. Task choice is local to the selected issue. The lean-categories M11 policy remains owned by that repository. |
+| Scope | All projects use itree selection and issue-owned Spec Kit tasks. Project priorities such as definition-first work constrain the issue order and actual task prerequisites. |
 | Evidence and scale | Use the existing CLI test boundary for small graphs, errors, interrupted writes and repeatable interleavings. Paginate issue comments; move large research and evidence into indexed comments. Use real GitHub, the writer workflow, and real harness sessions at the delivery milestone. Tier 1 must stay under five minutes. No product latency objective is specified. |
 
 ## Constitution check
@@ -34,7 +34,7 @@ issue owns its current plan, task ordering, progress, findings and acceptance ev
 | II. Ownership | Recover unfinished work from the issue (NS-002). | Preserve original contract bytes, current sections and confirmed stage receipts on GitHub. Render scratch files for upstream stages and reload from the issue after interruption. |
 | III. Observable changes | Make partial or concurrent mutations identifiable (NS-002). | Serialize all participating body editors, compare section bases, record intended and confirmed effects, and stop on conflict or uncertainty. The maintainer selected this editing policy for the active stage. |
 | IV. Acceptance | Preserve every original obligation until independent evidence establishes it (NS-003). | Record the exact contract, code SHA, references and disposition. A stale review, missing evidence, or failed verification leaves the issue open. |
-| V. Upstream execution | Make stage and hook results visible to the next session (NS-002, NS-003). | Pin the examined runtime, run mandatory hooks, and reconstruct stage state from confirmed issue receipts. Preserve external repositories' own selection policies. |
+| V. Upstream execution | Make stage and hook results visible to the next session (NS-002, NS-003). | Pin the examined runtime, run mandatory hooks, and reconstruct stage state from confirmed issue receipts. Validate project priorities through the common selection path. |
 
 The design satisfies these planning gates under the single-writer policy. Runtime
 acceptance depends on observing the cases below. A bypassed writer, unconfirmed body
@@ -53,7 +53,7 @@ change, or unexecuted mandatory hook fails its gate. [Constitution](../../.speci
   and task prerequisites at their own owners; preserve existing doctor findings.
 - Ship the extension, preset, workflow and consumer writer definition as itree package
   resources. The installer renders upstream harness files and installs
-  `.github/workflows/itree-issue-writer.yml` in a participating repository. Make
+  `.github/workflows/itree-issue-writer.yml` in each project during setup. Make
   installation repeatable, preserve existing harness settings and hooks, and identify
   collisions before overwriting a file. Implement there only after the design is
   approved for delivery. No writer is deployed by this plan.
@@ -89,6 +89,7 @@ records how the design fits together; the individual issues carry execution stat
 | FR-003 | Global and within-issue selection produce the expected ready leaf and task. The interleaved cross-issue example leaves native blockers untouched. | [CLI contract](contracts/cli-and-stages.md), [selection checks](quickstart.md#readiness-and-independent-closure-us3-us4); US3, SC-002 |
 | FR-004 | Independent review can recover the exact contract and code examined. Checked tasks and a clean structural audit leave an unmet issue open. | [Review record](data-model.md), [closure checks](quickstart.md#readiness-and-independent-closure-us3-us4); US4, SC-003 |
 | FR-005 | Each real harness loads the issue. A mandatory hook failure stops its stage. A fresh checkout resumes from the issue and reaches independent review. | [Harness contract](contracts/cli-and-stages.md), [harness run](quickstart.md#handoff-and-recovery-us1-us5); US1, US5, SC-004 |
+| FR-006 | Reinitializing a checkout directs work to the same issue. A contributor recovers the transferred obligations, order and evidence there. | [Project adoption](spec.md#project-adoption), [transfer checks](quickstart.md#transfer-an-existing-plan-us1-us3); US1, US3, SC-005 |
 
 For each evidence run, retain the environment, upstream and code revisions, fixture
 identity, elapsed setup and execution times, and the observable effects. Run longer
