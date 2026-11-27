@@ -1100,10 +1100,9 @@ def _create_missing_refs(slug: str, root: Path, missing: list[tuple[str, str]]) 
         payload = data.get(f"r{index:03d}")
         if not isinstance(payload, dict):
             continue
-        candidate = payload.get("createRef")
-        if not isinstance(candidate, dict) or candidate.get("ref") is None:
+        if "ref" not in payload or payload["ref"] is None:
             continue
-        result = candidate["ref"]
+        result = payload["ref"]
         assert isinstance(result, dict)
         target = result.get("target")
         if (
@@ -1122,7 +1121,8 @@ def _create_missing_refs(slug: str, root: Path, missing: list[tuple[str, str]]) 
         )
     if len(created) != len(missing) or response.get("errors"):
         raise FixtureRecoveryError(
-            f"ref creation returned failed or invalid aliases; valid IDs were persisted: {response}"
+            f"ref creation returned failed or invalid aliases; "
+            f"persisted {len(created)} valid IDs: {response}"
         )
 
 
