@@ -234,3 +234,188 @@ def test_public_command_recovers_the_selected_live_contract(
     assert "OPEN-VERIFICATION-FINDING-EXACT" in result.stdout
     assert fixture_state.roadmap_body in result.stdout
     assert "ROADMAP-COMMENT-DECISION-EXACT" in result.stdout
+
+
+def test_all_comment_pages_preserve_every_body_and_identifier_in_order(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.pagination,
+        "module",
+        tmp_path / "pagination",
+        "T005-pagination",
+    )
+
+    assert result.returncode == 0, result.stderr
+    previous = -1
+    for index, body in enumerate(fixture_state.pagination_comments):
+        assert result.stdout.count(body) == 1, f"comment {index} is missing or repeated"
+        offset = result.stdout.index(body)
+        assert offset > previous, f"comment {index} is out of GitHub order"
+        previous = offset
+    for identifier in (
+        fixture_state.pagination_ids[0],
+        fixture_state.pagination_ids[50],
+        fixture_state.pagination_ids[-1],
+    ):
+        assert f"id={identifier}" in result.stdout
+
+
+def test_managed_and_legacy_layout_indexing_preserves_body_bytes(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    managed = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "managed",
+        "T005-managed",
+    )
+    legacy = invoke_work(
+        fixture_state,
+        fixture_state.legacy,
+        "module",
+        tmp_path / "legacy",
+        "T005-legacy",
+    )
+    fenced = invoke_work(
+        fixture_state,
+        fixture_state.fenced,
+        "module",
+        tmp_path / "fenced",
+        "T005-fenced",
+    )
+
+    for result, body in (
+        (managed, fixture_state.selected_body),
+        (legacy, fixture_state.legacy_body),
+        (fenced, fixture_state.fenced_body),
+    ):
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count(body) == 1
+    assert "Section index" in managed.stdout
+    assert "original-contract" in managed.stdout
+    assert "requirements" in managed.stdout
+    assert "plan" in managed.stdout
+    assert "tasks" in managed.stdout
+    assert "line_start=" in managed.stdout
+    assert "byte_start=" in managed.stdout
+    for result in (legacy, fenced):
+        assert result.stdout.count("reason=legacy_zero_marker") == 3
+        assert "kind=legacy" in result.stdout
+        assert "kind=managed" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "kind", ("duplicate", "nested", "unknown", "partial", "reordered", "unterminated")
+)
+def test_invalid_layout_returns_readable_content_and_exit_two(
+    fixture_state: FixtureState, tmp_path: Path, kind: str
+) -> None:
+    number = fixture_state.malformed[kind]
+    result = invoke_work(
+        fixture_state,
+        number,
+        "module",
+        tmp_path / f"invalid-{kind}",
+        f"T005-invalid-{kind}",
+    )
+
+    assert result.returncode == 2
+    assert result.stdout.count(fixture_state.malformed_text[kind]) == 1
+    assert f"MALFORMED-{kind.upper()}-COMMENT" in result.stdout
+    assert kind in result.stderr
+    assert f"{fixture_state.repo}#{number}" in result.stderr
+    assert "Section index" not in result.stdout
+    assert "Work package complete" not in result.stdout
+    assert "Work package complete" not in result.stderr
+
+
+def test_native_parent_cycle_returns_readable_ancestors_and_exit_two(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.cycle_a,
+        "module",
+        tmp_path / "cycle",
+        "T005-parent-cycle",
+        path_gh=fixture_state.cycle_gh,
+    )
+
+    assert result.returncode == 2
+    assert "CYCLE-A-READABLE-BODY" in result.stdout
+    assert "CYCLE-A-READABLE-COMMENT" in result.stdout
+    assert "CYCLE-B-READABLE-BODY" in result.stdout
+    assert "CYCLE-B-READABLE-COMMENT" in result.stdout
+    assert "Section index" not in result.stdout
+    assert (
+        f"{fixture_state.repo}#{fixture_state.cycle_a} -> {fixture_state.repo}#{fixture_state.cycle_b} -> {fixture_state.repo}#{fixture_state.cycle_a}"
+        in result.stderr
+    )
+    assert "Work package complete" not in result.stdout
+    assert "Work package complete" not in result.stderr
+
+
+def test_unreadable_selected_issue_exits_three_without_package(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        999_999_999,
+        "module",
+        tmp_path / "missing-issue",
+        "T005-missing-issue",
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert f"{fixture_state.repo}#999999999" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+def test_required_comment_read_failure_exits_three_without_package(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "failed-comments",
+        "T005-failed-comments",
+        path_gh=fixture_state.fail_comments_gh,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "FIXTURE-REQUIRED-COMMENT-READ-FAILURE" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+def test_all_public_entry_points_emit_the_same_live_package(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    outputs: dict[EntryPoint, subprocess.CompletedProcess[str]] = {}
+    for candidate in ("installed", "module", "direct-cli", "direct-main"):
+        outputs[candidate] = invoke_work(
+            fixture_state,
+            fixture_state.selected,
+            candidate,
+            tmp_path / f"parity-{candidate}",
+            f"T010-parity-{candidate}",
+        )
+        assert outputs[candidate].returncode == 0, outputs[candidate].stderr
+
+    baseline = outputs["module"]
+    for candidate, result in outputs.items():
+        assert result.stdout == baseline.stdout, (
+            f"entry-point package differs: {candidate}"
+        )
+        assert result.stderr == baseline.stderr, (
+            f"entry-point diagnostics differ: {candidate}"
+        )
+    assert fixture_state.selected_body in baseline.stdout
+    assert "DECOY-FEATURE-POINTER" not in baseline.stdout
+    assert "DECOY-CACHED-PLAN" not in baseline.stdout
+    assert "DECOY-SPECIFICATION" not in baseline.stdout
