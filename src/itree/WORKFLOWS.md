@@ -266,6 +266,8 @@ completion = "completed"
 
 The fence is strict TOML. Valid `kind` values are `implementation`, `proof`, `research`, `audit`, `coordination`, and `redo_risk` (see Redo risk between small and large units). Valid `evidence` values are `routes`, `records`, `narrows`, and `discharges`. Refs use `#N` for the same repo or `OWNER/REPO#N` for a qualified issue.
 
+The audit reads each top-level `itree-contract` fence in the body of every issue, open or closed, as a declaration by that issue. It reads closed issues because it checks closure claims. To quote an example without declaring a contract, put the example inside a longer outer fence, such as four backticks with the info string `markdown`, or label the example fence `toml`. The audit does not read a contract fence inside a longer outer fence. It still reads a top-level `itree-contract` fence after the example.
+
 Use the fields as a small semantic contract:
 
 - `owner` names the current downstream owner of a routed obligation.

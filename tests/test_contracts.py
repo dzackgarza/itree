@@ -1236,6 +1236,93 @@ def test_issue_46_e017_absent_without_requirement_or_with_work() -> None:
     ]
 
 
+@pytest.mark.parametrize("state", [IssueState.open, IssueState.closed])
+def test_issue_46_example_fence_scope(state: IssueState) -> None:
+    example = """```itree-contract
+kind = "coordination"
+evidence = "routes"
+owner = "dzackgarza/sage-extensions#23"
+role = "grouping"
+```
+"""
+    nested_example = "````markdown\n" + example + "````\n"
+    real_declaration = _contract_body(
+        kind="coordination", evidence="records", role="grouping"
+    ).removeprefix(ACCEPTANCE + "\n\n")
+
+    def leaf(body: str) -> RepoDag:
+        return _dag(
+            {
+                1: _issue(1, "Ledger: testowner/testrepo"),
+                2: _issue(
+                    2, "Leaf work unit", body=ACCEPTANCE + "\n\n" + body, state=state
+                ),
+            },
+            {1: (2,)},
+        )
+
+    top_level = generate_doctor_report(leaf(example))
+    nested = generate_doctor_report(leaf(nested_example))
+    toml = generate_doctor_report(leaf(example.replace("```itree-contract", "```toml")))
+    following_declaration = generate_doctor_report(
+        leaf(nested_example + "\n" + real_declaration)
+    )
+
+    top_level_payload = top_level.model_dump(mode="json")
+    top_level_w060 = _findings(top_level, "W060")
+    top_level_rendered = render_doctor_report(
+        _repo_ref(),
+        leaf(example),
+        top_level,
+        MetricsConfig(),
+        AbsentCodeSize(reason="no checkout"),
+    )
+    assert len(top_level_w060) == 1
+    assert top_level_w060[0].evidence == [
+        "#2 declares role=grouping but tree/title structure is work_unit"
+    ]
+    top_level_serialized = [
+        finding
+        for finding in top_level_payload["findings"]
+        if finding["code"] == "W060"
+    ]
+    assert len(top_level_serialized) == 1
+    assert top_level_serialized[0]["witnesses"][0]["current_owner"]["number"] == 2
+    assert doctor_exit_code(top_level) == 1
+    assert top_level_rendered.count("W060:") == 1
+
+    for report in (nested, toml):
+        payload = report.model_dump(mode="json")
+        assert _findings(report, "W060") == []
+        assert [
+            finding for finding in payload["findings"] if finding["code"] == "W060"
+        ] == []
+        assert doctor_exit_code(report) == 0
+
+    following_payload = following_declaration.model_dump(mode="json")
+    following_w060 = _findings(following_declaration, "W060")
+    following_rendered = render_doctor_report(
+        _repo_ref(),
+        leaf(nested_example + "\n" + real_declaration),
+        following_declaration,
+        MetricsConfig(),
+        AbsentCodeSize(reason="no checkout"),
+    )
+    assert len(following_w060) == 1
+    assert following_w060[0].evidence == [
+        "#2 declares role=grouping but tree/title structure is work_unit"
+    ]
+    following_serialized = [
+        finding
+        for finding in following_payload["findings"]
+        if finding["code"] == "W060"
+    ]
+    assert len(following_serialized) == 1
+    assert following_serialized[0]["witnesses"][0]["current_owner"]["number"] == 2
+    assert doctor_exit_code(following_declaration) == 1
+    assert following_rendered.count("W060:") == 1
+
+
 def test_role_declaration_contradicting_tree_shape_is_w060() -> None:
     dag = _dag(
         {
