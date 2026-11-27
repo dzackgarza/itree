@@ -28,3 +28,19 @@ Record the following evidence on `dzackgarza/itree#65`: fixture slug and issue n
 After posting the evidence, read the new issue comment and its referenced records through fresh GitHub API calls and compare them byte-for-byte with the local records. Then delete only the generated repository named by `ITREE_ACCEPTANCE_REPO` and verify that it cannot be viewed. Trash `$FIXTURE_ROOT` and temporary state/logs. Verify that the source checkout, unrelated GitHub repositories, issue #65, its analysis comment, and its persisted acceptance evidence survive.
 
 When `ITREE_WORK_FIXTURE_STATE` is absent, `tests/test_work.py` creates a fresh real fixture and deletes it after the run. The checked-in state file path is not a cache: every invocation of `itree work` still reads live GitHub and external source content.
+
+## Resume an existing fixture
+
+`setup.py resume` requires the existing qualified repository, preserved checkout, and explicit state output path. It never creates a replacement slug or clones another repository. Validate the remote and `.git` directory before using them:
+
+```sh
+export ITREE_ACCEPTANCE_REPO=owner/existing-work-package-repo
+uv run --script tests/fixtures/work-package/setup.py resume \
+  --slug "$ITREE_ACCEPTANCE_REPO" \
+  --root "$FIXTURE_ROOT" \
+  --output /tmp/opencode/itree-work-fixture-state.json
+```
+
+Recovery reads prior validated state with `FixtureState.model_validate_json`. Before mutation, issue and PR bodies are reconciled with live objects so completed objects are reused rather than duplicated. `createPullRequest`, `createIssue`, `addComment`, and `addSubIssue` use valid GraphQL inputs. Any later failure preserves `family-journal.jsonl` and `teardown-timings.json` outside the disposable tree, with per-request elapsed time, per-family object/request counts, and separate deliberate pacing measurements.
+
+Fresh repository creation establishes the unborn `main` ref with `git symbolic-ref` and publishes it explicitly before the grouped wildcard ref publication. Do not use `gh repo create --default-branch` with installed `gh` 2.106.0. A parentless attach uses `jq .parent.number // empty`, so a missing native parent is distinct from an existing incorrect parent. These boundaries have syntax, strict-type, and standalone `uv run --script --help` validation; they are not acceptance by themselves.

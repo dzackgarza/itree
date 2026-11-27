@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# dependencies = [
+#   "cyclopts>=2.0",
+#   "networkx>=3.0",
+#   "pydantic>=2.0",
+# ]
+# ///
 from __future__ import annotations
 
 import argparse
@@ -11,6 +19,12 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+import sys
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+    __package__ = "itree"
+from itree.models import FixtureState
 
 PIN = "0e80c9679e6f6bfd55e13cbcf193d297c5207117"
 
@@ -43,10 +57,12 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     global last_mutation_at
     mutates = _is_mutation(command)
+    pace_started = time.perf_counter()
     if mutates:
         remaining = 1.0 - (time.perf_counter() - last_mutation_at)
         if remaining > 0 and last_mutation_at != 0.0:
             time.sleep(remaining)
+    pace_seconds = time.perf_counter() - pace_started
     started = time.perf_counter()
     result = subprocess.run(
         command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
@@ -55,7 +71,7 @@ def run(
     if mutates:
         last_mutation_at = time.perf_counter()
     print(
-        f"FIXTURE-STEP seconds={elapsed:.6f} exit={result.returncode} command={json.dumps(command)}",
+        f"FIXTURE-STEP seconds={elapsed:.6f} pacing_seconds={pace_seconds:.6f} exit={result.returncode} command={json.dumps(command)}",
         flush=True,
     )
     if result.returncode != 0:
@@ -65,44 +81,206 @@ def run(
     return result
 
 
-def issue(slug: str, title: str, body: str) -> int:
-    response = json.loads(
-        run(
-            ["gh", "api", "-X", "POST", f"repos/{slug}/issues", "--input", "-"],
-            input_text=json.dumps({"title": title, "body": body}),
-        ).stdout
+def _journal_path(root: Path) -> Path:
+    if root.name != "acceptance":
+        return root / "family-journal.jsonl"
+    return root.parent.parent / f"{root.parent.name}-family-journal.jsonl"
+
+
+def _node_id(slug: str, number: int) -> str:
+    return run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            slug,
+            "--json",
+            "id",
+            "--jq",
+            ".id",
+        ]
+    ).stdout.strip()
+
+
+def _repository_id(slug: str) -> str:
+    return run(["gh", "api", f"repos/{slug}", "--jq", ".node_id"]).stdout.strip()
+
+
+def _response_for_family(
+    family: str, node: dict[str, JsonValue]
+) -> dict[str, JsonValue]:
+    if family == "addComment":
+        candidate = node["commentEdge"]
+        assert isinstance(candidate, dict), node
+        value = candidate["node"]
+        assert isinstance(value, dict), node
+        return value
+    if family == "createIssue":
+        candidate = node["issue"]
+        assert isinstance(candidate, dict), node
+        return candidate
+    if family == "createPullRequest":
+        candidate = node["pullRequest"]
+        assert isinstance(candidate, dict), node
+        return candidate
+    assert family == "addSubIssue", family
+    candidate = node["subIssue"]
+    assert isinstance(candidate, dict), node
+    return candidate
+
+
+def _number(value: JsonValue) -> int:
+    assert isinstance(value, int) and not isinstance(value, bool), value
+    return value
+
+
+def _batch_graphql(
+    slug: str,
+    root: Path,
+    family: str,
+    input_value: dict[str, JsonValue],
+    expected_body: str | None = None,
+) -> dict[str, JsonValue]:
+    if family == "createIssue":
+        result_selection = "issue{number id body title url}"
+    elif family == "createPullRequest":
+        result_selection = "pullRequest{number url body}"
+    elif family == "addComment":
+        result_selection = "commentEdge{node{databaseId url body}}"
+    else:
+        result_selection = "subIssue{number id}"
+    arguments = ",".join(
+        f"{key}:{json.dumps(value)}" for key, value in input_value.items()
     )
-    number = response["number"]
-    assert isinstance(number, int) and number > 0, response
-    return number
+    alias = "m000"
+    query = f"mutation WorkPackageFamily {{{alias}:{family}(input:{{{arguments}}}){{{result_selection}}}}}"
+    started = time.perf_counter()
+    response = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout)
+    elapsed = time.perf_counter() - started
+    assert "errors" not in response and isinstance(response.get("data"), dict), response
+    node = response["data"][alias]
+    result = _response_for_family(family, node)
+    if expected_body is not None:
+        assert result.get("body") == expected_body, {
+            "operation": family,
+            "result": result,
+        }
+    result["family"] = family
+    result["elapsed_seconds"] = elapsed
+    journal_path = _journal_path(root)
+    with journal_path.open("a", encoding="utf-8") as journal:
+        journal.write(
+            json.dumps({"arguments": input_value, "result": result}, sort_keys=True)
+            + "\n"
+        )
+    return result
 
 
-def comment(slug: str, number: int, body: str) -> tuple[int, str]:
-    response = json.loads(
+def _existing_issue(slug: str, title: str, body: str) -> int | None:
+    records = json.loads(
         run(
             [
                 "gh",
-                "api",
-                "-X",
-                "POST",
-                f"repos/{slug}/issues/{number}/comments",
-                "--input",
-                "-",
-            ],
-            input_text=json.dumps({"body": body}),
+                "issue",
+                "list",
+                "--repo",
+                slug,
+                "--state",
+                "all",
+                "--limit",
+                "100",
+                "--json",
+                "number,title,body",
+            ]
         ).stdout
     )
-    return int(response["id"]), str(response["html_url"])
+    matches = [
+        record
+        for record in records
+        if record["title"] == title and record["body"] == body
+    ]
+    assert len(matches) <= 1, (slug, title, len(matches))
+    if not matches:
+        return None
+    return int(matches[0]["number"])
 
 
-def issue_id(slug: str, number: int) -> int:
-    return int(
-        run(["gh", "api", f"repos/{slug}/issues/{number}", "--jq", ".id"]).stdout
+def issue(slug: str, title: str, body: str, root: Path) -> int:
+    existing = _existing_issue(slug, title, body)
+    if existing is not None:
+        return existing
+    result = _batch_graphql(
+        slug,
+        root,
+        "createIssue",
+        {"repositoryId": _repository_id(slug), "title": title, "body": body},
+        body,
     )
+    number = _number(result["number"])
+    assert number > 0, result
+    return number
+
+
+def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
+    records = json.loads(
+        run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                slug,
+                "--state",
+                "all",
+                "--head",
+                "pull-request-source",
+                "--json",
+                "number,body,title,url,headRefName,baseRefName",
+            ]
+        ).stdout
+    )
+    matches = [
+        record
+        for record in records
+        if record["headRefName"] == "pull-request-source"
+        and record["baseRefName"] == "main"
+        and record["title"] == "Fixture pull request"
+        and record["body"] == "Real pull request for source classification."
+    ]
+    assert len(matches) <= 1, matches
+    if matches:
+        return int(matches[0]["number"]), str(matches[0]["url"])
+    result = _batch_graphql(
+        slug,
+        root,
+        "createPullRequest",
+        {
+            "repositoryId": _repository_id(slug),
+            "baseRefName": "main",
+            "headRefName": "pull-request-source",
+            "title": "Fixture pull request",
+            "body": "Real pull request for source classification.",
+        },
+        "Real pull request for source classification.",
+    )
+    return _number(result["number"]), str(result["url"])
+
+
+def comment(slug: str, number: int, body: str, root: Path) -> tuple[int, str]:
+    result = _batch_graphql(
+        slug,
+        root,
+        "addComment",
+        {"subjectId": _node_id(slug, number), "body": body},
+        body,
+    )
+    return _number(result["databaseId"]), str(result["url"])
 
 
 def add_ordered_comments(
-    slug: str, number: int, bodies: list[str]
+    slug: str, number: int, bodies: list[str], root: Path
 ) -> tuple[list[str], list[int]]:
     subject_id = run(
         [
@@ -125,9 +303,11 @@ def add_ordered_comments(
             for index, body in enumerate(bodies[offset : offset + 5], start=offset)
         ]
         query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
+        started = time.perf_counter()
         response = json.loads(
             run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
         )
+        elapsed = time.perf_counter() - started
         assert "errors" not in response and isinstance(response.get("data"), dict), (
             response
         )
@@ -136,23 +316,59 @@ def add_ordered_comments(
         ):
             comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
             assert comment_node["body"] == expected_body, (index, comment_node)
-            ids.append(int(comment_node["databaseId"]))
+            identifier = int(comment_node["databaseId"])
+            assert identifier > 0
+            ids.append(identifier)
+            with _journal_path(root).open("a", encoding="utf-8") as journal:
+                journal.write(
+                    json.dumps(
+                        {
+                            "family": "addComment",
+                            "alias": f"m{index:03d}",
+                            "request_count": len(fields),
+                            "elapsed_seconds": elapsed,
+                            "result": comment_node,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
     assert ids == sorted(ids), f"comment database IDs are not ordered: {ids}"
     return bodies, ids
 
 
-def attach(slug: str, parent: int, child: int, root: Path) -> None:
-    run(
+def _parent_number(slug: str, number: int) -> int | None:
+    value = run(
         [
             "gh",
-            "api",
-            "-X",
-            "POST",
-            f"repos/{slug}/issues/{parent}/sub_issues",
-            "-F",
-            f"sub_issue_id={issue_id(slug, child)}",
+            "issue",
+            "view",
+            str(number),
+            "--repo",
+            slug,
+            "--json",
+            "parent",
+            "--jq",
+            ".parent.number // empty",
         ]
+    ).stdout.strip()
+    return None if value == "" else int(value)
+
+
+def attach(slug: str, parent: int, child: int, root: Path) -> None:
+    if _parent_number(slug, child) == parent:
+        return
+    result = _batch_graphql(
+        slug,
+        root,
+        "addSubIssue",
+        {"issueId": _node_id(slug, parent), "subIssueId": _node_id(slug, child)},
     )
+    assert result["number"] == child, {
+        "parent": parent,
+        "child": child,
+        "result": result,
+    }
     root.joinpath("attached.txt").write_text(f"{parent} -> {child}\n", encoding="utf-8")
 
 
@@ -332,39 +548,112 @@ def create(root: Path, output: Path) -> None:
         ],
         cwd=checkout,
     )
-    pull_url = run(
+    state = complete_fixture_objects(
+        slug, root, checkout, pinned, head, large_text, started
+    )
+    output.write_text(
+        json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def resume(slug: str, root: Path, output: Path) -> None:
+    started = time.perf_counter()
+    root.mkdir(parents=True, exist_ok=True)
+    checkout = root / "repo"
+    assert checkout.joinpath(".git").exists(), (
+        f"preserved checkout is not a git repository: {checkout}"
+    )
+    remote = json.loads(
+        run(["gh", "repo", "view", slug, "--json", "nameWithOwner,createdAt"]).stdout
+    )
+    assert remote["nameWithOwner"].casefold() == slug.casefold(), {
+        "expected": slug,
+        "found": remote,
+    }
+    pinned = run(
+        ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=checkout
+    ).stdout.strip()
+    head = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
+    previous = (
+        FixtureState.model_validate_json(output.read_text(encoding="utf-8"))
+        if output.exists()
+        else None
+    )
+    recovered = complete_fixture_objects(
+        slug,
+        root,
+        checkout,
+        pinned,
+        head,
+        checkout.joinpath("docs/large.md").read_text(encoding="utf-8"),
+        started,
+    )
+    state = (
+        recovered
+        if previous is None
+        else previous.model_copy(update=recovered.model_dump())
+    )
+    state = state.model_copy(
+        update={"setup_elapsed_seconds": time.perf_counter() - started}
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    selected = state.selected
+    run(
         [
             "gh",
-            "pr",
-            "create",
+            "issue",
+            "view",
+            str(selected),
             "--repo",
             slug,
-            "--base",
-            "main",
-            "--head",
-            "pull-request-source",
-            "--title",
-            "Fixture pull request",
-            "--body",
-            "Real pull request for source classification.",
-        ],
-        cwd=checkout,
-    ).stdout.strip()
-    pull_number = int(pull_url.rsplit("/", 1)[1])
+            "--json",
+            "number,body,title",
+        ]
+    )
+    run(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(state.pagination),
+            "--repo",
+            slug,
+            "--json",
+            "number,body,title",
+        ]
+    )
+    print(str(output))
+
+
+def complete_fixture_objects(
+    slug: str,
+    root: Path,
+    checkout: Path,
+    pinned: str,
+    head: str,
+    large_text: str,
+    started: float,
+) -> FixtureState:
+    pull_number, pull_url = create_pull_request(slug, root)
     run(["git", "checkout", "main"], cwd=checkout)
 
     roadmap_body = "ROADMAP-BODY-CONTRACT-EXACT\n"
-    roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body)
+    roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body, root)
     roadmap_comment_id, roadmap_comment_url = comment(
-        slug, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n"
+        slug, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n", root
     )
     recursive_url = f"https://github.com/{slug}/blob/{pinned}/docs/recursive.md"
-    comment(slug, roadmap, f"Ancestor-only citation: {recursive_url}\n")
+    comment(slug, roadmap, f"Ancestor-only citation: {recursive_url}\n", root)
 
     selected_body = managed(
         original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
     )
-    selected = issue(slug, "Work package acceptance unit", selected_body)
+    selected = issue(slug, "Work package acceptance unit", selected_body, root)
     selected_body += f"Selected issue self-citation: https://github.com/{slug}/issues/{selected}\nParent citation: https://github.com/{slug}/issues/{roadmap}\n"
     roadmap_body += (
         f"Roadmap self-citation: https://github.com/{slug}/issues/{roadmap}\n"
@@ -372,22 +661,26 @@ def create(root: Path, output: Path) -> None:
     run(["gh", "issue", "edit", str(selected), "--repo", slug, "--body", selected_body])
     run(["gh", "issue", "edit", str(roadmap), "--repo", slug, "--body", roadmap_body])
     attach(slug, roadmap, selected, root)
-    binding_id, binding_url = comment(slug, selected, "BINDING-PRIOR-DECISION-EXACT\n")
+    binding_id, binding_url = comment(
+        slug, selected, "BINDING-PRIOR-DECISION-EXACT\n", root
+    )
     comment(
         slug,
         selected,
         "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
+        root,
     )
-    comment(slug, selected, "OPEN-VERIFICATION-FINDING-EXACT\n")
+    comment(slug, selected, "OPEN-VERIFICATION-FINDING-EXACT\n", root)
 
-    cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n")
+    cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
     cited_comment_id, cited_comment_url = comment(
-        slug, cited, "CITED-COMMENT-BODY-EXACT\n"
+        slug, cited, "CITED-COMMENT-BODY-EXACT\n", root
     )
     citation_edge = issue(
         slug,
         "Citation transport edges",
         f"Shared source: https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md\n",
+        root,
     )
 
     markdown_url = f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/README.md"
@@ -500,15 +793,18 @@ def create(root: Path, output: Path) -> None:
         f"Lightweight tree tag: {source_urls['lightweight_tree']}",
         f"Annotated tree tag: {source_urls['annotated_tree']}",
     ]
-    comment(slug, selected, "\n\n".join(citation_lines) + "\n")
+    comment(slug, selected, "\n\n".join(citation_lines) + "\n", root)
 
-    pagination = issue(slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n")
+    pagination = issue(
+        slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
+    )
     pagination_comments, pagination_ids = add_ordered_comments(
         slug,
         pagination,
         [f"COMMENT-{index:03d}-BODY-EXACT\n" for index in range(101)],
+        root,
     )
-    comment(slug, selected, f"Bare sibling reference: #{pagination}\n")
+    comment(slug, selected, f"Bare sibling reference: #{pagination}\n", root)
 
     malformed_bodies = {
         "duplicate": managed()
@@ -523,23 +819,23 @@ def create(root: Path, output: Path) -> None:
     malformed_text: dict[str, str] = {}
     for name, body in malformed_bodies.items():
         distinctive = f"MALFORMED-{name.upper()}-SELECTED-BODY\n" + body
-        malformed[name] = issue(slug, f"Malformed {name}", distinctive)
+        malformed[name] = issue(slug, f"Malformed {name}", distinctive, root)
         malformed_text[name] = distinctive
-        comment(slug, malformed[name], f"MALFORMED-{name.upper()}-COMMENT\n")
+        comment(slug, malformed[name], f"MALFORMED-{name.upper()}-COMMENT\n", root)
     fenced_body = "LEGACY-FENCED-BODY\n```text\n" + managed() + "```\n"
-    fenced = issue(slug, "Fence-shielded markers", fenced_body)
-    comment(slug, fenced, "FENCED-COMMENT-EXACT\n")
+    fenced = issue(slug, "Fence-shielded markers", fenced_body, root)
+    comment(slug, fenced, "FENCED-COMMENT-EXACT\n", root)
     legacy_body = "LEGACY-ZERO-MARKER-BODY-EXACT\n"
-    legacy = issue(slug, "Legacy zero-marker body", legacy_body)
-    comment(slug, legacy, "LEGACY-COMMENT-EXACT\n")
+    legacy = issue(slug, "Legacy zero-marker body", legacy_body, root)
+    comment(slug, legacy, "LEGACY-COMMENT-EXACT\n", root)
 
     cycle_a_body = "CYCLE-A-READABLE-BODY\n"
     cycle_b_body = "CYCLE-B-READABLE-BODY\n"
-    cycle_a = issue(slug, "Cycle A", cycle_a_body)
-    cycle_b = issue(slug, "Cycle B", cycle_b_body)
+    cycle_a = issue(slug, "Cycle A", cycle_a_body, root)
+    cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
     attach(slug, cycle_b, cycle_a, root)
-    comment(slug, cycle_a, "CYCLE-A-READABLE-COMMENT\n")
-    comment(slug, cycle_b, "CYCLE-B-READABLE-COMMENT\n")
+    comment(slug, cycle_a, "CYCLE-A-READABLE-COMMENT\n", root)
+    comment(slug, cycle_b, "CYCLE-B-READABLE-COMMENT\n", root)
 
     real_gh = shutil.which("gh")
     assert real_gh is not None
@@ -648,54 +944,50 @@ def create(root: Path, output: Path) -> None:
         encoding="utf-8",
     )
     trace_gh.chmod(0o755)
-
-    state: dict[str, JsonValue] = {
-        "repo": slug,
-        "root": str(root),
-        "checkout": str(checkout),
-        "selected": selected,
-        "selected_body": selected_body,
-        "roadmap": roadmap,
-        "roadmap_body": roadmap_body,
-        "roadmap_comment_id": roadmap_comment_id,
-        "roadmap_comment_url": roadmap_comment_url,
-        "binding_comment_id": binding_id,
-        "binding_comment_url": binding_url,
-        "cited": cited,
-        "cited_comment_id": cited_comment_id,
-        "citation_edge": citation_edge,
-        "citation_runtime_gh": str(citation_runtime_gh),
-        "citation_shape_gh": str(citation_shape_gh),
-        "content_shape_gh": str(content_shape_gh),
-        "malformed_issue_gh": str(malformed_issue_gh),
-        "governing_shape_gh": str(governing_shape_gh),
-        "base64_error_gh": str(base64_error_gh),
-        "trace_gh": str(trace_gh),
-        "large_text_size": len(large_text.encode("utf-8")),
-        "pull_number": pull_number,
-        "pagination": pagination,
-        "pagination_comments": pagination_comments,
-        "pagination_ids": pagination_ids,
-        "malformed": malformed,
-        "malformed_text": malformed_text,
-        "fenced": fenced,
-        "fenced_body": fenced_body,
-        "legacy": legacy,
-        "legacy_body": legacy_body,
-        "cycle_a": cycle_a,
-        "cycle_b": cycle_b,
-        "cycle_gh": str(cycle_gh),
-        "fail_comments_gh": str(fail_comments_gh),
-        "assertion_gh": str(assertion_gh),
-        "pinned": pinned,
-        "head": head,
-        "source_urls": source_urls,
-        "external_text": external_text,
-        "setup_elapsed_seconds": time.perf_counter() - started,
-        "python": run(["python", "--version"]).stdout.strip(),
-    }
-    output.write_text(
-        json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    state = FixtureState(
+        repo=slug,
+        root=root,
+        checkout=checkout,
+        selected=selected,
+        selected_body=selected_body,
+        roadmap=roadmap,
+        roadmap_body=roadmap_body,
+        roadmap_comment_id=roadmap_comment_id,
+        roadmap_comment_url=roadmap_comment_url,
+        binding_comment_id=binding_id,
+        binding_comment_url=binding_url,
+        cited=cited,
+        cited_comment_id=cited_comment_id,
+        citation_edge=citation_edge,
+        citation_runtime_gh=citation_runtime_gh,
+        citation_shape_gh=citation_shape_gh,
+        content_shape_gh=content_shape_gh,
+        malformed_issue_gh=malformed_issue_gh,
+        governing_shape_gh=governing_shape_gh,
+        base64_error_gh=base64_error_gh,
+        trace_gh=trace_gh,
+        large_text_size=len(large_text.encode("utf-8")),
+        pull_number=pull_number,
+        pagination=pagination,
+        pagination_comments=pagination_comments,
+        pagination_ids=pagination_ids,
+        malformed=malformed,
+        malformed_text=malformed_text,
+        fenced=fenced,
+        fenced_body=fenced_body,
+        legacy=legacy,
+        legacy_body=legacy_body,
+        cycle_a=cycle_a,
+        cycle_b=cycle_b,
+        cycle_gh=cycle_gh,
+        fail_comments_gh=fail_comments_gh,
+        assertion_gh=assertion_gh,
+        pinned=pinned,
+        head=head,
+        source_urls=source_urls,
+        external_text=external_text,
+        setup_elapsed_seconds=time.perf_counter() - started,
+        python=run(["python", "--version"]).stdout.strip(),
     )
     run(["gh", "repo", "view", slug, "--json", "nameWithOwner,defaultBranchRef"])
     run(["gh", "api", f"repos/{slug}/contents/AGENTS.md?ref={head}", "--jq", ".sha"])
@@ -711,7 +1003,7 @@ def create(root: Path, output: Path) -> None:
             "number,body,title",
         ]
     )
-    print(str(output))
+    return state
 
 
 def main() -> None:
@@ -720,9 +1012,15 @@ def main() -> None:
     create_parser = subcommands.add_parser("create")
     create_parser.add_argument("--root", type=Path, required=True)
     create_parser.add_argument("--output", type=Path, required=True)
+    resume_parser = subcommands.add_parser("resume")
+    resume_parser.add_argument("--slug", required=True)
+    resume_parser.add_argument("--root", type=Path, required=True)
+    resume_parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     if arguments.command == "create":
         create(arguments.root, arguments.output)
+    if arguments.command == "resume":
+        resume(arguments.slug, arguments.root, arguments.output)
 
 
 if __name__ == "__main__":

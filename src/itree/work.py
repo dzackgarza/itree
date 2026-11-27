@@ -171,6 +171,26 @@ class WorkContentIdentity(BaseModel):
     issue_comment_id: int | None = None
 
 
+class LoadedIssueContent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["issue"] = "issue"
+    issue: GithubIssue
+
+
+class LoadedIssueCommentContent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["issue_comment"] = "issue_comment"
+    comment: IssueComment
+
+
+LoadedGithubContent = Annotated[
+    LoadedIssueContent | LoadedIssueCommentContent,
+    Field(discriminator="kind"),
+]
+
+
 class PresentSource(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -541,37 +561,60 @@ def _resolve_github_issue(
     number: int,
     comment_id: int | None,
     sub_anchor: str | None,
+    loaded: dict[WorkContentIdentity, LoadedGithubContent],
 ) -> SourceDisposition:
+    key = WorkContentIdentity(
+        kind="issue_comment" if comment_id is not None else "issue",
+        issue_ref=IssueRef(repo_ref=api.repo_ref, number=number),
+        issue_comment_id=comment_id,
+    )
+    known = loaded.get(key)
+    if isinstance(known, LoadedIssueContent):
+        assert comment_id is None, {"identity": key, "known": known}
+        return _present(
+            citation,
+            "github_issue",
+            known.issue.body or "",
+            "text/markdown",
+            sub_anchor=sub_anchor,
+            content_identity=key,
+        )
+    if isinstance(known, LoadedIssueCommentContent):
+        assert comment_id == known.comment.id, {"identity": key, "known": known}
+        return _present(
+            citation,
+            "github_comment",
+            known.comment.body,
+            "text/markdown",
+            sub_anchor=sub_anchor,
+            content_identity=key,
+        )
+    assert known is None, {"identity": key, "known": known}
     try:
         issue = api.get_issue(number)
         if issue.is_pull_request:
             return _unresolved(citation, "unsupported_kind")
+        loaded[WorkContentIdentity(kind="issue", issue_ref=key.issue_ref)] = (
+            LoadedIssueContent(issue=issue)
+        )
         if comment_id is not None:
             comment = api.get_comment(comment_id)
-            identity = WorkContentIdentity(
-                kind="issue_comment",
-                issue_ref=IssueRef(repo_ref=api.repo_ref, number=issue.number),
-                issue_comment_id=comment.id,
-            )
+            loaded[key] = LoadedIssueCommentContent(comment=comment)
             return _present(
                 citation,
                 "github_comment",
                 comment.body,
                 "text/markdown",
                 sub_anchor=sub_anchor,
-                content_identity=identity,
+                content_identity=key,
             )
-        identity = WorkContentIdentity(
-            kind="issue",
-            issue_ref=IssueRef(repo_ref=api.repo_ref, number=issue.number),
-        )
         return _present(
             citation,
             "github_issue",
             issue.body or "",
             "text/markdown",
             sub_anchor=sub_anchor,
-            content_identity=identity,
+            content_identity=key,
         )
     except GithubApiError as error:
         return _unresolved(citation, _github_source_error(error))
@@ -666,7 +709,11 @@ def _resolve_external(citation: Citation) -> SourceDisposition:
     )
 
 
-def _resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
+def _resolve_citation(
+    api: GithubApi,
+    citation: Citation,
+    loaded: dict[WorkContentIdentity, LoadedGithubContent] | None = None,
+) -> SourceDisposition:
     if str(citation.canonical_url).startswith("#"):
         return _unresolved(citation, "bare_reference")
     try:
@@ -692,16 +739,25 @@ def _resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
         comment_id = int(anchor[1]) if anchor is not None else None
         sub_anchor = anchor[2] if anchor is not None and anchor[2] else None
         return _resolve_github_issue(
-            api, citation, int(segments[3]), comment_id, sub_anchor
+            api,
+            citation,
+            int(segments[3]),
+            comment_id,
+            sub_anchor,
+            {} if loaded is None else loaded,
         )
     if len(segments) >= 5 and segments[2] == "blob":
         return _resolve_github_blob(api, citation, segments)
     return _unresolved(citation, "unsupported_kind")
 
 
-def resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
+def resolve_citation(
+    api: GithubApi,
+    citation: Citation,
+    loaded: dict[WorkContentIdentity, LoadedGithubContent] | None = None,
+) -> SourceDisposition:
     try:
-        return _resolve_citation(api, citation)
+        return _resolve_citation(api, citation, loaded)
     except GitRefLookupError as error:
         return _unresolved(citation, error.reason)
     except GithubApiError as error:
@@ -1010,9 +1066,34 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
     citations = extract_citations(
         (selected_issue.body or "", *(comment.body for comment in comments))
     )
+    loaded: dict[WorkContentIdentity, LoadedGithubContent] = {
+        WorkContentIdentity(kind="issue", issue_ref=issue_ref): LoadedIssueContent(
+            issue=selected_issue
+        )
+    }
+    for comment in comments:
+        loaded[
+            WorkContentIdentity(
+                kind="issue_comment", issue_ref=issue_ref, issue_comment_id=comment.id
+            )
+        ] = LoadedIssueCommentContent(comment=comment)
+    for ancestor in ancestors:
+        loaded[WorkContentIdentity(kind="issue", issue_ref=ancestor.issue_ref)] = (
+            LoadedIssueContent(issue=ancestor.issue)
+        )
+        for comment in ancestor.comments:
+            loaded[
+                WorkContentIdentity(
+                    kind="issue_comment",
+                    issue_ref=ancestor.issue_ref,
+                    issue_comment_id=comment.id,
+                )
+            ] = LoadedIssueCommentContent(comment=comment)
     with ThreadPoolExecutor(max_workers=16) as executor:
         dispositions = tuple(
-            executor.map(lambda citation: resolve_citation(api, citation), citations)
+            executor.map(
+                lambda citation: resolve_citation(api, citation, loaded), citations
+            )
         )
     return WorkPackage(
         issue_ref=issue_ref,

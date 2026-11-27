@@ -13,59 +13,11 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from itree.models import FixtureState
 
 SOURCE = Path(__file__).resolve().parents[1]
 SETUP = SOURCE / "tests" / "fixtures" / "work-package" / "setup.py"
 EntryPoint = Literal["installed", "module", "direct-cli", "direct-main"]
-
-
-class FixtureState(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    repo: str
-    root: Path
-    checkout: Path
-    selected: int
-    selected_body: str
-    roadmap: int
-    roadmap_body: str
-    roadmap_comment_id: int
-    roadmap_comment_url: str
-    binding_comment_id: int
-    binding_comment_url: str
-    cited: int
-    cited_comment_id: int
-    citation_edge: int
-    citation_runtime_gh: Path
-    citation_shape_gh: Path
-    content_shape_gh: Path
-    malformed_issue_gh: Path
-    governing_shape_gh: Path
-    base64_error_gh: Path
-    trace_gh: Path
-    large_text_size: int
-    pull_number: int
-    pagination: int
-    pagination_comments: list[str]
-    pagination_ids: list[int]
-    malformed: dict[str, int]
-    malformed_text: dict[str, str]
-    fenced: int
-    fenced_body: str
-    legacy: int
-    legacy_body: str
-    cycle_a: int
-    cycle_b: int
-    cycle_gh: Path
-    fail_comments_gh: Path
-    assertion_gh: Path
-    pinned: str
-    head: str
-    source_urls: dict[str, str]
-    external_text: dict[str, str]
-    setup_elapsed_seconds: float
-    python: str
 
 
 def _load_or_create_fixture() -> Iterator[FixtureState]:
@@ -78,6 +30,8 @@ def _load_or_create_fixture() -> Iterator[FixtureState]:
     parent = Path(tempfile.mkdtemp(prefix="itree-work-test-", dir="/tmp/opencode"))
     root = parent / "acceptance"
     state_path = parent / "state.json"
+    operation_started = time.perf_counter()
+    setup_started = time.perf_counter()
     setup = subprocess.run(
         [
             sys.executable,
@@ -96,8 +50,10 @@ def _load_or_create_fixture() -> Iterator[FixtureState]:
     assert setup.returncode == 0, (
         f"fixture setup failed\nstdout={setup.stdout}\nstderr={setup.stderr}"
     )
+    setup_seconds = time.perf_counter() - setup_started
     yield FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
     state = FixtureState.model_validate_json(state_path.read_text(encoding="utf-8"))
+    deletion_started = time.perf_counter()
     deletion = subprocess.run(
         ["gh", "repo", "delete", state.repo, "--yes"],
         text=True,
@@ -105,9 +61,11 @@ def _load_or_create_fixture() -> Iterator[FixtureState]:
         check=False,
         timeout=120,
     )
+    remote_delete_seconds = time.perf_counter() - deletion_started
     assert deletion.returncode == 0, (
         f"fixture deletion failed\nstdout={deletion.stdout}\nstderr={deletion.stderr}"
     )
+    absence_started = time.perf_counter()
     absent = subprocess.run(
         ["gh", "repo", "view", state.repo],
         text=True,
@@ -115,12 +73,42 @@ def _load_or_create_fixture() -> Iterator[FixtureState]:
         check=False,
         timeout=120,
     )
+    absence_seconds = time.perf_counter() - absence_started
     assert absent.returncode != 0, f"fixture remote remains: {state.repo}"
+    scratch_started = time.perf_counter()
     trashed = subprocess.run(
         ["trash", str(parent)], text=True, capture_output=True, check=False, timeout=120
     )
     assert trashed.returncode == 0, (
         f"fixture scratch cleanup failed\nstdout={trashed.stdout}\nstderr={trashed.stderr}"
+    )
+    scratch_seconds = time.perf_counter() - scratch_started
+    finished = time.perf_counter()
+    journal_path = parent.parent.joinpath(f"{parent.name}-family-journal.jsonl")
+    families: dict[str, dict[str, float | int]] = {}
+    if journal_path.exists():
+        for line in journal_path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            family = families.setdefault(
+                row["family"],
+                {"requests": 0, "objects": 0, "elapsed_seconds": 0.0},
+            )
+            family["requests"] += 1
+            family["objects"] += 1
+            family["elapsed_seconds"] += row["elapsed_seconds"]
+    timings = {
+        "setup_seconds": setup_seconds,
+        "remote_delete_seconds": remote_delete_seconds,
+        "absence_verification_seconds": absence_seconds,
+        "scratch_trash_seconds": scratch_seconds,
+        "cleanup_seconds": finished - deletion_started,
+        "total_seconds": finished - operation_started,
+        "families": families,
+        "journal": str(journal_path) if journal_path.exists() else None,
+    }
+    parent.parent.joinpath(f"{parent.name}-teardown-timings.json").write_text(
+        json.dumps(timings, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     assert not parent.exists()
 
@@ -939,6 +927,13 @@ def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
         events = [
             json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()
         ]
+        issue_endpoints = [
+            argument
+            for event in events
+            for argument in event["argv"]
+            if argument == f"repos/{fixture_state.repo}/issues/{fixture_state.selected}"
+        ]
+        assert len(issue_endpoints) == 1, issue_endpoints
         methods = [method for event in events for method in event["http"]]
         assert any(method.startswith("> POST /graphql ") for method in methods), entry
         assert not any(
