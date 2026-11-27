@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -38,6 +40,9 @@ class FixtureState(BaseModel):
     citation_runtime_gh: Path
     citation_shape_gh: Path
     content_shape_gh: Path
+    malformed_issue_gh: Path
+    governing_shape_gh: Path
+    trace_gh: Path
     large_text_size: int
     pull_number: int
     pagination: int
@@ -156,6 +161,7 @@ def invoke_work(
     invocation_directory: Path,
     name: str,
     path_gh: Path | None = None,
+    trace_log: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     invocation_directory.mkdir(parents=True, exist_ok=True)
     invocation_directory.joinpath(".specify").mkdir(exist_ok=True)
@@ -180,6 +186,10 @@ def invoke_work(
         if not executable.exists():
             executable.symlink_to(path_gh)
         environment["PATH"] = f"{bin_directory}{os.pathsep}{environment['PATH']}"
+    if trace_log is not None:
+        trace_log.parent.mkdir(parents=True, exist_ok=True)
+        trace_log.write_text("", encoding="utf-8")
+        environment["ITREE_GH_TRACE_LOG"] = str(trace_log)
     command = _arguments(state, number, entry)
     cwd = SOURCE if entry in ("direct-cli", "direct-main") else invocation_directory
     started = time.perf_counter()
@@ -902,3 +912,201 @@ def test_citation_transport_and_parse_failures_have_typed_outcomes(
         _source_section(result.stdout, url, present=False).count(f"reason={reason}")
         == 1
     )
+
+
+def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    for entry in ("installed", "module", "direct-cli", "direct-main"):
+        issue_before = _live_issue(fixture_state.repo, fixture_state.selected)
+        comments_before = _live_comments(fixture_state.repo, fixture_state.selected)
+        status_before = subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
+        )
+        trace = tmp_path / f"mutation-trace-{entry}.jsonl"
+        result = invoke_work(
+            fixture_state,
+            fixture_state.selected,
+            entry,
+            tmp_path / f"zero-mutation-{entry}",
+            f"T021-zero-mutation-{entry}",
+            path_gh=fixture_state.trace_gh,
+            trace_log=trace,
+        )
+
+        assert result.returncode == 0, result.stderr
+        events = [
+            json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()
+        ]
+        methods = [method for event in events for method in event["http"]]
+        assert any(method.startswith("> POST /graphql ") for method in methods), entry
+        assert not any(
+            method.startswith(("> PUT ", "> PATCH ", "> DELETE ")) for method in methods
+        )
+        assert not any(
+            method.startswith("> POST /") and not method.startswith("> POST /graphql ")
+            for method in methods
+        )
+        for event in events:
+            for index, argument in enumerate(event["argv"]):
+                if argument == "-X" and index + 1 < len(event["argv"]):
+                    assert event["argv"][index + 1] not in {
+                        "POST",
+                        "PUT",
+                        "PATCH",
+                        "DELETE",
+                    }
+            for argument in event["argv"]:
+                if argument.startswith("query("):
+                    assert "mutation" not in argument.lower()
+        assert _live_issue(fixture_state.repo, fixture_state.selected) == issue_before
+        assert (
+            _live_comments(fixture_state.repo, fixture_state.selected)
+            == comments_before
+        )
+        assert (
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
+            )
+            == status_before
+        )
+
+
+def test_selected_and_ancestor_content_emits_once_with_all_citation_provenance(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    for body in (
+        fixture_state.selected_body,
+        fixture_state.roadmap_body,
+        "BINDING-PRIOR-DECISION-EXACT\n",
+        "ROADMAP-COMMENT-DECISION-EXACT\n",
+    ):
+        assert output.count(body) == 1, body[:80]
+    for key in ("selected_issue", "roadmap_issue", "binding_self", "roadmap_comment"):
+        url = fixture_state.source_urls[key]
+        assert f"### Source {url}" in output
+        assert f"requested_url={url}" in output
+        assert f"canonical_url={url}" in output
+    assert "emission=deduplicated" in output
+
+
+def test_malformed_selected_issue_json_exits_three(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "malformed-selected-json",
+        "T023-malformed-selected-json",
+        path_gh=fixture_state.malformed_issue_gh,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "Work package read failure" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+def test_governing_document_shape_failure_exits_three(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "malformed-governing-json",
+        "T023-malformed-governing-json",
+        path_gh=fixture_state.governing_shape_gh,
+    )
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "Work package read failure" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+class _TruncatedHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        self.wfile.write(b"12345")
+        self.wfile.flush()
+        self.close_connection = True
+
+
+def test_incomplete_external_body_is_inaccessible(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TruncatedHandler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/truncated.txt"
+    _set_citation_body(fixture_state, f"{url}\n")
+    result = invoke_work(
+        fixture_state,
+        fixture_state.citation_edge,
+        "module",
+        tmp_path / "incomplete-read",
+        "T024-incomplete-read",
+    )
+    server.shutdown()
+    thread.join()
+    server.server_close()
+
+    assert result.returncode == 0, result.stderr
+    assert "12345" not in _source_section(result.stdout, url, present=False)
+    assert (
+        _source_section(result.stdout, url, present=False).count("reason=inaccessible")
+        == 1
+    )
+
+
+def test_empty_query_and_fragment_delimiters_remain_distinct(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    urls = tuple(
+        fixture_state.source_urls[key]
+        for key in (
+            "cited_issue",
+            "cited_issue_empty_query",
+            "cited_issue_empty_fragment",
+        )
+    )
+    _set_citation_body(fixture_state, "\n".join(urls) + "\n")
+    result = invoke_work(
+        fixture_state,
+        fixture_state.citation_edge,
+        "module",
+        tmp_path / "empty-delimiters",
+        "T025-empty-delimiters",
+    )
+
+    assert result.returncode == 0, result.stderr
+    for url in urls:
+        assert (
+            _source_section(result.stdout, url, present=True).count(
+                f"canonical_url={url}"
+            )
+            == 1
+        )
+        assert f"requested_url={url}" in result.stdout
+    assert urls[1].endswith("?")
+    assert urls[2].endswith("#")
+
+
+def test_non_commit_tag_targets_are_typed_unsupported(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    for key in ("lightweight_tree", "annotated_tree"):
+        unresolved = _source_section(
+            selected_package.stdout, fixture_state.source_urls[key], present=False
+        )
+        assert unresolved.count("reason=unsupported_kind") == 1
+        assert "AssertionError" not in selected_package.stderr
+        assert "resolved_commit_sha" not in unresolved

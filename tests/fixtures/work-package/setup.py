@@ -275,6 +275,31 @@ def create(root: Path, output: Path) -> None:
         cwd=checkout,
     )
 
+    tree_sha = run(["git", "rev-parse", "HEAD^{tree}"], cwd=checkout).stdout.strip()
+    run(["git", "tag", "lightweight-tree-tag", tree_sha], cwd=checkout)
+    run(
+        [
+            "git",
+            "tag",
+            "-a",
+            "annotated-tree-tag",
+            tree_sha,
+            "-m",
+            "Annotated tree tag",
+        ],
+        cwd=checkout,
+    )
+    run(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/tags/lightweight-tree-tag",
+            "refs/tags/annotated-tree-tag",
+        ],
+        cwd=checkout,
+    )
+
     run(["git", "checkout", "-b", "pull-request-source"], cwd=checkout)
     checkout.joinpath("docs/pull-request.md").write_text(
         "Real pull request content.\n", encoding="utf-8"
@@ -315,6 +340,12 @@ def create(root: Path, output: Path) -> None:
         original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
     )
     selected = issue(slug, "Work package acceptance unit", selected_body, root)
+    selected_body += f"Selected issue self-citation: https://github.com/{slug}/issues/{selected}\nParent citation: https://github.com/{slug}/issues/{roadmap}\n"
+    roadmap_body += (
+        f"Roadmap self-citation: https://github.com/{slug}/issues/{roadmap}\n"
+    )
+    run(["gh", "issue", "edit", str(selected), "--repo", slug, "--body", selected_body])
+    run(["gh", "issue", "edit", str(roadmap), "--repo", slug, "--body", roadmap_body])
     attach(slug, roadmap, selected, root)
     binding_id, binding_url = comment(slug, selected, "BINDING-PRIOR-DECISION-EXACT\n")
     comment(
@@ -377,6 +408,8 @@ def create(root: Path, output: Path) -> None:
         "slash_tag": f"https://github.com/{slug}/blob/work-package-v1/docs/primary.md",
         "shared": f"https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md",
         "shared_annotated": f"https://github.com/{slug}/blob/shared/annotated-work-package-ref/docs/primary.md",
+        "lightweight_tree": f"https://github.com/{slug}/blob/lightweight-tree-tag/docs/primary.md",
+        "annotated_tree": f"https://github.com/{slug}/blob/annotated-tree-tag/docs/primary.md",
         "ambiguous_annotated": f"https://github.com/{slug}/blob/ambiguous/annotated-work-package-ref/docs/primary.md",
         "ambiguous": f"https://github.com/{slug}/blob/ambiguous/work-package-ref/docs/primary.md",
         "unknown": f"https://github.com/{slug}/blob/unknown/work-package-ref/docs/primary.md",
@@ -392,6 +425,12 @@ def create(root: Path, output: Path) -> None:
         "pull": f"https://github.com/{slug}/pull/999",
         "pull_issue": f"https://github.com/{slug}/issues/{pull_number}",
         "cited_issue": f"https://github.com/{slug}/issues/{cited}",
+        "cited_issue_empty_query": f"https://github.com/{slug}/issues/{cited}?",
+        "cited_issue_empty_fragment": f"https://github.com/{slug}/issues/{cited}#",
+        "selected_issue": f"https://github.com/{slug}/issues/{selected}",
+        "roadmap_issue": f"https://github.com/{slug}/issues/{roadmap}",
+        "binding_self": binding_url,
+        "roadmap_comment": roadmap_comment_url,
         "cited_comment": cited_comment_url,
         "cited_comment_subanchor": cited_comment_url + "#work-package-type-model",
         "malformed_comment_anchor": f"https://github.com/{slug}/issues/{cited}#issuecomment-not-a-number",
@@ -428,6 +467,12 @@ def create(root: Path, output: Path) -> None:
         f"Cited comment: {cited_comment_url}",
         f"Cited comment with subanchor: {source_urls['cited_comment_subanchor']}",
         f"Malformed issuecomment anchor: {source_urls['malformed_comment_anchor']}",
+        f"Empty query: {source_urls['cited_issue_empty_query']}",
+        f"Empty fragment: {source_urls['cited_issue_empty_fragment']}",
+        f"Selected comment self: {source_urls['binding_self']}",
+        f"Roadmap comment citation: {source_urls['roadmap_comment']}",
+        f"Lightweight tree tag: {source_urls['lightweight_tree']}",
+        f"Annotated tree tag: {source_urls['annotated_tree']}",
     ]
     comment(slug, selected, "\n\n".join(citation_lines) + "\n")
 
@@ -537,6 +582,40 @@ def create(root: Path, output: Path) -> None:
         encoding="utf-8",
     )
     content_shape_gh.chmod(0o755)
+    malformed_issue_gh = root / "malformed-issue-gh.py"
+    malformed_issue_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        f"if any(argument.endswith('issues/{selected}') for argument in sys.argv if argument.startswith('repos/')):\n"
+        "    print('{not-json')\n"
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    malformed_issue_gh.chmod(0o755)
+    governing_shape_gh = root / "governing-shape-gh.py"
+    governing_shape_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        "if any('/contents/AGENTS.md' in argument for argument in sys.argv):\n"
+        '    print(\'{"type": "file", "path": "AGENTS.md"}\')\n'
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    governing_shape_gh.chmod(0o755)
+    trace_gh = root / "trace-gh.py"
+    trace_gh.write_text(
+        "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"
+        "input_text = sys.stdin.read() if '--input' in sys.argv else None\n"
+        f"result = subprocess.run([{real_gh!r}, *sys.argv[1:]], input=input_text, text=True, capture_output=True, env={{**os.environ, 'GH_DEBUG': 'api'}})\n"
+        "http = [line for line in result.stderr.splitlines() if line.startswith(('* Request', '> GET ', '> POST ', '> PATCH ', '> PUT ', '> DELETE '))]\n"
+        "with open(os.environ['ITREE_GH_TRACE_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps({'argv': sys.argv[1:], 'http': http, 'exit': result.returncode}) + '\\n')\n"
+        "sys.stdout.write(result.stdout)\n"
+        "sys.stderr.write(result.stderr)\n"
+        "sys.exit(result.returncode)\n",
+        encoding="utf-8",
+    )
+    trace_gh.chmod(0o755)
 
     state: dict[str, JsonValue] = {
         "repo": slug,
@@ -556,6 +635,9 @@ def create(root: Path, output: Path) -> None:
         "citation_runtime_gh": str(citation_runtime_gh),
         "citation_shape_gh": str(citation_shape_gh),
         "content_shape_gh": str(content_shape_gh),
+        "malformed_issue_gh": str(malformed_issue_gh),
+        "governing_shape_gh": str(governing_shape_gh),
+        "trace_gh": str(trace_gh),
         "large_text_size": len(large_text.encode("utf-8")),
         "pull_number": pull_number,
         "pagination": pagination,
