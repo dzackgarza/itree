@@ -1101,16 +1101,18 @@ class GithubApi(BaseModel):
                     f"no issue family exists for {self.repo_ref.slug}#{number}"
                 )
             issue_node = _object(raw_issue, "issue family issue")
+            try:
+                candidate_issue = GithubIssue.from_graphql(issue_node)
+                candidate_parent = parse_issue_parent(
+                    json.dumps(page), self.owner, self.repo, number
+                )
+            except (KeyError, TypeError, ValueError, AssertionError) as error:
+                raise RuntimeError(
+                    f"invalid issue or parent in {self.repo_ref.slug}#{number}: {error}"
+                ) from error
             if issue is None:
-                try:
-                    issue = GithubIssue.from_graphql(issue_node)
-                    parent = parse_issue_parent(
-                        json.dumps(page), self.owner, self.repo, number
-                    )
-                except (KeyError, TypeError, ValueError) as error:
-                    raise RuntimeError(
-                        f"invalid issue or parent in {self.repo_ref.slug}#{number}: {error}"
-                    ) from error
+                issue = candidate_issue
+                parent = candidate_parent
             connection = _object(issue_node["comments"], "issue family comments")
             for raw_comment in _array(
                 connection["nodes"], "issue family comment nodes"

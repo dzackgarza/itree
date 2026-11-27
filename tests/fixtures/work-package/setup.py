@@ -19,6 +19,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -35,6 +36,7 @@ type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
 last_mutation_at = 0.0
+last_api_seconds = 0.0
 last_pacing_seconds = 0.0
 
 
@@ -85,7 +87,7 @@ def _content_units(command: list[str]) -> int:
 def run(
     command: list[str], *, cwd: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    global last_mutation_at, last_pacing_seconds
+    global last_mutation_at, last_api_seconds, last_pacing_seconds
     mutates = _is_mutation(command)
     pace_started = time.perf_counter()
     if mutates:
@@ -94,13 +96,15 @@ def run(
         if remaining > 0 and last_mutation_at != 0.0:
             time.sleep(remaining)
     pace_seconds = time.perf_counter() - pace_started
+    if mutates:
+        last_mutation_at = time.perf_counter()
     started = time.perf_counter()
     result = subprocess.run(
         command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
     )
     elapsed = time.perf_counter() - started
+    last_api_seconds = elapsed
     if mutates:
-        last_mutation_at = time.perf_counter()
         last_pacing_seconds = pace_seconds
     print(
         f"FIXTURE-STEP seconds={elapsed:.6f} pacing_seconds={pace_seconds:.6f} exit={result.returncode} command={json.dumps(command)}",
@@ -200,9 +204,8 @@ def add_comment_tail(
         query = "mutation WorkPackageCommentTail {" + " ".join(fields) + "}"
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
-        started = time.perf_counter()
         response = _graphql_response(query)
-        elapsed = time.perf_counter() - started
+        elapsed = last_api_seconds
         created = _record_family_response(
             root,
             "addComment",
@@ -440,9 +443,8 @@ def _batch_graphql(
     )
     alias = "m000"
     query = f"mutation WorkPackageFamily {{{alias}:{family}(input:{{{arguments}}}){{{result_selection}}}}}"
-    started = time.perf_counter()
     response = _graphql_response(query)
-    elapsed = time.perf_counter() - started
+    elapsed = last_api_seconds
     assert "errors" not in response and isinstance(response.get("data"), dict), response
     data = response["data"]
     assert isinstance(data, dict), response
@@ -617,9 +619,8 @@ def create_issue_family(
     query = "mutation WorkPackageIssueFamily {" + " ".join(fields) + "}"
     assert len(fields) * 2 <= 500_000
     assert len(query.encode("utf-8")) < 120_000
-    started = time.perf_counter()
     response = _graphql_response(query)
-    elapsed = time.perf_counter() - started
+    elapsed = last_api_seconds
     created = _record_family_response(
         root,
         "createIssue",
@@ -872,9 +873,8 @@ def add_ordered_comments(
         query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
-        started = time.perf_counter()
         response = _graphql_response(query)
-        elapsed = time.perf_counter() - started
+        elapsed = last_api_seconds
         created = _record_family_response(
             root,
             "addComment",
@@ -1098,6 +1098,12 @@ def managed(
     )
 
 
+def _external_document(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=60) as response:
+        payload: bytes = response.read()
+    return payload.decode("utf-8")
+
+
 def create(root: Path, output: Path) -> None:
     started = time.perf_counter()
     root.mkdir(parents=True, exist_ok=False)
@@ -1255,9 +1261,10 @@ def create(root: Path, output: Path) -> None:
     _verify_required_refs(slug, checkout)
     head = _assert_default_main(slug, checkout)
     _issue_catalogs[(slug, root)] = []
-    state = complete_fixture_objects(
-        slug, root, checkout, pinned, head, large_text, started
-    )
+    with ThreadPoolExecutor(max_workers=3) as external_executor:
+        state = complete_fixture_objects(
+            slug, root, checkout, pinned, head, large_text, started, external_executor
+        )
     output.write_text(
         json.dumps(state.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1289,15 +1296,17 @@ def resume(slug: str, root: Path, output: Path) -> None:
         if output.exists()
         else None
     )
-    recovered = complete_fixture_objects(
-        slug,
-        root,
-        checkout,
-        pinned,
-        head,
-        checkout.joinpath("docs/large.md").read_text(encoding="utf-8"),
-        started,
-    )
+    with ThreadPoolExecutor(max_workers=3) as external_executor:
+        recovered = complete_fixture_objects(
+            slug,
+            root,
+            checkout,
+            pinned,
+            head,
+            checkout.joinpath("docs/large.md").read_text(encoding="utf-8"),
+            started,
+            external_executor,
+        )
     if previous is not None:
         previous_values = previous.model_dump(mode="json")
         recovered_values = recovered.model_dump(mode="json")
@@ -1352,7 +1361,21 @@ def complete_fixture_objects(
     head: str,
     large_text: str,
     started: float,
+    external_executor: ThreadPoolExecutor,
 ) -> FixtureState:
+    markdown_url = f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/README.md"
+    plain_url = (
+        f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/pyproject.toml"
+    )
+    html_url = "https://httpbin.org/html"
+    external_futures: dict[str, Future[str]] = {
+        name: external_executor.submit(_external_document, url)
+        for name, url in (
+            ("markdown", markdown_url),
+            ("plain", plain_url),
+            ("html", html_url),
+        )
+    }
     pull_number, _pull_url = create_pull_request(slug, root)
     run(["git", "checkout", "main"], cwd=checkout)
 
@@ -1448,19 +1471,9 @@ def complete_fixture_objects(
         root,
     )
 
-    markdown_url = f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/README.md"
-    plain_url = (
-        f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/pyproject.toml"
-    )
-    html_url = "https://httpbin.org/html"
-    external_text: dict[str, str] = {}
-    for name, url in (
-        ("markdown", markdown_url),
-        ("plain", plain_url),
-        ("html", html_url),
-    ):
-        with urllib.request.urlopen(url, timeout=60) as response:
-            external_text[name] = response.read().decode("utf-8")
+    external_text = {
+        name: external_futures[name].result() for name in ("markdown", "plain", "html")
+    }
 
     missing_external = "https://httpbin.org/status/404"
     redirect_url = "https://httpbin.org/redirect-to?" + urllib.parse.urlencode(
@@ -1647,7 +1660,7 @@ def complete_fixture_objects(
     fail_comments_gh = root / "fail-comments-gh.py"
     fail_comments_gh.write_text(
         "#!/usr/bin/env python3\nimport os, sys\n"
-        f"if 'graphql' in sys.argv and 'number={selected}' in sys.argv and any('comments(first:100' in argument for argument in sys.argv):\n"
+        f"if 'graphql' in sys.argv and 'number={selected}' in sys.argv and any('comments(first: 100' in argument for argument in sys.argv):\n"
         "    sys.stderr.write('FIXTURE-REQUIRED-COMMENT-READ-FAILURE\\n')\n"
         "    sys.exit(1)\n"
         "else:\n"
@@ -1780,6 +1793,22 @@ def complete_fixture_objects(
         encoding="utf-8",
     )
     live_page_edit_gh.chmod(0o755)
+    malformed_page_shape_gh = root / "malformed-page-shape-gh.py"
+    malformed_page_shape_gh.write_text(
+        "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"
+        "if any(argument.startswith(('after=', 'endCursor=')) and argument not in {'after=', 'endCursor='} for argument in sys.argv):\n"
+        f"    result = subprocess.run([{real_gh!r}, *sys.argv[1:]], text=True, capture_output=True, check=False)\n"
+        "    if result.returncode != 0:\n"
+        "        sys.exit(result.returncode)\n"
+        "    document = json.loads(result.stdout)\n"
+        "    document['data']['repository']['issue']['body'] = 17\n"
+        f"    document['data']['repository']['issue']['parent'] = {{'number': 'bad-parent', 'repository': {{'nameWithOwner': {slug!r}}}}}\n"
+        "    print(json.dumps(document))\n"
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    malformed_page_shape_gh.chmod(0o755)
     trace_gh = root / "trace-gh.py"
     trace_gh.write_text(
         "#!/usr/bin/env python3\nimport json, os, subprocess, sys\n"

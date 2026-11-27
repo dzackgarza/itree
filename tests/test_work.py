@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -401,12 +402,13 @@ def test_all_comment_pages_preserve_every_body_and_identifier_in_order(
         offset = result.stdout.index(body)
         assert offset > previous, f"comment {index} is out of GitHub order"
         previous = offset
-    for identifier in (
-        fixture_state.pagination_ids[0],
-        fixture_state.pagination_ids[50],
-        fixture_state.pagination_ids[-1],
-    ):
-        assert f"id={identifier}" in result.stdout
+    rendered_ids = [
+        int(identifier)
+        for identifier in re.findall(
+            r"^- id=(\d+) author=", result.stdout, re.MULTILINE
+        )
+    ]
+    assert rendered_ids == fixture_state.pagination_ids
 
 
 def test_managed_and_legacy_layout_indexing_preserves_body_bytes(
@@ -1091,13 +1093,16 @@ def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
             if argument == f"repos/{fixture_state.repo}/issues/{fixture_state.selected}"
         ]
         assert issue_endpoints == [], issue_endpoints
-        family_reads = [
+        family_numbers = [
             argument
             for event in events
+            if any("WorkPackageIssueFamily" in argument for argument in event["argv"])
             for argument in event["argv"]
-            if "WorkPackageIssueFamily" in argument
+            if argument.startswith("number=")
         ]
-        assert len(family_reads) == 2, family_reads
+        assert family_numbers.count(f"number={fixture_state.selected}") == 1
+        assert family_numbers.count(f"number={fixture_state.roadmap}") == 1
+        assert len(family_numbers) == 2, family_numbers
         methods = [method for event in events for method in event["http"]]
         assert any(method.startswith("> POST /graphql ") for method in methods), entry
         assert not any(
@@ -1116,9 +1121,13 @@ def test_all_entry_points_have_zero_remote_mutations_and_read_only_graphql(
                         "PATCH",
                         "DELETE",
                     }
-            for argument in event["argv"]:
-                if argument.startswith("query("):
-                    assert "mutation" not in argument.lower()
+            if "graphql" in event["argv"]:
+                queries = [
+                    argument
+                    for argument in event["argv"]
+                    if argument.startswith("query=")
+                ]
+                assert "mutation" not in " ".join(queries).lower(), queries
     assert _live_issue(fixture_state.repo, fixture_state.selected) == issue_before
     assert _live_comments(fixture_state.repo, fixture_state.selected) == comments_before
     assert (
@@ -1164,6 +1173,21 @@ def test_malformed_selected_issue_json_exits_three(
     assert result.stdout == ""
     assert "Work package read failure" in result.stderr
     assert "Work package complete" not in result.stderr
+
+    malformed_page = invoke_work(
+        fixture_state,
+        fixture_state.pagination,
+        "module",
+        tmp_path / "malformed-page-shape",
+        "T023-malformed-page-shape",
+        path_gh=fixture_state.root / "malformed-page-shape-gh.py",
+    )
+    assert malformed_page.returncode == 3
+    assert malformed_page.stdout == ""
+    assert "Work package read failure" in malformed_page.stderr
+    assert "invalid issue or parent" in malformed_page.stderr
+    assert f"{fixture_state.repo}#{fixture_state.pagination}" in malformed_page.stderr
+    assert "AssertionError" not in malformed_page.stderr
 
 
 def test_governing_document_shape_failure_exits_three(
@@ -1258,7 +1282,9 @@ def test_empty_query_and_fragment_delimiters_remain_distinct(
 
 
 def test_non_commit_tag_targets_are_typed_unsupported(
-    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+    selected_package: subprocess.CompletedProcess[str],
+    fixture_state: FixtureState,
+    tmp_path: Path,
 ) -> None:
     for key in ("lightweight_tree", "annotated_tree"):
         unresolved = _source_section(
@@ -1267,6 +1293,52 @@ def test_non_commit_tag_targets_are_typed_unsupported(
         assert unresolved.count("reason=unsupported_kind") == 1
         assert "AssertionError" not in selected_package.stderr
         assert "resolved_commit_sha" not in unresolved
+
+    intent_sha = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            f"repos/{fixture_state.repo}/contents/INTENT.md?ref=main",
+            "--jq",
+            ".sha",
+        ],
+        text=True,
+    ).strip()
+    deleted = subprocess.run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "DELETE",
+            f"repos/{fixture_state.repo}/contents/INTENT.md",
+            "-f",
+            "message=Verify absent governing document handling",
+            "-f",
+            f"sha={intent_sha}",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert deleted.returncode == 0, deleted.stderr
+    absent = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "absent-governing-document",
+        "T030-absent-governing-document",
+    )
+    assert absent.returncode == 0, absent.stderr
+    assert "path=INTENT.md\nkind=absent reason=not_found" in absent.stdout
+    assert "Fixture intent: INTENT-GOAL-TEXT." not in absent.stdout
+    for content in (
+        "Fixture agent rules: ORIGINAL-RULE-TEXT.",
+        "Fixture constitution: CONSTITUTION-GOAL-TEXT.",
+        "Fixture contribution rules: CONTRIBUTION-RULE-TEXT.",
+        "Fixture workflow: ORGANIZATION-MODEL-TEXT.",
+    ):
+        assert content in absent.stdout
 
 
 def test_malformed_governing_base64_exits_three(
