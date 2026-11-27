@@ -17,6 +17,7 @@ from itree.models import (
     GithubIssue,
     IssueRef,
     IssueState,
+    Milestone,
     RepoDag,
     RepoRef,
     ReportRef,
@@ -1080,6 +1081,159 @@ evidence = "records"
         [ref["number"] for ref in witness["edge_chain"]]
         for witness in e017["witnesses"]
     ] == [[2, 3], [2, 4]]
+
+
+@pytest.mark.parametrize(
+    "kind", ["implementation", "proof", "research", "audit", "coordination"]
+)
+@pytest.mark.parametrize("state", [IssueState.open, IssueState.closed])
+def test_issue_46_e017_for_each_contract_kind(kind: str, state: IssueState) -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Obligation requiring an empty grouping",
+                body=_contract_body(kind=kind, requires=["#3"], evidence="records"),
+                state=state,
+            ),
+            3: _issue(3, "Milestone: deferred shell", labels=("deferred",)),
+            4: _issue(4, "Open work unit"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    report = generate_doctor_report(dag)
+    e017 = _findings(report, "E017")
+    payload = report.model_dump(mode="json")
+    serialized_e017 = [
+        finding for finding in payload["findings"] if finding["code"] == "E017"
+    ]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+
+    assert len(e017) == 1
+    assert len(e017[0].evidence) == 1
+    assert len(serialized_e017) == 1
+    assert len(serialized_e017[0]["witnesses"]) == 1
+    witness = serialized_e017[0]["witnesses"][0]
+    assert witness["obligation_kind"] == kind
+    assert witness["current_owner"]["number"] == 3
+    assert [ref["number"] for ref in witness["edge_chain"]] == [2, 3]
+    assert doctor_exit_code(report) == 2
+    assert rendered.count("E017:") == 1
+
+
+def test_issue_46_e017_keeps_each_declaring_obligation() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Proof obligation",
+                body=_contract_body(kind="proof", requires=["#3"], evidence="records"),
+            ),
+            3: _issue(3, "Milestone: deferred shell", labels=("deferred",)),
+            4: _issue(
+                4,
+                "Research obligation",
+                body=_contract_body(
+                    kind="research", requires=["#3"], evidence="records"
+                ),
+            ),
+            5: _issue(5, "Open work unit"),
+        },
+        {1: (2, 3, 4, 5)},
+    )
+
+    report = generate_doctor_report(dag)
+    e017 = _findings(report, "E017")
+    payload = report.model_dump(mode="json")
+    serialized_e017 = [
+        finding for finding in payload["findings"] if finding["code"] == "E017"
+    ]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+
+    assert len(e017) == 1
+    assert len(e017[0].evidence) == 2
+    assert len(serialized_e017) == 1
+    witnesses = serialized_e017[0]["witnesses"]
+    assert len(witnesses) == 2
+    assert [witness["obligation_kind"] for witness in witnesses] == [
+        "proof",
+        "research",
+    ]
+    assert [
+        [ref["number"] for ref in witness["edge_chain"]] for witness in witnesses
+    ] == [[2, 3], [4, 3]]
+    assert doctor_exit_code(report) == 2
+    assert rendered.count("E017:") == 1
+
+
+def test_issue_46_e017_absent_without_requirement_or_with_work() -> None:
+    with_work = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Proof obligation",
+                body=_contract_body(kind="proof", requires=["#3"], evidence="records"),
+            ),
+            3: _issue(3, "Milestone: deferred shell", labels=("deferred",)),
+            4: _issue(4, "Open work unit"),
+            5: _issue(5, "Executable descendant").model_copy(
+                update={"milestone": Milestone(title="deferred shell")}
+            ),
+        },
+        {1: (2, 3, 4), 3: (5,)},
+    )
+    without_requirement = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(2, "Open work unit"),
+            3: _issue(3, "Milestone: deferred shell", labels=("deferred",)),
+        },
+        {1: (2, 3)},
+    )
+    redo_risk = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Redo-risk independence record",
+                body=_contract_body(
+                    kind="redo_risk",
+                    evidence="records",
+                    independent_of=["#4"],
+                    files=["src/itree/audit.py"],
+                ),
+            ),
+            3: _issue(3, "Milestone: deferred shell", labels=("deferred",)),
+            4: _issue(4, "Independent open work unit"),
+        },
+        {1: (2, 3, 4)},
+    )
+
+    reports = [
+        generate_doctor_report(dag)
+        for dag in (with_work, without_requirement, redo_risk)
+    ]
+    payloads = [report.model_dump(mode="json") for report in reports]
+    informational = _findings(reports[1], "I010")
+
+    for report, payload in zip(reports, payloads, strict=True):
+        assert _findings(report, "E017") == []
+        assert [
+            finding for finding in payload["findings"] if finding["code"] == "E017"
+        ] == []
+        assert doctor_exit_code(report) == 0
+    assert len(informational) == 1
+    assert informational[0].evidence == [
+        '#3 "Milestone: deferred shell" is deferred, awaiting breakdown'
+    ]
 
 
 def test_role_declaration_contradicting_tree_shape_is_w060() -> None:
