@@ -4,7 +4,9 @@ import json
 import re
 import subprocess
 import time
+import urllib.parse
 from collections.abc import Callable
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
@@ -34,14 +36,22 @@ def _integer(value: JsonValue, context: str) -> int:
 
 
 from .models import (
+    GitRefIdentity,
+    GitRefKind,
+    GitRefResolution,
+    GithubContentFile,
+    GithubContentItem,
     GithubIndeterminateOperation,
     GithubIssue,
     GithubMilestone,
+    GithubRefMatch,
+    GithubRepository,
     GithubRejectedOperation,
     IssueCloseReason,
     IssueComment,
     IssueRef,
     MilestoneTitle,
+    MissingGithubContent,
     PlannedMilestoneEffect,
     RemoteOperationFailure,
     RepoRef,
@@ -90,6 +100,25 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 """
+
+
+class GithubApiError(RuntimeError):
+    def __init__(self, diagnostic: str, status: int | None) -> None:
+        self.status = status
+        super().__init__(diagnostic)
+
+
+class GitRefLookupError(RuntimeError):
+    def __init__(
+        self,
+        reason: Literal["unknown_ref", "ambiguous_ref"],
+        requested_ref: str,
+        repository_path: str,
+    ) -> None:
+        self.reason = reason
+        self.requested_ref = requested_ref
+        self.repository_path = repository_path
+        super().__init__(f"{reason}: {requested_ref} ({repository_path})")
 
 
 class GithubMutationError(RuntimeError):
@@ -413,7 +442,11 @@ class GithubApi(BaseModel):
 
         if proc.returncode != 0:
             error_msg = proc.stderr.strip() or proc.stdout.strip()
-            raise RuntimeError(f"gh api failed: {error_msg}")
+            matched_status = re.search(r"HTTP (?P<status>[1-5]\d{2})", error_msg)
+            status = (
+                int(matched_status["status"]) if matched_status is not None else None
+            )
+            raise GithubApiError(f"gh api failed: {error_msg}", status)
 
         return proc
 
@@ -691,6 +724,112 @@ class GithubApi(BaseModel):
                 )
             )
         return issue
+
+    def get_repository(self) -> GithubRepository:
+        proc = self._exec("GET", f"repos/{self.owner}/{self.repo}")
+        return GithubRepository.model_validate_json(proc.stdout)
+
+    def list_git_ref_matches(self, kind: GitRefKind) -> tuple[GithubRefMatch, ...]:
+        assert kind in (GitRefKind.branch, GitRefKind.tag), (
+            f"ref listing requires branch or tag; found={kind}"
+        )
+        prefix = "heads" if kind == GitRefKind.branch else "tags"
+        path = f"repos/{self.owner}/{self.repo}/git/matching-refs/{prefix}/"
+        proc = self._run_api_command(
+            ["gh", "api", "--paginate", path], path, timeout=120
+        )
+        matches: list[GithubRefMatch] = []
+        for page in _rest_pages(proc.stdout):
+            for item in page:
+                name = _string(item["ref"], "Git ref name")
+                target = _object(item["object"], "Git ref target")
+                sha = _string(target["sha"], "Git ref target SHA")
+                matches.append(GithubRefMatch(name=name, kind=kind, commit_sha=sha))
+        return tuple(matches)
+
+    def resolve_default_branch(self) -> GitRefResolution:
+        repository = self.get_repository()
+        branch = repository.default_branch
+        path = f"repos/{self.owner}/{self.repo}/git/ref/heads/{urllib.parse.quote(branch, safe='/')}"
+        proc = self._exec("GET", path)
+        item = _object(json.loads(proc.stdout), "default branch ref")
+        name = _string(item["ref"], "default branch ref name")
+        target = _object(item["object"], "default branch target")
+        return GitRefResolution(
+            requested_ref=branch,
+            resolved_commit_sha=_string(target["sha"], "default branch SHA"),
+            repository_path="",
+            matched_refs=(GitRefIdentity(name=name, kind=GitRefKind.branch),),
+        )
+
+    def resolve_git_ref(
+        self, requested_ref: str, repository_path: str
+    ) -> GitRefResolution:
+        if re.fullmatch(r"[0-9a-f]{40}", requested_ref):
+            return GitRefResolution(
+                requested_ref=requested_ref,
+                resolved_commit_sha=requested_ref,
+                repository_path=repository_path,
+                matched_refs=(
+                    GitRefIdentity(name=requested_ref, kind=GitRefKind.commit),
+                ),
+            )
+        matches = (
+            *self.list_git_ref_matches(GitRefKind.branch),
+            *self.list_git_ref_matches(GitRefKind.tag),
+        )
+        ref_and_path = (
+            f"{requested_ref}/{repository_path}" if repository_path else requested_ref
+        )
+        candidates: list[tuple[GithubRefMatch, str, str]] = []
+        for match in matches:
+            prefix = "refs/heads/" if match.kind == GitRefKind.branch else "refs/tags/"
+            name = match.name.removeprefix(prefix)
+            if ref_and_path == name or ref_and_path.startswith(name + "/"):
+                path = ref_and_path[len(name) :].removeprefix("/")
+                candidates.append((match, name, path))
+        if not candidates:
+            raise GitRefLookupError("unknown_ref", requested_ref, repository_path)
+        longest = max(len(name) for _, name, _ in candidates)
+        selected = [
+            (match, name, path)
+            for match, name, path in candidates
+            if len(name) == longest
+        ]
+        commits = {match.commit_sha for match, _, _ in selected}
+        if len(commits) != 1:
+            raise GitRefLookupError("ambiguous_ref", requested_ref, repository_path)
+        match, name, path = selected[0]
+        identities = tuple(
+            GitRefIdentity(name=match.name, kind=match.kind) for match, _, _ in selected
+        )
+        return GitRefResolution(
+            requested_ref=name,
+            resolved_commit_sha=match.commit_sha,
+            repository_path=path,
+            matched_refs=identities,
+        )
+
+    def get_repository_content(
+        self, path: str, ref: str
+    ) -> GithubContentFile | tuple[GithubContentItem, ...] | MissingGithubContent:
+        endpoint = f"repos/{self.owner}/{self.repo}/contents/{urllib.parse.quote(path, safe='/')}"
+        try:
+            proc = self._exec("GET", endpoint, fields={"ref": ref})
+        except GithubApiError as error:
+            if error.status == 404:
+                return MissingGithubContent(path=path, ref=ref)
+            raise
+        payload = json.loads(proc.stdout)
+        if isinstance(payload, list):
+            return TypeAdapter(tuple[GithubContentItem, ...]).validate_python(payload)
+        return GithubContentFile.model_validate(payload)
+
+    def get_comment(self, comment_id: int) -> IssueComment:
+        proc = self._exec(
+            "GET", f"repos/{self.owner}/{self.repo}/issues/comments/{comment_id}"
+        )
+        return IssueComment.model_validate_json(proc.stdout)
 
     def get_issue(self, number: int) -> GithubIssue:
         """Fetch a single GitHub issue by number."""

@@ -899,4 +899,26 @@ class GithubContentFile(BaseModel):
     type: str
     path: str
     encoding: str
-    content: str
+    content: str | None
+
+
+class GithubContentItem(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    type: str
+    path: str
+
+
+class MissingGithubContent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    path: str
+    ref: str
+
+
+class GithubRefMatch(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: GitRefKind
+    commit_sha: CommitSha
