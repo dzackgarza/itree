@@ -896,10 +896,33 @@ class GithubRepository(BaseModel):
 class GithubContentFile(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
-    type: str
+    kind: Literal["file"] = "file"
+    type: Literal["file"]
     path: str
     encoding: str
     content: str | None
+    sha: CommitSha
+
+
+class GithubNonFileContent(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    kind: Literal["non_file"] = "non_file"
+    type: str
+    path: str
+    sha: CommitSha
+
+
+GithubContentObject = Annotated[
+    GithubContentFile | GithubNonFileContent, Field(discriminator="kind")
+]
+
+
+class GithubBlob(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    encoding: Literal["base64"]
+    content: str
 
 
 class GithubContentItem(BaseModel):

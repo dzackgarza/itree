@@ -704,7 +704,7 @@ def test_read_only_execution_preserves_local_and_github_state(
 
 
 def _source_section(output: str, url: str, *, present: bool) -> str:
-    heading = f"### {'Source' if present else 'Unresolved'} {url}"
+    heading = f"### {'Source' if present else 'Unresolved'} {url}\n"
     start = output.index(heading)
     end = output.find("\n### ", start + len(heading))
     return output[start:] if end == -1 else output[start:end]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -8,7 +9,14 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    JsonValue,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+)
 
 JsonObject = dict[str, JsonValue]
 
@@ -36,11 +44,15 @@ def _integer(value: JsonValue, context: str) -> int:
 
 
 from .models import (
+    CommitSha,
     GitRefIdentity,
     GitRefKind,
     GitRefResolution,
+    GithubBlob,
     GithubContentFile,
     GithubContentItem,
+    GithubContentObject,
+    GithubNonFileContent,
     GithubIndeterminateOperation,
     GithubIssue,
     GithubMilestone,
@@ -367,6 +379,9 @@ class GithubApi(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     repo_ref: RepoRef
+    _ref_matches: dict[GitRefKind, tuple[GithubRefMatch, ...]] = PrivateAttr(
+        default_factory=dict
+    )
 
     @classmethod
     def from_repo_ref(cls, ref: RepoRef) -> GithubApi:
@@ -729,14 +744,35 @@ class GithubApi(BaseModel):
         proc = self._exec("GET", f"repos/{self.owner}/{self.repo}")
         return GithubRepository.model_validate_json(proc.stdout)
 
+    def _dereference_annotated_tag(self, sha: str) -> CommitSha:
+        seen: set[str] = set()
+        current = sha
+        while True:
+            path = f"repos/{self.owner}/{self.repo}/git/tags/{current}"
+            proc = self._exec("GET", path)
+            payload = _object(json.loads(proc.stdout), "annotated tag")
+            target = _object(payload["object"], "annotated tag target")
+            target_type = _string(target["type"], "annotated tag target type")
+            if target_type == "commit":
+                return _string(target["sha"], "annotated tag commit SHA")
+            assert target_type == "tag", (
+                f"annotated tag target must be tag or commit; found={target_type!r}; payload={payload!r}"
+            )
+            assert current not in seen, f"annotated tag cycle detected at {current}"
+            seen.add(current)
+            current = _string(target["sha"], "nested annotated tag SHA")
+
     def list_git_ref_matches(self, kind: GitRefKind) -> tuple[GithubRefMatch, ...]:
         assert kind in (GitRefKind.branch, GitRefKind.tag), (
             f"ref listing requires branch or tag; found={kind}"
         )
+        cached = self._ref_matches.get(kind)
+        if cached is not None:
+            return cached
         prefix = "heads" if kind == GitRefKind.branch else "tags"
         path = f"repos/{self.owner}/{self.repo}/git/matching-refs/{prefix}/"
         proc = self._run_api_command(
-            ["gh", "api", "--paginate", path], path, timeout=120
+            ["gh", "api", "--paginate", path], path, timeout=30
         )
         matches: list[GithubRefMatch] = []
         for page in _rest_pages(proc.stdout):
@@ -744,8 +780,12 @@ class GithubApi(BaseModel):
                 name = _string(item["ref"], "Git ref name")
                 target = _object(item["object"], "Git ref target")
                 sha = _string(target["sha"], "Git ref target SHA")
+                if kind == GitRefKind.tag and target.get("type") == "tag":
+                    sha = self._dereference_annotated_tag(sha)
                 matches.append(GithubRefMatch(name=name, kind=kind, commit_sha=sha))
-        return tuple(matches)
+        resolved = tuple(matches)
+        self._ref_matches[kind] = resolved
+        return resolved
 
     def resolve_default_branch(self) -> GitRefResolution:
         repository = self.get_repository()
@@ -812,7 +852,7 @@ class GithubApi(BaseModel):
 
     def get_repository_content(
         self, path: str, ref: str
-    ) -> GithubContentFile | tuple[GithubContentItem, ...] | MissingGithubContent:
+    ) -> GithubContentObject | tuple[GithubContentItem, ...] | MissingGithubContent:
         endpoint = f"repos/{self.owner}/{self.repo}/contents/{urllib.parse.quote(path, safe='/')}"
         try:
             proc = self._exec("GET", endpoint, fields={"ref": ref})
@@ -823,7 +863,16 @@ class GithubApi(BaseModel):
         payload = json.loads(proc.stdout)
         if isinstance(payload, list):
             return TypeAdapter(tuple[GithubContentItem, ...]).validate_python(payload)
-        return GithubContentFile.model_validate(payload)
+        content_type = _string(payload["type"], "repository content type")
+        if content_type == "file":
+            return GithubContentFile.model_validate(payload)
+        return GithubNonFileContent.model_validate(payload)
+
+    def get_git_blob(self, sha: CommitSha) -> bytes:
+        endpoint = f"repos/{self.owner}/{self.repo}/git/blobs/{sha}"
+        proc = self._exec("GET", endpoint)
+        blob = GithubBlob.model_validate_json(proc.stdout)
+        return base64.b64decode(blob.content)
 
     def get_comment(self, comment_id: int) -> IssueComment:
         proc = self._exec(

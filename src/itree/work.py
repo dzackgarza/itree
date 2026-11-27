@@ -20,6 +20,7 @@ from .models import (
     GitRefResolution,
     GithubContentFile,
     GithubIssue,
+    GithubNonFileContent,
     IssueComment,
     MissingGithubContent,
     IssueRef,
@@ -155,7 +156,9 @@ UnresolvedReason = Literal[
     "binary",
     "invalid",
 ]
-RepositoryTextFailure = Literal["binary", "invalid_text_encoding", "unsupported_kind"]
+RepositoryTextFailure = Literal[
+    "binary", "invalid_text_encoding", "unsupported_kind", "invalid"
+]
 
 
 class PresentSource(BaseModel):
@@ -170,6 +173,7 @@ class PresentSource(BaseModel):
     final_url: str
     media_type: str
     resolution: GitRefResolution | None = None
+    sub_anchor: str | None = None
 
 
 class UnresolvedSource(BaseModel):
@@ -479,6 +483,7 @@ def _present(
     content: str,
     media_type: str,
     resolution: GitRefResolution | None = None,
+    sub_anchor: str | None = None,
 ) -> PresentSource:
     return PresentSource(
         citation=citation,
@@ -489,17 +494,19 @@ def _present(
         final_url=str(citation.canonical_url),
         media_type=media_type,
         resolution=resolution,
+        sub_anchor=sub_anchor,
     )
 
 
 def _decode_repository_file(
-    document: GithubContentFile,
+    api: GithubApi, document: GithubContentFile
 ) -> str | RepositoryTextFailure:
-    if document.type != "file":
-        return "unsupported_kind"
-    if document.encoding == "none" or document.content is None:
-        return "binary"
-    raw = base64.b64decode(document.content)
+    if document.encoding == "none":
+        raw = api.get_git_blob(document.sha)
+    elif document.content is None:
+        return "invalid"
+    else:
+        raw = base64.b64decode(document.content)
     if b"\x00" in raw:
         return "binary"
     try:
@@ -513,14 +520,32 @@ def _github_source_error(error: GithubApiError) -> Literal["not_found", "inacces
 
 
 def _resolve_github_issue(
-    api: GithubApi, citation: Citation, number: int, comment_id: int | None
+    api: GithubApi,
+    citation: Citation,
+    number: int,
+    comment_id: int | None,
+    sub_anchor: str | None,
 ) -> SourceDisposition:
     try:
+        issue = api.get_issue(number)
+        if issue.is_pull_request:
+            return _unresolved(citation, "unsupported_kind")
         if comment_id is not None:
             comment = api.get_comment(comment_id)
-            return _present(citation, "github_comment", comment.body, "text/markdown")
-        issue = api.get_issue(number)
-        return _present(citation, "github_issue", issue.body or "", "text/markdown")
+            return _present(
+                citation,
+                "github_comment",
+                comment.body,
+                "text/markdown",
+                sub_anchor=sub_anchor,
+            )
+        return _present(
+            citation,
+            "github_issue",
+            issue.body or "",
+            "text/markdown",
+            sub_anchor=sub_anchor,
+        )
     except GithubApiError as error:
         return _unresolved(citation, _github_source_error(error))
 
@@ -544,15 +569,17 @@ def _resolve_github_blob(
         return _unresolved(citation, _github_source_error(error))
     if isinstance(document, MissingGithubContent):
         return _unresolved(citation, "not_found")
-    if isinstance(document, tuple):
+    if isinstance(document, tuple) or isinstance(document, GithubNonFileContent):
         return _unresolved(citation, "unsupported_kind")
-    content_or_reason = _decode_repository_file(document)
+    content_or_reason = _decode_repository_file(api, document)
     if content_or_reason == "binary":
         return _unresolved(citation, "binary")
     if content_or_reason == "invalid_text_encoding":
         return _unresolved(citation, "invalid_text_encoding")
     if content_or_reason == "unsupported_kind":
         return _unresolved(citation, "unsupported_kind")
+    if content_or_reason == "invalid":
+        return _unresolved(citation, "invalid")
     media_type = (
         "text/markdown"
         if document.path.lower().endswith((".md", ".markdown"))
@@ -574,8 +601,8 @@ def _external_content_kind(
 
 
 def _resolve_external(citation: Citation) -> SourceDisposition:
-    request = urllib.request.Request(citation.citation, method="GET")
     try:
+        request = urllib.request.Request(citation.citation, method="GET")
         response = urllib.request.urlopen(request, timeout=60)
         with response:
             payload = response.read()
@@ -612,7 +639,7 @@ def _resolve_external(citation: Citation) -> SourceDisposition:
     )
 
 
-def resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
+def _resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
     if str(citation.canonical_url).startswith("#"):
         return _unresolved(citation, "bare_reference")
     try:
@@ -628,18 +655,36 @@ def resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
     ]
     if len(segments) < 3:
         return _unresolved(citation, "unsupported_kind")
-    api = GithubApi.from_repo_ref(RepoRef(owner=segments[0], repo=segments[1]))
+    target_repo = RepoRef(owner=segments[0], repo=segments[1])
+    if api.repo_ref.slug.casefold() != target_repo.slug.casefold():
+        api = GithubApi.from_repo_ref(target_repo)
     if len(segments) == 4 and segments[2] == "issues" and segments[3].isdigit():
-        anchor = re.fullmatch(r"issuecomment-(\d+)", split.fragment)
+        anchor = re.fullmatch(r"issuecomment-(\d+)(?:#(.*))?", split.fragment)
+        if split.fragment and anchor is None:
+            return _unresolved(citation, "invalid")
+        comment_id = int(anchor[1]) if anchor is not None else None
+        sub_anchor = anchor[2] if anchor is not None and anchor[2] else None
         return _resolve_github_issue(
-            api,
-            citation,
-            int(segments[3]),
-            int(anchor[1]) if anchor is not None else None,
+            api, citation, int(segments[3]), comment_id, sub_anchor
         )
     if len(segments) >= 5 and segments[2] == "blob":
         return _resolve_github_blob(api, citation, segments)
     return _unresolved(citation, "unsupported_kind")
+
+
+def resolve_citation(api: GithubApi, citation: Citation) -> SourceDisposition:
+    try:
+        return _resolve_citation(api, citation)
+    except GitRefLookupError as error:
+        return _unresolved(citation, error.reason)
+    except GithubApiError as error:
+        return _unresolved(citation, _github_source_error(error))
+    except ValidationError, TypeError, ValueError, KeyError:
+        return _unresolved(citation, "invalid")
+    except OSError, TimeoutError:
+        return _unresolved(citation, "inaccessible")
+    except RuntimeError:
+        return _unresolved(citation, "inaccessible")
 
 
 def _first_heading(body: str) -> str:
@@ -648,30 +693,41 @@ def _first_heading(body: str) -> str:
     )
 
 
-def _append_issue(
-    lines: list[str],
-    issue_ref: IssueRef,
-    issue: GithubIssue,
-    comments: tuple[IssueComment, ...],
+def _append_issue_body(
+    lines: list[str], issue_ref: IssueRef, issue: GithubIssue
 ) -> None:
-    body = issue.body or ""
     lines.extend(
         (
             f"### {issue_ref.slug}",
             f"title={issue.title}",
             f"state={issue.state.value}",
             f"url={issue.html_url}",
-            body,
+            issue.body or "",
             "",
-            "Comment index:",
         )
     )
+
+
+def _append_issue_comments(
+    lines: list[str], comments: tuple[IssueComment, ...]
+) -> None:
+    lines.append("Comment index:")
     for comment in comments:
         lines.append(
             f"- id={comment.id} author={comment.author} created_at={comment.created_at} updated_at={comment.updated_at} first_heading={_first_heading(comment.body)} url={comment.html_url}"
         )
     for comment in comments:
         lines.extend((f"#### Comment id={comment.id}", comment.body, ""))
+
+
+def _append_issue(
+    lines: list[str],
+    issue_ref: IssueRef,
+    issue: GithubIssue,
+    comments: tuple[IssueComment, ...],
+) -> None:
+    _append_issue_body(lines, issue_ref, issue)
+    _append_issue_comments(lines, comments)
 
 
 def _append_layout_index(lines: list[str], layout: ValidIssueLayout) -> None:
@@ -709,8 +765,9 @@ def render_work_package(package: WorkPackage) -> str:
         "Work package complete",
         "## Selected issue",
     ]
-    _append_issue(lines, package.issue_ref, package.selected_issue, package.comments)
+    _append_issue_body(lines, package.issue_ref, package.selected_issue)
     _append_layout_index(lines, package.layout)
+    _append_issue_comments(lines, package.comments)
     if package.ancestors:
         lines.append("## Governing ancestors")
     for ancestor in package.ancestors:
@@ -735,6 +792,8 @@ def render_work_package(package: WorkPackage) -> str:
         lines.append(f"requested_url={source.requested_url}")
         lines.append(f"final_url={source.final_url}")
         lines.append(f"media_type={source.media_type}")
+        if source.sub_anchor is not None:
+            lines.append(f"sub_anchor={source.sub_anchor}")
         if source.resolution is not None:
             lines.append(f"requested_ref={source.resolution.requested_ref}")
             lines.append(f"resolved_commit_sha={source.resolution.resolved_commit_sha}")
@@ -784,12 +843,17 @@ def _load_governing_documents(api: GithubApi) -> tuple[GoverningDocument, ...]:
                 )
             )
             continue
-        if isinstance(result, tuple):
+        if isinstance(result, tuple) or isinstance(result, GithubNonFileContent):
             raise RuntimeError(
                 f"governing document {path} resolved to a non-file response"
             )
-        content_or_reason = _decode_repository_file(result)
-        if content_or_reason in ("binary", "invalid_text_encoding", "unsupported_kind"):
+        content_or_reason = _decode_repository_file(api, result)
+        if content_or_reason in (
+            "binary",
+            "invalid_text_encoding",
+            "unsupported_kind",
+            "invalid",
+        ):
             raise RuntimeError(
                 f"governing document {path} could not be read as UTF-8 text: {content_or_reason}"
             )
