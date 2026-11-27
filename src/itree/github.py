@@ -39,6 +39,7 @@ from .models import (
     GithubMilestone,
     GithubRejectedOperation,
     IssueCloseReason,
+    IssueComment,
     IssueRef,
     MilestoneTitle,
     PlannedMilestoneEffect,
@@ -47,11 +48,6 @@ from .models import (
     RoutedOwnerResolution,
     RoutedOwnerState,
 )
-
-
-
-
-
 
 
 REPO_GRAPH_QUERY = """
@@ -83,8 +79,6 @@ query($owner: String!, $name: String!, $endCursor: String) {
   }
 }
 """
-
-
 
 
 ISSUE_PARENT_QUERY = """
@@ -704,16 +698,21 @@ class GithubApi(BaseModel):
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
     def list_subissues(self, number: int) -> tuple[GithubIssue, ...]:
-        """List ALL sub-issues of a parent issue, following REST pagination.
-
-        REST returns 30 items per page by default; this is the >100-children
-        GraphQL fallback, so it must walk every page. ``--paginate`` streams
-        the per-page arrays.
-        """
+        """List ALL sub-issues of a parent issue, following REST pagination."""
         path = f"repos/{self.owner}/{self.repo}/issues/{number}/sub_issues?per_page=100"
         cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
         return parse_subissues_pages(proc.stdout)
+
+    def list_comments(self, number: int) -> tuple[IssueComment, ...]:
+        path = f"repos/{self.owner}/{self.repo}/issues/{number}/comments?per_page=100"
+        proc = self._run_api_command(
+            ["gh", "api", "--paginate", path], path, timeout=120
+        )
+        pages = TypeAdapter(tuple[tuple[IssueComment, ...], ...]).validate_python(
+            _rest_pages(proc.stdout)
+        )
+        return tuple(comment for page in pages for comment in page)
 
     def list_blocked_by(self, number: int) -> tuple[GithubIssue, ...]:
         """List ALL native blockers of an issue, following REST pagination."""
@@ -991,8 +990,6 @@ def resolve_routed_owner(ref: IssueRef) -> RoutedOwnerResolution:
         nodes = api.fetch_repo_graph()
         owner_dag = dag_from_graph_nodes(ref.to_repo_ref(), nodes, api.list_subissues)
     except (AssertionError, KeyError, RuntimeError, ValueError) as e:
-
-
         return RoutedOwnerResolution(state=RoutedOwnerState.unreadable, detail=str(e))
 
     owner = owner_dag.issues.get(ref.number)

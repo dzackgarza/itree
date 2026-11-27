@@ -396,6 +396,21 @@ def test_required_comment_read_failure_exits_three_without_package(
 def test_all_public_entry_points_emit_the_same_live_package(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
+    for script in (
+        SOURCE / "src" / "itree" / "cli.py",
+        SOURCE / "src" / "itree" / "__main__.py",
+    ):
+        warmup = subprocess.run(
+            ["uv", "run", "--script", str(script), "--help"],
+            cwd=SOURCE,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=600,
+        )
+        assert warmup.returncode == 0, (
+            f"direct entry dependency setup failed\nstdout={warmup.stdout}\nstderr={warmup.stderr}"
+        )
     outputs: dict[EntryPoint, subprocess.CompletedProcess[str]] = {}
     for candidate in ("installed", "module", "direct-cli", "direct-main"):
         outputs[candidate] = invoke_work(

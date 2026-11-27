@@ -21,6 +21,10 @@ from datetime import date
 from pathlib import Path
 from typing import Annotated
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "itree"
+
 from cyclopts import App, Parameter
 
 from .github import (
@@ -73,6 +77,13 @@ from .validate import (
     is_grouping_issue,
     is_root_ledger,
     repo_health,
+)
+from .work import (
+    WorkPackageContentError,
+    WorkPackageReadError,
+    load_work_package,
+    render_readable_work_package,
+    render_work_package,
 )
 
 
@@ -815,6 +826,28 @@ def move(
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
+
+
+@app.command(group="Query")
+def work(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+) -> None:
+    """Print the live issue contract, comments, and governing ancestors."""
+    issue_ref = parse_ref(issue)
+    try:
+        package = load_work_package(issue_ref)
+    except WorkPackageContentError as error:
+        print(render_readable_work_package(error.failure.readable), end="")
+        for diagnostic in error.failure.diagnostics:
+            print(diagnostic, file=sys.stderr)
+        sys.exit(2)
+    except WorkPackageReadError as error:
+        print(
+            f"Work package read failure: {error.failure.operation}: {error.failure.diagnostic}",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    print(render_work_package(package), end="")
 
 
 @app.command(group="Query")
