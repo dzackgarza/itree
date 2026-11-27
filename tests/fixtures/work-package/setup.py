@@ -135,11 +135,17 @@ def create(root: Path, output: Path) -> None:
         "src/itree/WORKFLOWS.md": "Fixture workflow: ORGANIZATION-MODEL-TEXT.\n",
         "docs/primary.md": "Pinned source content: BEFORE-BRANCH-EDIT.\n",
         "docs/recursive.md": "ANCESTOR-ONLY-CITATION-MUST-NOT-BE-FETCHED\n",
+        "docs/nested.md": "Fetched source includes one nested pointer: https://httpbin.org/status/418\n",
         "docs/missing-utf8.txt": "placeholder\n",
         "justfile": "test-commit:\n    @git diff --check --cached\n\ntest-push:\n    @git diff --check\n",
     }
     for relative, text in files.items():
         checkout.joinpath(relative).write_text(text, encoding="utf-8")
+    large_text = "".join(
+        f"LARGE-TEXT-{index:06d}-ABCDEFGHIJKLMNOPQRSTUVWXYZ\n" for index in range(40000)
+    )
+    assert len(large_text.encode("utf-8")) > 1_048_576
+    checkout.joinpath("docs/large.md").write_text(large_text, encoding="utf-8")
     checkout.joinpath("docs/binary.dat").write_bytes(bytes((0, 1, 2, 255, 0, 128)))
     checkout.joinpath("docs/invalid.txt").write_bytes(b"invalid-text:\xff\xfe\n")
     checkout.joinpath("docs/image.png").write_bytes(
@@ -156,6 +162,31 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", "docs/primary.md"], cwd=checkout)
     run(["git", "commit", "-m", "Change the unpinned source"], cwd=checkout)
+    run(["git", "push"], cwd=checkout)
+    run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "https://github.com/github/spec-kit",
+            "vendor/submodule",
+        ],
+        cwd=checkout,
+    )
+    run(
+        [
+            "git",
+            "-C",
+            "vendor/submodule",
+            "checkout",
+            "a4d571229e164e440f8950cac034607bae7b7518",
+        ],
+        cwd=checkout,
+    )
+    run(["git", "add", ".gitmodules", "vendor/submodule"], cwd=checkout)
+    run(["git", "commit", "-m", "Add a real submodule content case"], cwd=checkout)
     run(["git", "push"], cwd=checkout)
     head = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
     run(["git", "checkout", "-b", "feature/work-package"], cwd=checkout)
@@ -198,6 +229,80 @@ def create(root: Path, output: Path) -> None:
         cwd=checkout,
     )
 
+    run(["git", "branch", "shared/annotated-work-package-ref"], cwd=checkout)
+    run(
+        [
+            "git",
+            "tag",
+            "-a",
+            "shared/annotated-work-package-ref",
+            "-m",
+            "Same commit annotated tag",
+        ],
+        cwd=checkout,
+    )
+    run(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/shared/annotated-work-package-ref",
+            "refs/tags/shared/annotated-work-package-ref",
+        ],
+        cwd=checkout,
+    )
+    run(["git", "branch", "ambiguous/annotated-work-package-ref", pinned], cwd=checkout)
+    run(
+        [
+            "git",
+            "tag",
+            "-a",
+            "ambiguous/annotated-work-package-ref",
+            "HEAD",
+            "-m",
+            "Different commit annotated tag",
+        ],
+        cwd=checkout,
+    )
+    run(
+        [
+            "git",
+            "push",
+            "origin",
+            "refs/heads/ambiguous/annotated-work-package-ref",
+            "refs/tags/ambiguous/annotated-work-package-ref",
+        ],
+        cwd=checkout,
+    )
+
+    run(["git", "checkout", "-b", "pull-request-source"], cwd=checkout)
+    checkout.joinpath("docs/pull-request.md").write_text(
+        "Real pull request content.\n", encoding="utf-8"
+    )
+    run(["git", "add", "docs/pull-request.md"], cwd=checkout)
+    run(["git", "commit", "-m", "Create a real pull request"], cwd=checkout)
+    run(["git", "push", "-u", "origin", "pull-request-source"], cwd=checkout)
+    pull_url = run(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--repo",
+            slug,
+            "--base",
+            "main",
+            "--head",
+            "pull-request-source",
+            "--title",
+            "Fixture pull request",
+            "--body",
+            "Real pull request for source classification.",
+        ],
+        cwd=checkout,
+    ).stdout.strip()
+    pull_number = int(pull_url.rsplit("/", 1)[1])
+    run(["git", "checkout", "main"], cwd=checkout)
+
     roadmap_body = "ROADMAP-BODY-CONTRACT-EXACT\n"
     roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body, root)
     roadmap_comment_id, roadmap_comment_url = comment(
@@ -222,6 +327,12 @@ def create(root: Path, output: Path) -> None:
     cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
     cited_comment_id, cited_comment_url = comment(
         slug, cited, "CITED-COMMENT-BODY-EXACT\n"
+    )
+    citation_edge = issue(
+        slug,
+        "Citation transport edges",
+        f"Shared source: https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md\n",
+        root,
     )
 
     markdown_url = f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/README.md"
@@ -265,15 +376,25 @@ def create(root: Path, output: Path) -> None:
         "slash_branch": f"https://github.com/{slug}/blob/feature/work-package/docs/primary.md",
         "slash_tag": f"https://github.com/{slug}/blob/work-package-v1/docs/primary.md",
         "shared": f"https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md",
+        "shared_annotated": f"https://github.com/{slug}/blob/shared/annotated-work-package-ref/docs/primary.md",
+        "ambiguous_annotated": f"https://github.com/{slug}/blob/ambiguous/annotated-work-package-ref/docs/primary.md",
         "ambiguous": f"https://github.com/{slug}/blob/ambiguous/work-package-ref/docs/primary.md",
         "unknown": f"https://github.com/{slug}/blob/unknown/work-package-ref/docs/primary.md",
         "not_found": f"https://github.com/{slug}/blob/{pinned}/docs/does-not-exist.md",
         "binary_blob": f"https://github.com/{slug}/blob/{pinned}/docs/binary.dat",
         "invalid_blob": f"https://github.com/{slug}/blob/{pinned}/docs/invalid.txt",
+        "large_text": f"https://github.com/{slug}/blob/{head}/docs/large.md",
+        "nested_source": f"https://github.com/{slug}/blob/{head}/docs/nested.md",
+        "nested_target": "https://httpbin.org/status/418",
+        "submodule": f"https://github.com/{slug}/blob/{head}/vendor/submodule",
         "directory": f"https://github.com/{slug}/tree/{pinned}/docs",
+        "blob_directory": f"https://github.com/{slug}/blob/{pinned}/docs",
         "pull": f"https://github.com/{slug}/pull/999",
+        "pull_issue": f"https://github.com/{slug}/issues/{pull_number}",
         "cited_issue": f"https://github.com/{slug}/issues/{cited}",
         "cited_comment": cited_comment_url,
+        "cited_comment_subanchor": cited_comment_url + "#work-package-type-model",
+        "malformed_comment_anchor": f"https://github.com/{slug}/issues/{cited}#issuecomment-not-a-number",
         "recursive": recursive_url,
     }
     citation_lines = [
@@ -289,15 +410,24 @@ def create(root: Path, output: Path) -> None:
         f"Slash branch: {source_urls['slash_branch']}",
         f"Slash tag: {source_urls['slash_tag']}",
         f"Shared same commit: {source_urls['shared']}",
+        f"Shared annotated same commit: {source_urls['shared_annotated']}",
+        f"Ambiguous annotated different commit: {source_urls['ambiguous_annotated']}",
         f"Ambiguous different commit: {source_urls['ambiguous']}",
         f"Unknown ref: {source_urls['unknown']}",
         f"Missing file: {source_urls['not_found']}",
         f"Binary blob: {source_urls['binary_blob']}",
         f"Invalid blob: {source_urls['invalid_blob']}",
+        f"Large encoding-none text: {source_urls['large_text']}",
+        f"Nested source: {source_urls['nested_source']}",
+        f"Submodule: {source_urls['submodule']}",
         f"Directory: {source_urls['directory']}",
+        f"Blob directory: {source_urls['blob_directory']}",
         f"Pull request: {source_urls['pull']}",
+        f"Pull request through issues: {source_urls['pull_issue']}",
         f"Cited issue: {source_urls['cited_issue']}",
         f"Cited comment: {cited_comment_url}",
+        f"Cited comment with subanchor: {source_urls['cited_comment_subanchor']}",
+        f"Malformed issuecomment anchor: {source_urls['malformed_comment_anchor']}",
     ]
     comment(slug, selected, "\n\n".join(citation_lines) + "\n")
 
@@ -377,6 +507,36 @@ def create(root: Path, output: Path) -> None:
         encoding="utf-8",
     )
     assertion_gh.chmod(0o755)
+    citation_runtime_gh = root / "citation-runtime-gh.py"
+    citation_runtime_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys, time\n"
+        "if any('git/matching-refs' in argument for argument in sys.argv):\n"
+        "    time.sleep(35)\n"
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    citation_runtime_gh.chmod(0o755)
+    citation_shape_gh = root / "citation-shape-gh.py"
+    citation_shape_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        "if any('git/matching-refs' in argument for argument in sys.argv):\n"
+        '    print(\'{"message": "CITATION-MALFORMED-REF-PAGE"}\')\n'
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    citation_shape_gh.chmod(0o755)
+    content_shape_gh = root / "content-shape-gh.py"
+    content_shape_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        "if any('/contents/docs/large.md' in argument for argument in sys.argv):\n"
+        '    print(\'{"type": "file", "path": "docs/large.md", "sha": "0000000000000000000000000000000000000000"}\')\n'
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    content_shape_gh.chmod(0o755)
 
     state: dict[str, JsonValue] = {
         "repo": slug,
@@ -392,6 +552,12 @@ def create(root: Path, output: Path) -> None:
         "binding_comment_url": binding_url,
         "cited": cited,
         "cited_comment_id": cited_comment_id,
+        "citation_edge": citation_edge,
+        "citation_runtime_gh": str(citation_runtime_gh),
+        "citation_shape_gh": str(citation_shape_gh),
+        "content_shape_gh": str(content_shape_gh),
+        "large_text_size": len(large_text.encode("utf-8")),
+        "pull_number": pull_number,
         "pagination": pagination,
         "pagination_comments": pagination_comments,
         "pagination_ids": pagination_ids,

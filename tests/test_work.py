@@ -34,6 +34,12 @@ class FixtureState(BaseModel):
     binding_comment_url: str
     cited: int
     cited_comment_id: int
+    citation_edge: int
+    citation_runtime_gh: Path
+    citation_shape_gh: Path
+    content_shape_gh: Path
+    large_text_size: int
+    pull_number: int
     pagination: int
     pagination_comments: list[str]
     pagination_ids: list[int]
@@ -695,3 +701,204 @@ def test_read_only_execution_preserves_local_and_github_state(
     assert "DECOY-FEATURE-POINTER" not in result.stdout
     assert "DECOY-CACHED-PLAN" not in result.stdout
     assert "DECOY-SPECIFICATION" not in result.stdout
+
+
+def _source_section(output: str, url: str, *, present: bool) -> str:
+    heading = f"### {'Source' if present else 'Unresolved'} {url}"
+    start = output.index(heading)
+    end = output.find("\n### ", start + len(heading))
+    return output[start:] if end == -1 else output[start:end]
+
+
+def _set_citation_body(state: FixtureState, body: str) -> None:
+    result = subprocess.run(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(state.citation_edge),
+            "--repo",
+            state.repo,
+            "--body",
+            body,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_annotated_tags_resolve_to_commits_and_retain_all_identities(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    urls = fixture_state.source_urls
+    shared = _source_section(output, urls["shared_annotated"], present=True)
+    assert "refs/heads/shared/annotated-work-package-ref kind=branch" in shared
+    assert "refs/tags/shared/annotated-work-package-ref kind=tag" in shared
+    assert f"resolved_commit_sha={fixture_state.head}" in shared
+    assert (
+        _source_section(output, urls["ambiguous_annotated"], present=False).count(
+            "reason=ambiguous_ref"
+        )
+        == 1
+    )
+
+
+def test_issuecomment_subanchors_do_not_fall_back_to_issue_body(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    urls = fixture_state.source_urls
+    present = _source_section(
+        selected_package.stdout, urls["cited_comment_subanchor"], present=True
+    )
+    assert "CITED-COMMENT-BODY-EXACT" in present
+    assert "CITED-ISSUE-BODY-EXACT" not in present
+    assert "sub_anchor=work-package-type-model" in present
+    malformed = _source_section(
+        selected_package.stdout, urls["malformed_comment_anchor"], present=False
+    )
+    assert "reason=invalid" in malformed
+
+
+def test_encoding_none_large_text_uses_the_actual_git_blob(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    expected = fixture_state.checkout.joinpath("docs/large.md").read_text(
+        encoding="utf-8"
+    )
+    source = _source_section(
+        selected_package.stdout, fixture_state.source_urls["large_text"], present=True
+    )
+    assert fixture_state.large_text_size > 1_048_576
+    assert source.count(expected) == 1
+    assert f"resolved_commit_sha={fixture_state.head}" in source
+
+
+def test_blob_directories_and_issue_pull_requests_are_unsupported(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    urls = fixture_state.source_urls
+    assert (
+        _source_section(
+            selected_package.stdout, urls["blob_directory"], present=False
+        ).count("reason=unsupported_kind")
+        == 1
+    )
+    assert (
+        _source_section(
+            selected_package.stdout, urls["submodule"], present=False
+        ).count("reason=unsupported_kind")
+        == 1
+    )
+    assert (
+        _source_section(
+            selected_package.stdout, urls["pull_issue"], present=False
+        ).count("reason=unsupported_kind")
+        == 1
+    )
+
+
+def test_renderer_places_section_index_before_comments(
+    selected_package: subprocess.CompletedProcess[str],
+) -> None:
+    output = selected_package.stdout
+    positions = [
+        output.index(marker)
+        for marker in (
+            "## Selected issue",
+            "## Section index",
+            "Comment index:",
+            "## Governing ancestors",
+            "## Governing documents",
+            "## Present cited sources",
+            "## Unresolved citations",
+        )
+    ]
+    assert positions == sorted(positions)
+
+
+def test_punctuation_and_section_indexes_reference_exact_body_ranges(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    canonical_markdown = _source_section(
+        output, fixture_state.source_urls["markdown"], present=True
+    )
+    assert (
+        f"canonical_url={fixture_state.source_urls['markdown']}" in canonical_markdown
+    )
+    body = fixture_state.selected_body
+    for name in ("original-contract", "requirements", "plan", "tasks"):
+        start_marker = f"<!-- itree:{name}:start -->"
+        end_marker = f"<!-- itree:{name}:end -->"
+        start = body.index(start_marker) + len(start_marker) + 1
+        end = body.index(end_marker)
+        line_start = body[:start].count("\n") + 1
+        line_end = body[:end].count("\n") + 1
+        byte_start = len(body[:start].encode("utf-8"))
+        byte_end = len(body[:end].encode("utf-8"))
+        assert (
+            f"- {name}: line_start={line_start} line_end={line_end} byte_start={byte_start} byte_end={byte_end}"
+            in output
+        )
+
+
+def test_links_inside_fetched_sources_are_not_recursed(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    nested = _source_section(
+        output, fixture_state.source_urls["nested_source"], present=True
+    )
+    assert fixture_state.source_urls["nested_target"] in nested
+    assert f"citation={fixture_state.source_urls['nested_target']}" not in output
+
+
+@pytest.mark.parametrize(
+    ("case", "source_key", "transport", "reason"),
+    (
+        ("runtime", "shared", "citation_runtime_gh", "inaccessible"),
+        ("pagination", "shared", "citation_shape_gh", "invalid"),
+        ("content", "large_text", "content_shape_gh", "invalid"),
+        ("owner", "malformed_owner", "", "invalid"),
+    ),
+)
+def test_citation_transport_and_parse_failures_have_typed_outcomes(
+    fixture_state: FixtureState,
+    tmp_path: Path,
+    case: str,
+    source_key: str,
+    transport: str,
+    reason: str,
+) -> None:
+    if source_key == "malformed_owner":
+        body = "https://github.com/bad%20owner/repo/blob/main/docs/primary.md\n"
+        url = "https://github.com/bad%20owner/repo/blob/main/docs/primary.md"
+        gh_wrapper = None
+    else:
+        url = fixture_state.source_urls[source_key]
+        body = f"{url}\n"
+        wrappers = {
+            "citation_runtime_gh": fixture_state.citation_runtime_gh,
+            "citation_shape_gh": fixture_state.citation_shape_gh,
+            "content_shape_gh": fixture_state.content_shape_gh,
+        }
+        gh_wrapper = wrappers[transport]
+    _set_citation_body(fixture_state, body)
+    result = invoke_work(
+        fixture_state,
+        fixture_state.citation_edge,
+        "module",
+        tmp_path / f"citation-{case}",
+        f"T019-citation-{case}",
+        path_gh=gh_wrapper,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        _source_section(result.stdout, url, present=False).count(f"reason={reason}")
+        == 1
+    )
