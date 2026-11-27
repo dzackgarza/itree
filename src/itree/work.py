@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import http.client
 import re
 import urllib.error
@@ -885,13 +884,7 @@ def _required_read(
 ) -> ReadResult:
     try:
         return read()
-    except (
-        RuntimeError,
-        ValidationError,
-        json.JSONDecodeError,
-        TypeError,
-        KeyError,
-    ) as error:
+    except (RuntimeError, ValueError, TypeError, KeyError) as error:
         failure = WorkPackageReadFailure(
             issue_ref=issue_ref,
             operation=operation,
@@ -1017,7 +1010,7 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
     citations = extract_citations(
         (selected_issue.body or "", *(comment.body for comment in comments))
     )
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=16) as executor:
         dispositions = tuple(
             executor.map(lambda citation: resolve_citation(api, citation), citations)
         )

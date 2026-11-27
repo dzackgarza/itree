@@ -124,7 +124,9 @@ class GithubApiError(RuntimeError):
 class GitRefLookupError(RuntimeError):
     def __init__(
         self,
-        reason: Literal["unknown_ref", "ambiguous_ref", "unsupported_kind"],
+        reason: Literal[
+            "unknown_ref", "ambiguous_ref", "unsupported_kind", "not_found"
+        ],
         requested_ref: str,
         repository_path: str,
     ) -> None:
@@ -756,7 +758,11 @@ class GithubApi(BaseModel):
         try:
             proc = self._exec("GET", endpoint)
         except GithubApiError as error:
-            if error.status in (404, 422):
+            if error.status == 404:
+                raise GitRefLookupError(
+                    "not_found", requested_ref, repository_path
+                ) from error
+            if error.status == 422:
                 raise GitRefLookupError(
                     "unsupported_kind", requested_ref, repository_path
                 ) from error

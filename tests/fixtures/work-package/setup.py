@@ -17,16 +17,43 @@ PIN = "0e80c9679e6f6bfd55e13cbcf193d297c5207117"
 type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
+last_mutation_at = 0.0
+
+
+def _is_mutation(command: list[str]) -> bool:
+    if command[0] == "git" and command[1] == "push":
+        return True
+    if (
+        command[0] == "gh"
+        and command[1] == "issue"
+        and command[2] in ("create", "edit")
+    ):
+        return True
+    if command[0] == "gh" and command[1] == "api" and command[2] == "graphql":
+        return any("mutation " in argument for argument in command[3:])
+    return (
+        command[:3] == ["gh", "api", "-X"]
+        and len(command) > 3
+        and command[3] in ("POST", "PATCH", "PUT", "DELETE")
+    )
 
 
 def run(
     command: list[str], *, cwd: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
+    global last_mutation_at
+    mutates = _is_mutation(command)
+    if mutates:
+        remaining = 1.0 - (time.perf_counter() - last_mutation_at)
+        if remaining > 0 and last_mutation_at != 0.0:
+            time.sleep(remaining)
     started = time.perf_counter()
     result = subprocess.run(
         command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
     )
     elapsed = time.perf_counter() - started
+    if mutates:
+        last_mutation_at = time.perf_counter()
     print(
         f"FIXTURE-STEP seconds={elapsed:.6f} exit={result.returncode} command={json.dumps(command)}",
         flush=True,
@@ -38,23 +65,16 @@ def run(
     return result
 
 
-def issue(slug: str, title: str, body: str, root: Path) -> int:
-    body_path = root / "issue-body.md"
-    body_path.write_text(body, encoding="utf-8")
-    url = run(
-        [
-            "gh",
-            "issue",
-            "create",
-            "--repo",
-            slug,
-            "--title",
-            title,
-            "--body-file",
-            str(body_path),
-        ]
-    ).stdout.strip()
-    return int(url.rsplit("/", 1)[1])
+def issue(slug: str, title: str, body: str) -> int:
+    response = json.loads(
+        run(
+            ["gh", "api", "-X", "POST", f"repos/{slug}/issues", "--input", "-"],
+            input_text=json.dumps({"title": title, "body": body}),
+        ).stdout
+    )
+    number = response["number"]
+    assert isinstance(number, int) and number > 0, response
+    return number
 
 
 def comment(slug: str, number: int, body: str) -> tuple[int, str]:
@@ -98,18 +118,26 @@ def add_ordered_comments(
             ".id",
         ]
     ).stdout.strip()
-    fields = [
-        f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId url body}}}}}}"
-        for index, body in enumerate(bodies)
-    ]
-    query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
-    response = json.loads(run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout)
-    assert "errors" not in response and isinstance(response.get("data"), dict), response
     ids: list[int] = []
-    for index, expected_body in enumerate(bodies):
-        comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
-        assert comment_node["body"] == expected_body, (index, comment_node)
-        ids.append(int(comment_node["databaseId"]))
+    for offset in range(0, len(bodies), 5):
+        fields = [
+            f"m{index:03d}:addComment(input:{{subjectId:{json.dumps(subject_id)},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId url body}}}}}}"
+            for index, body in enumerate(bodies[offset : offset + 5], start=offset)
+        ]
+        query = "mutation WorkPackageComments {" + " ".join(fields) + "}"
+        response = json.loads(
+            run(["gh", "api", "graphql", "-f", f"query={query}"]).stdout
+        )
+        assert "errors" not in response and isinstance(response.get("data"), dict), (
+            response
+        )
+        for index, expected_body in enumerate(
+            bodies[offset : offset + 5], start=offset
+        ):
+            comment_node = response["data"][f"m{index:03d}"]["commentEdge"]["node"]
+            assert comment_node["body"] == expected_body, (index, comment_node)
+            ids.append(int(comment_node["databaseId"]))
+    assert ids == sorted(ids), f"comment database IDs are not ordered: {ids}"
     return bodies, ids
 
 
@@ -326,7 +354,7 @@ def create(root: Path, output: Path) -> None:
     run(["git", "checkout", "main"], cwd=checkout)
 
     roadmap_body = "ROADMAP-BODY-CONTRACT-EXACT\n"
-    roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body, root)
+    roadmap = issue(slug, "Roadmap: Work package acceptance", roadmap_body)
     roadmap_comment_id, roadmap_comment_url = comment(
         slug, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n"
     )
@@ -336,7 +364,7 @@ def create(root: Path, output: Path) -> None:
     selected_body = managed(
         original=f"ORIGINAL-CONTRACT-EXACT\nPinned primary: https://github.com/{slug}/blob/{pinned}/docs/primary.md"
     )
-    selected = issue(slug, "Work package acceptance unit", selected_body, root)
+    selected = issue(slug, "Work package acceptance unit", selected_body)
     selected_body += f"Selected issue self-citation: https://github.com/{slug}/issues/{selected}\nParent citation: https://github.com/{slug}/issues/{roadmap}\n"
     roadmap_body += (
         f"Roadmap self-citation: https://github.com/{slug}/issues/{roadmap}\n"
@@ -352,7 +380,7 @@ def create(root: Path, output: Path) -> None:
     )
     comment(slug, selected, "OPEN-VERIFICATION-FINDING-EXACT\n")
 
-    cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
+    cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n")
     cited_comment_id, cited_comment_url = comment(
         slug, cited, "CITED-COMMENT-BODY-EXACT\n"
     )
@@ -360,7 +388,6 @@ def create(root: Path, output: Path) -> None:
         slug,
         "Citation transport edges",
         f"Shared source: https://github.com/{slug}/blob/shared/work-package-ref/docs/primary.md\n",
-        root,
     )
 
     markdown_url = f"https://raw.githubusercontent.com/dzackgarza/itree/{PIN}/README.md"
@@ -475,9 +502,7 @@ def create(root: Path, output: Path) -> None:
     ]
     comment(slug, selected, "\n\n".join(citation_lines) + "\n")
 
-    pagination = issue(
-        slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
-    )
+    pagination = issue(slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n")
     pagination_comments, pagination_ids = add_ordered_comments(
         slug,
         pagination,
@@ -498,20 +523,20 @@ def create(root: Path, output: Path) -> None:
     malformed_text: dict[str, str] = {}
     for name, body in malformed_bodies.items():
         distinctive = f"MALFORMED-{name.upper()}-SELECTED-BODY\n" + body
-        malformed[name] = issue(slug, f"Malformed {name}", distinctive, root)
+        malformed[name] = issue(slug, f"Malformed {name}", distinctive)
         malformed_text[name] = distinctive
         comment(slug, malformed[name], f"MALFORMED-{name.upper()}-COMMENT\n")
     fenced_body = "LEGACY-FENCED-BODY\n```text\n" + managed() + "```\n"
-    fenced = issue(slug, "Fence-shielded markers", fenced_body, root)
+    fenced = issue(slug, "Fence-shielded markers", fenced_body)
     comment(slug, fenced, "FENCED-COMMENT-EXACT\n")
     legacy_body = "LEGACY-ZERO-MARKER-BODY-EXACT\n"
-    legacy = issue(slug, "Legacy zero-marker body", legacy_body, root)
+    legacy = issue(slug, "Legacy zero-marker body", legacy_body)
     comment(slug, legacy, "LEGACY-COMMENT-EXACT\n")
 
     cycle_a_body = "CYCLE-A-READABLE-BODY\n"
     cycle_b_body = "CYCLE-B-READABLE-BODY\n"
-    cycle_a = issue(slug, "Cycle A", cycle_a_body, root)
-    cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
+    cycle_a = issue(slug, "Cycle A", cycle_a_body)
+    cycle_b = issue(slug, "Cycle B", cycle_b_body)
     attach(slug, cycle_b, cycle_a, root)
     comment(slug, cycle_a, "CYCLE-A-READABLE-COMMENT\n")
     comment(slug, cycle_b, "CYCLE-B-READABLE-COMMENT\n")
