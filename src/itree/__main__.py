@@ -4,9 +4,11 @@
 # dependencies = [
 #   "cyclopts>=2.0",
 #   "networkx>=3.0",
+#   "markdown-it-py[linkify]",
 #   "pydantic>=2.0",
 # ]
 # ///
+
 from __future__ import annotations
 
 from .cli import app

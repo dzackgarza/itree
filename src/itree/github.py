@@ -6,7 +6,32 @@ import subprocess
 import time
 from collections.abc import Callable
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+
+JsonObject = dict[str, JsonValue]
+
+
+def _object(value: JsonValue, context: str) -> JsonObject:
+    assert isinstance(value, dict), f"{context} must be a JSON object; found={value!r}"
+    return value
+
+
+def _array(value: JsonValue, context: str) -> list[JsonValue]:
+    assert isinstance(value, list), f"{context} must be a JSON array; found={value!r}"
+    return value
+
+
+def _string(value: JsonValue, context: str) -> str:
+    assert isinstance(value, str), f"{context} must be a string; found={value!r}"
+    return value
+
+
+def _integer(value: JsonValue, context: str) -> int:
+    assert isinstance(value, int) and not isinstance(value, bool), (
+        f"{context} must be an integer; found={value!r}"
+    )
+    return value
+
 
 from .models import (
     GithubIndeterminateOperation,
@@ -23,12 +48,12 @@ from .models import (
     RoutedOwnerState,
 )
 
-# One paginated query returns the entire issue DAG: every issue (open and
-# closed) with its ordered sub-issue edges and blocked-by edges. Sub-issue
-# order IS sibling priority order. Each edge endpoint carries its repository:
-# GitHub allows cross-repository sub-issues and blockers, so a bare number
-# does not identify an endpoint. PRs never appear: repository.issues is
-# issues-only in GraphQL, unlike the REST issues endpoint.
+
+
+
+
+
+
 REPO_GRAPH_QUERY = """
 query($owner: String!, $name: String!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -60,8 +85,8 @@ query($owner: String!, $name: String!, $endCursor: String) {
 """
 
 
-# Single-issue parent lookup: the sub-issues REST surface has no parent
-# endpoint, but GraphQL exposes Issue.parent directly.
+
+
 ISSUE_PARENT_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -111,25 +136,44 @@ def list_repos(owner: str, *, timeout: int = 60) -> tuple[RepoRef, ...]:
         "name,issues",
     ]
     try:
-        proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout)
+        proc = subprocess.run(
+            cmd, text=True, capture_output=True, check=False, timeout=timeout
+        )
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"gh repo list timed out after {timeout}s for {owner}") from e
+        raise RuntimeError(
+            f"gh repo list timed out after {timeout}s for {owner}"
+        ) from e
     if proc.returncode != 0:
-        raise RuntimeError(f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        raise RuntimeError(
+            f"gh repo list failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
     return issue_bearing_repos(owner, json.loads(proc.stdout))
 
 
-def issue_bearing_repos(owner: str, payload: list[dict]) -> tuple[RepoRef, ...]:
+def issue_bearing_repos(owner: str, payload: list[JsonObject]) -> tuple[RepoRef, ...]:
     """Keep only the payload repos that have at least one open issue.
 
     Pure filter over the ``gh repo list --json name,issues`` shape. gh returns
     ``issues=null`` when a repo has issues disabled; such a repo has no open
     issues to scan, so skip it rather than crash on subscripting None.
     """
-    return tuple(RepoRef(owner=owner, repo=r["name"]) for r in payload if r["issues"] is not None and r["issues"]["totalCount"] > 0)
+    repos: list[RepoRef] = []
+    for record in payload:
+        raw_issues = record["issues"]
+        if raw_issues is None:
+            continue
+        issues = _object(raw_issues, f"issues for {owner}")
+        if _integer(issues["totalCount"], f"open issue count for {owner}") > 0:
+            repos.append(
+                RepoRef(
+                    owner=owner,
+                    repo=_string(record["name"], f"repository name for {owner}"),
+                )
+            )
+    return tuple(repos)
 
 
-def _graphql_error_text(payload: dict) -> str:
+def _graphql_error_text(payload: JsonObject) -> str:
     """Extract the error messages from a GraphQL response document.
 
     The GraphQL spec requires every entry in ``errors`` to carry ``message``,
@@ -138,10 +182,14 @@ def _graphql_error_text(payload: dict) -> str:
     errors = payload.get("errors")
     if not errors:
         return "no error details in response"
-    return "; ".join(str(err["message"]) for err in errors)
+    messages: list[str] = []
+    for raw_error in _array(errors, "GraphQL errors"):
+        error = _object(raw_error, "GraphQL error")
+        messages.append(_string(error["message"], "GraphQL error message"))
+    return "; ".join(messages)
 
 
-def _graphql_data(document: dict, identity: str) -> dict:
+def _graphql_data(document: JsonObject, identity: str) -> JsonObject:
     """Return the ``data`` envelope of a GraphQL response document.
 
     A successful GraphQL response carries a top-level ``data`` object; an absent
@@ -150,11 +198,13 @@ def _graphql_data(document: dict, identity: str) -> dict:
     document — so callers subscript the guaranteed keys of ``data`` directly.
     """
     data = document.get("data")
-    assert isinstance(data, dict), f"gh api graphql: no data envelope for {identity}; document was {document!r}"
+    assert isinstance(data, dict), (
+        f"gh api graphql: no data envelope for {identity}; document was {document!r}"
+    )
     return data
 
 
-def _parse_json_stream(raw: str) -> list[object]:
+def _parse_json_stream(raw: str) -> list[JsonValue]:
     """Decode every JSON value in ``raw``, in order.
 
     ``gh api --paginate`` writes each page as its own JSON document; the pages
@@ -163,7 +213,7 @@ def _parse_json_stream(raw: str) -> list[object]:
     learned the flag still yields every page.
     """
     decoder = json.JSONDecoder()
-    values: list[object] = []
+    values: list[JsonValue] = []
     index = 0
     while True:
         while index < len(raw) and raw[index].isspace():
@@ -174,34 +224,46 @@ def _parse_json_stream(raw: str) -> list[object]:
         values.append(value)
 
 
-def _rest_pages(raw: str) -> list[list[dict]]:
+def _rest_page(value: JsonValue) -> list[JsonObject]:
+    if not isinstance(value, list):
+        raise TypeError(
+            f"gh api --paginate wrote a non-list REST page: {str(value)[:200]!r}"
+        )
+    return [_object(item, "REST page item") for item in value]
+
+
+def _rest_pages(raw: str) -> list[list[JsonObject]]:
     """Return the REST pages from streamed ``--paginate`` output.
 
     Also accepts the older ``--slurp`` shape (one array of page arrays) so
     callers holding captured output are not forced to reshape it.
     """
     values = _parse_json_stream(raw)
-    if len(values) == 1 and isinstance(values[0], list) and values[0] and isinstance(values[0][0], list):
-        return values[0]
-    pages: list[list[dict]] = []
-    for value in values:
-        if not isinstance(value, list):
-            raise TypeError(f"gh api --paginate wrote a non-list REST page: {str(value)[:200]!r}")
-        pages.append(value)
-    return pages
+    if (
+        len(values) == 1
+        and isinstance(values[0], list)
+        and values[0]
+        and isinstance(values[0][0], list)
+    ):
+        return [_rest_page(page) for page in values[0]]
+    return [_rest_page(value) for value in values]
 
 
-def _graphql_pages(raw: str) -> list[dict]:
+def _graphql_pages(raw: str) -> list[JsonObject]:
     """Return the GraphQL documents from streamed ``--paginate`` output.
 
     Also accepts the older ``--slurp`` shape (one array of documents).
     """
     values = _parse_json_stream(raw)
-    pages: list[object] = list(values[0]) if len(values) == 1 and isinstance(values[0], list) else values
-    documents: list[dict] = []
+    pages: list[JsonValue] = (
+        list(values[0]) if len(values) == 1 and isinstance(values[0], list) else values
+    )
+    documents: list[JsonObject] = []
     for page in pages:
         if not isinstance(page, dict):
-            raise TypeError(f"gh api graphql wrote a non-object page: {str(page)[:200]!r}")
+            raise TypeError(
+                f"gh api graphql wrote a non-object page: {str(page)[:200]!r}"
+            )
         documents.append(page)
     return documents
 
@@ -216,19 +278,26 @@ def parse_subissues_pages(raw: str) -> tuple[GithubIssue, ...]:
     return tuple(GithubIssue.model_validate(item) for page in pages for item in page)
 
 
-def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[dict, ...]:
+def parse_repo_graph_pages(raw: str, owner: str, repo: str) -> tuple[JsonObject, ...]:
     """Parse paginated GraphQL pages into a flat tuple of issue nodes.
 
     Pure counterpart to ``fetch_repo_graph``. A ``repository: null`` page means
     the repo is missing or inaccessible; surface the API's own error text.
     """
     pages = _graphql_pages(raw)
-    nodes: list[dict] = []
+    nodes: list[JsonObject] = []
     for page in pages:
         repository = _graphql_data(page, f"{owner}/{repo}")["repository"]
         if repository is None:
-            raise RuntimeError(f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}")
-        nodes.extend(repository["issues"]["nodes"])
+            raise RuntimeError(
+                f"gh api graphql returned no repository for {owner}/{repo}: {_graphql_error_text(page)}"
+            )
+        repository_object = _object(repository, f"repository {owner}/{repo}")
+        issues = _object(repository_object["issues"], f"issues for {owner}/{repo}")
+        nodes.extend(
+            _object(node, f"issue graph node for {owner}/{repo}")
+            for node in _array(issues["nodes"], f"issue nodes for {owner}/{repo}")
+        )
     return tuple(nodes)
 
 
@@ -238,14 +307,30 @@ def parse_issue_parent(raw: str, owner: str, repo: str, number: int) -> IssueRef
     Pure counterpart to ``get_parent_number``. A null repository or issue means
     the reference could not be resolved and fails loudly.
     """
-    payload: dict = json.loads(raw)
+    payload: JsonObject = json.loads(raw)
     repository = _graphql_data(payload, f"{owner}/{repo}#{number}")["repository"]
-    if repository is None or repository["issue"] is None:
-        raise RuntimeError(f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}")
-    parent = repository["issue"]["parent"]
-    if parent is None:
+    if repository is None:
+        raise RuntimeError(
+            f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}"
+        )
+    repository_object = _object(repository, f"repository {owner}/{repo}")
+    raw_issue = repository_object["issue"]
+    if raw_issue is None:
+        raise RuntimeError(
+            f"gh api graphql could not resolve {owner}/{repo}#{number}: {_graphql_error_text(payload)}"
+        )
+    issue = _object(raw_issue, f"issue {owner}/{repo}#{number}")
+    raw_parent = issue["parent"]
+    if raw_parent is None:
         return None
-    return IssueRef(repo_ref=RepoRef.parse(parent["repository"]["nameWithOwner"]), number=int(parent["number"]))
+    parent = _object(raw_parent, f"parent of {owner}/{repo}#{number}")
+    parent_repository = _object(parent["repository"], "parent repository")
+    return IssueRef(
+        repo_ref=RepoRef.parse(
+            _string(parent_repository["nameWithOwner"], "parent repository slug")
+        ),
+        number=_integer(parent["number"], "parent issue number"),
+    )
 
 
 class GithubApi(BaseModel):
@@ -284,7 +369,7 @@ class GithubApi(BaseModel):
         path: str,
         *,
         fields: dict[str, str] | None = None,
-        json_body: dict[str, object] | None = None,
+        json_body: JsonObject | None = None,
         timeout: int = 30,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a GitHub CLI API command. Returns the raw subprocess result.
@@ -294,7 +379,9 @@ class GithubApi(BaseModel):
         ~128 KiB), so they must never travel as ``-F body=...`` arguments.
         """
         if fields and json_body is not None:
-            raise ValueError("pass fields or json_body, not both: -F arguments and --input - cannot be combined")
+            raise ValueError(
+                "pass fields or json_body, not both: -F arguments and --input - cannot be combined"
+            )
         cmd = ["gh", "api", "-X", method]
         if path:
             cmd.append(path)
@@ -303,7 +390,12 @@ class GithubApi(BaseModel):
         if json_body is not None:
             cmd += ["--input", "-"]
 
-        return self._run_api_command(cmd, path, timeout, stdin=None if json_body is None else json.dumps(json_body))
+        return self._run_api_command(
+            cmd,
+            path,
+            timeout,
+            stdin=None if json_body is None else json.dumps(json_body),
+        )
 
     def _run_api_command(
         self,
@@ -314,7 +406,14 @@ class GithubApi(BaseModel):
         stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         try:
-            proc = subprocess.run(cmd, text=True, capture_output=True, check=False, timeout=timeout, input=stdin)
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+                input=stdin,
+            )
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"gh api timed out after {timeout}s: {path}") from e
 
@@ -347,14 +446,18 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(f"gh mutation timed out after invocation; path={path}; timeout={timeout}s; reread live GitHub state"),
+                    detail=(
+                        f"gh mutation timed out after invocation; path={path}; timeout={timeout}s; reread live GitHub state"
+                    ),
                 )
             ) from error
         except KeyboardInterrupt as error:
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(f"gh mutation was interrupted after invocation; path={path}; reread live GitHub state"),
+                    detail=(
+                        f"gh mutation was interrupted after invocation; path={path}; reread live GitHub state"
+                    ),
                 )
             ) from error
 
@@ -423,7 +526,9 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(f"gh mutation returned an unusable issue response after invocation; response_length={len(response)}; reread live GitHub state"),
+                    detail=(
+                        f"gh mutation returned an unusable issue response after invocation; response_length={len(response)}; reread live GitHub state"
+                    ),
                 )
             ) from error
 
@@ -438,7 +543,9 @@ class GithubApi(BaseModel):
             raise GithubIndeterminateError(
                 GithubIndeterminateOperation(
                     effect=effect,
-                    detail=(f"gh mutation returned an unusable milestone response after invocation; response_length={len(response)}; reread live GitHub state"),
+                    detail=(
+                        f"gh mutation returned an unusable milestone response after invocation; response_length={len(response)}; reread live GitHub state"
+                    ),
                 )
             ) from error
 
@@ -447,7 +554,9 @@ class GithubApi(BaseModel):
         path = f"repos/{self.owner}/{self.repo}/milestones?state=all&per_page=100"
         cmd = ["gh", "api", "--paginate", path]
         proc = self._run_api_command(cmd, path, timeout=120)
-        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_python(_rest_pages(proc.stdout))
+        pages = TypeAdapter(tuple[tuple[GithubMilestone, ...], ...]).validate_python(
+            _rest_pages(proc.stdout)
+        )
         return tuple(milestone for page in pages for milestone in page)
 
     def create_planned_milestone(
@@ -619,7 +728,11 @@ class GithubApi(BaseModel):
         A repository with no commits has no branches and an empty tree; GitHub
         answers a tree read there with HTTP 409, so the branch list decides it.
         """
-        if not json.loads(self._exec("GET", f"repos/{self.owner}/{self.repo}/branches?per_page=1").stdout):
+        if not json.loads(
+            self._exec(
+                "GET", f"repos/{self.owner}/{self.repo}/branches?per_page=1"
+            ).stdout
+        ):
             return frozenset()
         return self._tree_files("HEAD", "")
 
@@ -633,9 +746,13 @@ class GithubApi(BaseModel):
         is still truncated.
         """
         tree_path = f"repos/{self.owner}/{self.repo}/git/trees/{tree_ish}"
-        recursive = json.loads(self._exec("GET", f"{tree_path}?recursive=1", timeout=120).stdout)
+        recursive = json.loads(
+            self._exec("GET", f"{tree_path}?recursive=1", timeout=120).stdout
+        )
         if not recursive["truncated"]:
-            return frozenset(prefix + e["path"] for e in recursive["tree"] if e["type"] == "blob")
+            return frozenset(
+                prefix + e["path"] for e in recursive["tree"] if e["type"] == "blob"
+            )
         entries = json.loads(self._exec("GET", tree_path, timeout=120).stdout)["tree"]
         files = {prefix + e["path"] for e in entries if e["type"] == "blob"}
         for e in entries:
@@ -643,7 +760,7 @@ class GithubApi(BaseModel):
                 files |= self._tree_files(e["sha"], f"{prefix}{e['path']}/")
         return frozenset(files)
 
-    def fetch_repo_graph(self) -> tuple[dict, ...]:
+    def fetch_repo_graph(self) -> tuple[JsonObject, ...]:
         """Fetch the full issue DAG in one paginated GraphQL query.
 
         Returns the raw issue nodes (open and closed) with sub-issue and
@@ -664,14 +781,22 @@ class GithubApi(BaseModel):
         proc = self._run_api_command(cmd, "graphql", timeout=120)
         nodes = parse_repo_graph_pages(proc.stdout, self.owner, self.repo)
         for node in nodes:
-            blocked_by = node["blockedBy"]
-            if blocked_by["totalCount"] > len(blocked_by["nodes"]):
-                blockers = self.list_blocked_by(node["number"])
-                assert len(blockers) == blocked_by["totalCount"], (
-                    f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{node['number']}: expected {blocked_by['totalCount']}, fetched {len(blockers)}"
+            blocked_by = _object(node["blockedBy"], "blocked-by relationship")
+            total_count = _integer(blocked_by["totalCount"], "blocked-by totalCount")
+            blocker_nodes = _array(blocked_by["nodes"], "blocked-by nodes")
+            if total_count > len(blocker_nodes):
+                issue_number = _integer(node["number"], "issue graph number")
+                blockers = self.list_blocked_by(issue_number)
+                assert len(blockers) == total_count, (
+                    f"incomplete blocked-by fetch for {self.owner}/{self.repo}#{issue_number}: expected {total_count}, fetched {len(blockers)}"
                 )
                 blocked_by["nodes"] = [
-                    {"number": blocker.number, "state": blocker.state.value.upper(), "repository": {"nameWithOwner": blocker.repository_slug}} for blocker in blockers
+                    {
+                        "number": blocker.number,
+                        "state": blocker.state.value.upper(),
+                        "repository": {"nameWithOwner": blocker.repository_slug},
+                    }
+                    for blocker in blockers
                 ]
         return nodes
 
@@ -699,7 +824,9 @@ class GithubApi(BaseModel):
         if parent is None:
             return None
         if parent.repo_ref.slug.casefold() != self.repo_ref.slug.casefold():
-            raise RuntimeError(f"{self.repo_ref.slug}#{number} has its parent in another repository: {parent.slug}")
+            raise RuntimeError(
+                f"{self.repo_ref.slug}#{number} has its parent in another repository: {parent.slug}"
+            )
         return parent.number
 
     def create_issue(self, title: str, body: str = "") -> GithubIssue:
@@ -834,12 +961,18 @@ def settle_parent(
             return
         last = second
     seen = "no parent" if last is None else last.slug
-    raise RuntimeError(f"could not settle the child's parent on {target.slug} after {max_attempts} attempts (last read: {seen}); reread live GitHub state")
+    raise RuntimeError(
+        f"could not settle the child's parent on {target.slug} after {max_attempts} attempts (last read: {seen}); reread live GitHub state"
+    )
 
 
 def _same_issue(candidate: IssueRef | None, target: IssueRef) -> bool:
     """Compare refs ignoring GitHub's canonical case for OWNER/REPO."""
-    return candidate is not None and candidate.number == target.number and candidate.repo_ref.slug.casefold() == target.repo_ref.slug.casefold()
+    return (
+        candidate is not None
+        and candidate.number == target.number
+        and candidate.repo_ref.slug.casefold() == target.repo_ref.slug.casefold()
+    )
 
 
 def resolve_routed_owner(ref: IssueRef) -> RoutedOwnerResolution:
@@ -858,13 +991,16 @@ def resolve_routed_owner(ref: IssueRef) -> RoutedOwnerResolution:
         nodes = api.fetch_repo_graph()
         owner_dag = dag_from_graph_nodes(ref.to_repo_ref(), nodes, api.list_subissues)
     except (AssertionError, KeyError, RuntimeError, ValueError) as e:
-        # No access, deleted, transferred, or a malformed response: the route
-        # cannot be verified, so doctor must say that instead of reporting I011.
+
+
         return RoutedOwnerResolution(state=RoutedOwnerState.unreadable, detail=str(e))
 
     owner = owner_dag.issues.get(ref.number)
     if owner is None:
-        return RoutedOwnerResolution(state=RoutedOwnerState.unreadable, detail=f"{ref.slug} is absent from its repository graph")
+        return RoutedOwnerResolution(
+            state=RoutedOwnerState.unreadable,
+            detail=f"{ref.slug} is absent from its repository graph",
+        )
     if not owner.is_open:
         return RoutedOwnerResolution(state=RoutedOwnerState.closed)
 

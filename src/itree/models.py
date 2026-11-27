@@ -4,7 +4,14 @@ import re
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    field_validator,
+    model_validator,
+)
 
 IssueNumber = Annotated[int, Field(gt=0)]
 GithubIssueId = Annotated[int, Field(gt=0)]
@@ -99,10 +106,14 @@ class IssueRef(BaseModel):
         Raises:
             ValueError: If the format is invalid.
         """
-        m = re.fullmatch(r"(?P<owner>[^/\s#]+)/(?P<repo>[^/\s#]+)#(?P<number>[1-9]\d*)", raw)
+        m = re.fullmatch(
+            r"(?P<owner>[^/\s#]+)/(?P<repo>[^/\s#]+)#(?P<number>[1-9]\d*)", raw
+        )
         if not m:
             raise ValueError(f"expected OWNER/REPO#NUMBER, got {raw!r}")
-        return cls(repo_ref=RepoRef(owner=m["owner"], repo=m["repo"]), number=int(m["number"]))
+        return cls(
+            repo_ref=RepoRef(owner=m["owner"], repo=m["repo"]), number=int(m["number"])
+        )
 
     @property
     def slug(self) -> str:
@@ -148,9 +159,13 @@ class MilestoneTitle(RootModel[str]):
     @model_validator(mode="before")
     @classmethod
     def _normalize(cls, raw: object) -> object:
-        assert isinstance(raw, str), f"milestone title must be text; found type={type(raw).__name__}; fix the CLI value or GitHub response parser"
+        assert isinstance(raw, str), (
+            f"milestone title must be text; found type={type(raw).__name__}; fix the CLI value or GitHub response parser"
+        )
         normalized = raw.strip()
-        assert normalized, "milestone title must contain non-whitespace text; fix the CLI title"
+        assert normalized, (
+            "milestone title must contain non-whitespace text; fix the CLI title"
+        )
         return normalized
 
     @classmethod
@@ -253,7 +268,9 @@ class MilestoneEffect(BaseModel):
             MilestoneEffectKind.create_ledger,
             MilestoneEffectKind.attach_ledger,
             MilestoneEffectKind.assign_ledger,
-        ), f"untargeted milestone effect must not name a work unit; found={self.kind}; fix preflight"
+        ), (
+            f"untargeted milestone effect must not name a work unit; found={self.kind}; fix preflight"
+        )
         return self
 
 
@@ -268,7 +285,9 @@ class WorkUnitMilestoneEffect(MilestoneEffect):
             MilestoneEffectKind.attach_work_unit,
             MilestoneEffectKind.replace_work_unit_parent,
             MilestoneEffectKind.assign_work_unit,
-        ), f"work-unit milestone effect must name a targeted operation; found={self.kind}; ref={self.ref.slug}; fix preflight"
+        ), (
+            f"work-unit milestone effect must name a targeted operation; found={self.kind}; ref={self.ref.slug}; fix preflight"
+        )
         return self
 
 
@@ -346,8 +365,7 @@ class ValidatedMilestonePlan(BaseModel):
     parent_issue: GithubIssue
     work_units: tuple[ExistingWorkUnit, ...]
     effects: tuple[PlannedMilestoneEffect, ...]
-    # A pre-existing native milestone with the same title is adopted: the plan
-    # skips creating it and assigns this one instead.
+
     adopted_milestone: GithubMilestone | None = None
 
 
@@ -386,7 +404,9 @@ class MilestoneExecutionProgress(BaseModel):
 
     @model_validator(mode="after")
     def _coherent_cursor(self) -> Self:
-        assert self.effects, "milestone execution requires at least one planned effect; fix preflight"
+        assert self.effects, (
+            "milestone execution requires at least one planned effect; fix preflight"
+        )
         assert 0 <= self.cursor < len(self.effects), (
             f"milestone execution cursor must identify the current effect; cursor={self.cursor}; effect_count={len(self.effects)}; fix orchestration"
         )
@@ -412,7 +432,9 @@ class MilestoneExecutionProgress(BaseModel):
         return self.effects[self.cursor + 1 :]
 
     def confirm(self, effect: PlannedMilestoneEffect) -> MilestoneExecutionProgress:
-        assert effect == self.current, f"confirmed effect must be the current planned effect; current={self.current}; found={effect}; fix orchestration ordering"
+        assert effect == self.current, (
+            f"confirmed effect must be the current planned effect; current={self.current}; found={effect}; fix orchestration ordering"
+        )
         next_cursor = self.cursor + 1
         assert next_cursor < len(self.effects), (
             f"final effect completes execution and must produce success instead of another progress cursor; effect={effect}; fix orchestration completion"
@@ -515,7 +537,10 @@ class GithubIssue(BaseModel):
     @property
     def repository_slug(self) -> str:
         """Return OWNER/REPO of the repository that owns this issue, read from its html_url."""
-        m = re.fullmatch(r"https://github\.com/(?P<slug>[^/]+/[^/]+)/(?:issues|pull)/\d+", self.html_url)
+        m = re.fullmatch(
+            r"https://github\.com/(?P<slug>[^/]+/[^/]+)/(?:issues|pull)/\d+",
+            self.html_url,
+        )
         if not m:
             raise ValueError(f"cannot read repository from html_url {self.html_url!r}")
         return m["slug"]
@@ -580,8 +605,6 @@ class TreeNode(BaseModel):
         return None
 
 
-# GitHub's sub-issues REST contract: "The sub-issue must belong to the same
-# repository owner as the parent issue" (POST .../issues/{n}/sub_issues).
 SAME_OWNER_RULE = "GitHub sub-issues must belong to the same owner as the parent issue"
 
 
@@ -614,7 +637,11 @@ class MoveRequest(BaseModel):
         """Validate move request constraints: before/after mutual exclusivity, one owner, not self."""
         if self.before is not None and self.after is not None:
             raise ValueError("use either --before or --after, not both")
-        refs = [self.child, self.parent, *(r for r in [self.before, self.after] if r is not None)]
+        refs = [
+            self.child,
+            self.parent,
+            *(r for r in [self.before, self.after] if r is not None),
+        ]
         if any(not self.parent.same_owner(r) for r in refs):
             raise ValueError(SAME_OWNER_RULE)
         if self.child == self.parent:
@@ -647,28 +674,19 @@ class RepoDag(BaseModel):
 
     repo_ref: RepoRef
 
-    # Every issue in the repo, keyed by issue number.
     issues: dict[int, GithubIssue]
 
-    # Adjacency list: parent_number -> ordered tuple of child numbers.
     children_of: dict[int, tuple[int, ...]]
 
-    # Pre-computed inverse: child_number -> parent_number.
     parent_of: dict[int, int] = Field(default_factory=dict, repr=False)
 
-    # Dependency relationships: child_number -> tuple of blocker issue numbers.
     dependencies: dict[int, tuple[int, ...]] = Field(default_factory=dict)
 
-    # Cross-repository edges, kept out of the local DAG: parent_number ->
-    # ordered foreign sub-issues, and issue_number -> foreign blockers.
     foreign_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
     foreign_blockers: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
-    # State read with each foreign blocker edge; an unknown state blocks rather
-    # than pretending the prerequisite is satisfied.
+
     foreign_blocker_states: dict[IssueRef, IssueState] = Field(default_factory=dict)
-    # For each parent with a foreign sub-issue, all its sub-issues in GitHub's
-    # sibling order; the foreign sub-issues as read from their own repositories;
-    # and issue_number -> its parent in another repository, which owns its order.
+
     ordered_children: dict[int, tuple[IssueRef, ...]] = Field(default_factory=dict)
     foreign_issues: dict[IssueRef, GithubIssue] = Field(default_factory=dict)
     foreign_parent: dict[int, IssueRef] = Field(default_factory=dict)
@@ -679,14 +697,20 @@ class RepoDag(BaseModel):
         issue_numbers = set(self.issues)
         unknown_parents = sorted(set(self.children_of) - issue_numbers)
         if unknown_parents:
-            raise ValueError(f"children_of has parents absent from issues: {unknown_parents}")
+            raise ValueError(
+                f"children_of has parents absent from issues: {unknown_parents}"
+            )
 
         full_children_of: dict[int, tuple[int, ...]] = {}
         for number in sorted(issue_numbers):
             children = self.children_of[number] if number in self.children_of else ()
-            unknown_children = [child for child in children if child not in issue_numbers]
+            unknown_children = [
+                child for child in children if child not in issue_numbers
+            ]
             if unknown_children:
-                raise ValueError(f"children_of[{number}] has children absent from issues: {unknown_children}")
+                raise ValueError(
+                    f"children_of[{number}] has children absent from issues: {unknown_children}"
+                )
             full_children_of[number] = tuple(children)
         object.__setattr__(self, "children_of", full_children_of)
 
@@ -705,7 +729,11 @@ class RepoDag(BaseModel):
     def roots(self) -> tuple[GithubIssue, ...]:
         """Issues that are not sub-issues of any other issue, in this or another repository."""
         parents = self.parent_of
-        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in parents and num not in self.foreign_parent)
+        return tuple(
+            issue
+            for num, issue in sorted(self.issues.items())
+            if num not in parents and num not in self.foreign_parent
+        )
 
     @property
     def orphans(self) -> tuple[GithubIssue, ...]:
@@ -720,7 +748,9 @@ class RepoDag(BaseModel):
 
         reachable: set[int] = set()
         self._collect_reachable(primary_root_num, reachable)
-        return tuple(issue for num, issue in sorted(self.issues.items()) if num not in reachable)
+        return tuple(
+            issue for num, issue in sorted(self.issues.items()) if num not in reachable
+        )
 
     def _collect_reachable(self, number: int, out: set[int]) -> None:
         """DFS from ``number`` marking all reachable nodes via the adjacency list."""
@@ -806,11 +836,67 @@ class RepoHealth(BaseModel):
 
     slug: str
     open_issues: int
-    # "ok" when the tree has exactly one ledger root; otherwise the blocking
-    # root diagnostic code (E001/E002/E004).
+
     root_status: str
     error_count: int
     warning_count: int = 0
-    # Total by construction: present with the next issue, or absent with a
-    # reason. Same representation the doctor report uses for next_issue.
+
     next_work_unit: ReportRef
+
+
+IssueCommentId = Annotated[int, Field(gt=0)]
+CommitSha = Annotated[str, Field(pattern=r"^[0-9a-f]{40}$")]
+CanonicalSourceUrl = Annotated[str, Field(min_length=1)]
+
+
+class GitRefKind(StrEnum):
+    commit = "commit"
+    branch = "branch"
+    tag = "tag"
+
+
+class GitRefIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1)
+    kind: GitRefKind
+
+
+class GitRefResolution(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    requested_ref: str = Field(min_length=1)
+    resolved_commit_sha: CommitSha
+    repository_path: str
+    matched_refs: tuple[GitRefIdentity, ...] = Field(min_length=1)
+
+
+class IssueComment(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    id: IssueCommentId
+    body: str
+    author: str = Field(alias="user")
+    created_at: str
+    updated_at: str
+    html_url: str
+
+    @field_validator("author", mode="before")
+    @classmethod
+    def _author_login(cls, value: dict[str, str]) -> str:
+        return value["login"]
+
+
+class GithubRepository(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    default_branch: str = Field(min_length=1)
+
+
+class GithubContentFile(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    type: str
+    path: str
+    encoding: str
+    content: str
