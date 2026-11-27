@@ -434,3 +434,109 @@ def test_all_public_entry_points_emit_the_same_live_package(
     assert "DECOY-FEATURE-POINTER" not in baseline.stdout
     assert "DECOY-CACHED-PLAN" not in baseline.stdout
     assert "DECOY-SPECIFICATION" not in baseline.stdout
+
+
+@pytest.fixture(scope="session")
+def selected_package(fixture_state: FixtureState) -> subprocess.CompletedProcess[str]:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        fixture_state.root / "selected-package-invocation",
+        "T011-selected-package",
+    )
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def test_governing_documents_use_the_resolved_default_branch(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    for role, content in (
+        ("AGENTS.md", "ORIGINAL-RULE-TEXT"),
+        ("INTENT.md", "INTENT-GOAL-TEXT"),
+        (".specify/memory/constitution.md", "CONSTITUTION-GOAL-TEXT"),
+        ("CONTRIBUTING.md", "CONTRIBUTION-RULE-TEXT"),
+        ("src/itree/WORKFLOWS.md", "ORGANIZATION-MODEL-TEXT"),
+    ):
+        assert role in output
+        assert f"resolved_commit_sha={fixture_state.head}" in output
+        assert content in output
+
+
+def test_exact_source_content_and_complete_ref_provenance(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    urls = fixture_state.source_urls
+    assert urls["pinned_blob"] in output
+    assert f"requested_ref={fixture_state.pinned}" in output
+    assert "Pinned source content: BEFORE-BRANCH-EDIT.\n" in output
+    assert urls["main_blob"] in output
+    assert f"requested_ref=main" in output
+    assert "Changed source content: AFTER-BRANCH-EDIT.\n" in output
+    for key in ("slash_branch", "slash_tag"):
+        assert urls[key] in output
+        assert f"resolved_commit_sha={fixture_state.head}" in output
+    assert "refs/heads/shared/work-package-ref kind=branch" in output
+    assert "refs/tags/shared/work-package-ref kind=tag" in output
+    assert "CITED-ISSUE-BODY-EXACT" in output
+    assert "CITED-COMMENT-BODY-EXACT" in output
+
+
+def test_external_text_is_exact_and_alias_deduplication_preserves_identity(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    urls = fixture_state.source_urls
+    assert output.count(fixture_state.external_text["markdown"]) == 1
+    assert output.count(fixture_state.external_text["plain"]) == 3
+    assert output.count(fixture_state.external_text["html"]) == 1
+    assert urls["markdown_alias"] in output
+    assert "aliases=" in output
+    for key in ("plain_query", "plain_fragment", "plain_other_fragment"):
+        assert f"canonical_url={urls[key]}" in output
+        assert f"requested_url={urls[key]}" in output
+        assert f"final_url={urls[key]}" in output
+    assert "media_type=text/markdown" in output or "media_type=text/plain" in output
+    assert "media_type=text/html" in output
+
+
+def test_every_unsupported_or_failed_source_has_a_typed_outcome(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    urls = fixture_state.source_urls
+    expected = {
+        "inaccessible_external": "inaccessible",
+        "redirect_failed": "redirect_failed",
+        "invalid_external": "invalid_text_encoding",
+        "binary_external": "binary",
+        "media_external": "unsupported_media_type",
+        "ambiguous": "ambiguous_ref",
+        "unknown": "unknown_ref",
+        "not_found": "not_found",
+        "binary_blob": "binary",
+        "invalid_blob": "invalid_text_encoding",
+        "directory": "unsupported_kind",
+        "pull": "unsupported_kind",
+    }
+    for key, reason in expected.items():
+        assert urls[key] in output, key
+        assert f"reason={reason}" in output, key
+    assert f"#{fixture_state.pagination}" in output
+    assert "reason=bare_reference" in output
+
+
+def test_citation_resolution_is_limited_to_selected_issue_one_hop(
+    selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
+) -> None:
+    output = selected_package.stdout
+    assert "Pinned source content: BEFORE-BRANCH-EDIT.\n" in output
+    assert "ANCESTOR-ONLY-CITATION-MUST-NOT-BE-FETCHED" not in output
+    assert "LEGACY-PAGINATION-BODY-EXACT" not in output
+    assert "ROADMAP-COMMENT-DECISION-EXACT" in output
+    assert "DECOY-FEATURE-POINTER" not in output
+    assert "DECOY-CACHED-PLAN" not in output
+    assert "DECOY-SPECIFICATION" not in output
