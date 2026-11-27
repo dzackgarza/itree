@@ -1,0 +1,15 @@
+name: Development diagnostics
+on:
+  push: {}
+  workflow_dispatch: {}
+jobs:
+  qc-ci:
+    uses: dzackgarza/ai-review-ci/.github/workflows/_qc.yml@main
+    permissions:
+      contents: read
+      issues: read
+    with:
+      tier: test-ci
+      enforcement: correctness
+      profile: 'python'
+      infra_ref: 'main'
