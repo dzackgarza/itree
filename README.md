@@ -232,8 +232,5 @@ The shipped prompt is available through `itree help maintenance`.
 ## Development
 
 The project uses **cyclopts** for CLI parsing, **pydantic** for models, and the **GitHub CLI (`gh`)** for API access.
-Run the local quality gate with:
-
-```bash
-just test
-```
+The [constitution](.specify/memory/constitution.md) gives the project's north-star goals.
+The [contributor guide](CONTRIBUTING.md) explains how to use Spec Kit with a GitHub work unit and verify a change.
