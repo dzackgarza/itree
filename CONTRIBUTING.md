@@ -9,8 +9,10 @@ that the contribution must serve.
 **SPEC001 — Keep the current work in its issue.** Use the issue reference wherever a
 Spec Kit template asks for the feature identity. Fill in the templates from the live
 issue. Use the issue body for the current version and link to comments with detailed
-evidence. Before writing back, reread the issue and reconcile intervening changes.
-[Storage contract](https://github.com/dzackgarza/itree/issues/64)
+evidence. Preserve edits made after the stage read the issue, including edits made
+between the final read and the write. If preservation cannot be established, report
+the conflict and keep the stage incomplete. The integration specification gives the
+two-writer acceptance case. [Issue-owned execution](specs/001-issue-owned-execution/spec.md#us2-edit-the-same-issue-from-two-sessions)
 
 | Stage | What belongs in the work-unit issue |
 | --- | --- |
