@@ -180,24 +180,9 @@ def _unresolved_implementation_routes(
         ):
             continue
         terminal = chain[-1]
-        if _chain_is_discharged(dag, declarations_by_issue, origin, terminal):
-            continue
         chain_text = _format_chain(chain)
         terminal_issue = dag.issues.get(terminal.number)
         terminal_state = terminal_issue.state.value if terminal_issue else "missing"
-        evidence.append(
-            f"{chain_text} remains unresolved at {terminal_state} terminal owner"
-        )
-        witness = AuditFindingWitness(
-            originating_obligation=origin,
-            current_owner=terminal,
-            edge_chain=tuple(chain),
-            conflicting_state=terminal_state,
-            obligation_kind=ContractKind.implementation.value,
-            unresolved_burden="implementation obligation lacks a matching implementation discharge",
-        )
-        witnesses.append(witness)
-        first_witness = first_witness or witness
         if len(chain) >= 4:
             churn_evidence.append(
                 f"{chain_text} has {len(chain) - 1} routing hops before implementation discharge"
@@ -212,6 +197,21 @@ def _unresolved_implementation_routes(
             )
             churn_witnesses.append(churn_route_witness)
             churn_witness = churn_witness or churn_route_witness
+        if _chain_is_discharged(dag, declarations_by_issue, origin, terminal):
+            continue
+        evidence.append(
+            f"{chain_text} remains unresolved at {terminal_state} terminal owner"
+        )
+        witness = AuditFindingWitness(
+            originating_obligation=origin,
+            current_owner=terminal,
+            edge_chain=tuple(chain),
+            conflicting_state=terminal_state,
+            obligation_kind=ContractKind.implementation.value,
+            unresolved_burden="implementation obligation lacks a matching implementation discharge",
+        )
+        witnesses.append(witness)
+        first_witness = first_witness or witness
 
     findings: list[Finding] = []
     if evidence:
