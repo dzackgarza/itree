@@ -6,6 +6,8 @@ on any live repository whose state can drift after the PR is opened.
 
 from __future__ import annotations
 
+import pytest
+
 from itree.cli import doctor_exit_code, render_doctor_report
 from itree.contracts import ContractEvidence, ContractKind, parse_issue_contracts
 from itree.metrics import AbsentCodeSize, MetricsConfig
@@ -773,6 +775,171 @@ def test_issue_46_continuation_inside_reported_chain_is_listed_once() -> None:
     assert len(e016[0]["witnesses"]) == 1
     assert [ref["number"] for ref in e016[0]["witnesses"][0]["edge_chain"]] == [2, 3, 4]
     assert doctor_exit_code(report) == 2
+    assert rendered.count("E016:") == 1
+
+
+@pytest.mark.parametrize("terminal", [5, 6])
+def test_issue_46_q005_discharged_long_route_keeps_advisory(terminal: int) -> None:
+    issues = {
+        number: _issue(
+            number,
+            f"Closed route {number}",
+            body=_contract_body(
+                kind="implementation",
+                **({"origin": "#2"} if number > 2 else {}),
+                owner=f"#{number + 1}",
+                evidence="routes",
+            ),
+            state=IssueState.closed,
+        )
+        for number in range(2, terminal)
+    }
+    issues[1] = _issue(1, "Ledger: testowner/testrepo")
+    issues[terminal] = _issue(
+        terminal,
+        "Discharging terminal owner",
+        body=_contract_body(kind="implementation", origin="#2", evidence="discharges"),
+    )
+    dag = _dag(issues, {1: tuple(range(2, terminal + 1))})
+
+    report = generate_doctor_report(dag)
+    q005 = _findings(report, "Q005")
+    payload = report.model_dump(mode="json")
+    serialized_q005 = [
+        finding for finding in payload["findings"] if finding["code"] == "Q005"
+    ]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+    chain = " -> ".join(f"#{number}" for number in range(2, terminal + 1))
+
+    assert len(q005) == 1
+    assert len(q005[0].evidence) == 1
+    assert f"{chain} has {terminal - 2} routing hops" in q005[0].evidence[0]
+    assert len(serialized_q005) == 1
+    assert len(serialized_q005[0]["witnesses"]) == 1
+    witness = serialized_q005[0]["witnesses"][0]
+    assert (
+        witness["unresolved_burden"]
+        == "routing chain churns before implementation-bearing owner"
+    )
+    assert witness["originating_obligation"]["number"] == 2
+    assert witness["current_owner"]["number"] == terminal
+    assert [ref["number"] for ref in witness["edge_chain"]] == list(
+        range(2, terminal + 1)
+    )
+    assert _findings(report, "E016") == []
+    assert [
+        finding for finding in payload["findings"] if finding["code"] == "E016"
+    ] == []
+    assert doctor_exit_code(report) == 0
+    assert rendered.count("Q005:") == 1
+
+
+def test_issue_46_q005_short_discharged_route_has_no_advisory() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Closed original route",
+                body=_contract_body(
+                    kind="implementation", owner="#3", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Closed continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#5", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            5: _issue(
+                5,
+                "Discharging terminal owner",
+                body=_contract_body(
+                    kind="implementation", origin="#2", evidence="discharges"
+                ),
+            ),
+        },
+        {1: (2, 3, 5)},
+    )
+
+    report = generate_doctor_report(dag)
+    payload = report.model_dump(mode="json")
+
+    assert _findings(report, "Q005") == []
+    assert [
+        finding for finding in payload["findings"] if finding["code"] == "Q005"
+    ] == []
+    assert _findings(report, "E016") == []
+    assert doctor_exit_code(report) == 0
+
+
+def test_issue_46_q005_mismatched_discharge_keeps_e016() -> None:
+    dag = _dag(
+        {
+            1: _issue(1, "Ledger: testowner/testrepo"),
+            2: _issue(
+                2,
+                "Closed original route",
+                body=_contract_body(
+                    kind="implementation", owner="#3", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            3: _issue(
+                3,
+                "Closed continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#4", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            4: _issue(
+                4,
+                "Closed second continuation route",
+                body=_contract_body(
+                    kind="implementation", origin="#2", owner="#5", evidence="routes"
+                ),
+                state=IssueState.closed,
+            ),
+            5: _issue(
+                5,
+                "Terminal owner discharging another obligation",
+                body=_contract_body(
+                    kind="implementation", origin="#3", evidence="discharges"
+                ),
+            ),
+        },
+        {1: (2, 3, 4, 5)},
+    )
+
+    report = generate_doctor_report(dag)
+    q005 = _findings(report, "Q005")
+    e016 = _findings(report, "E016")
+    payload = report.model_dump(mode="json")
+    serialized_q005 = [
+        finding for finding in payload["findings"] if finding["code"] == "Q005"
+    ]
+    rendered = render_doctor_report(
+        _repo_ref(), dag, report, MetricsConfig(), AbsentCodeSize(reason="no checkout")
+    )
+    chain = "#2 -> #3 -> #4 -> #5"
+
+    assert len(q005) == 1
+    assert chain in q005[0].evidence[0]
+    assert len(e016) == 1
+    assert chain in e016[0].evidence[0]
+    assert len(serialized_q005) == 1
+    assert (
+        serialized_q005[0]["witnesses"][0]["unresolved_burden"]
+        == "routing chain churns before implementation-bearing owner"
+    )
+    assert doctor_exit_code(report) == 2
+    assert rendered.count("Q005:") == 1
     assert rendered.count("E016:") == 1
 
 
