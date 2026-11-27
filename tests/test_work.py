@@ -540,3 +540,137 @@ def test_citation_resolution_is_limited_to_selected_issue_one_hop(
     assert "DECOY-FEATURE-POINTER" not in output
     assert "DECOY-CACHED-PLAN" not in output
     assert "DECOY-SPECIFICATION" not in output
+
+
+def _live_issue(repo: str, number: int) -> str:
+    return subprocess.check_output(
+        ["gh", "api", f"repos/{repo}/issues/{number}"], text=True
+    )
+
+
+def _live_comments(repo: str, number: int) -> str:
+    return subprocess.check_output(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{repo}/issues/{number}/comments?per_page=100",
+        ],
+        text=True,
+    )
+
+
+def _file_hash(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_fresh_process_sees_new_live_comment_with_identical_original_body(
+    fixture_state: FixtureState,
+) -> None:
+    original_before = _live_issue(fixture_state.repo, fixture_state.selected)
+    first_directory = fixture_state.root / "fresh-process-first"
+    second_directory = fixture_state.root / "fresh-process-second"
+    first = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        first_directory,
+        "T019-first-read",
+    )
+    assert first.returncode == 0, first.stderr
+    live_body = f"LIVE-COMMENT-FROM-AFTER-THE-FIRST-READ-{time.time_ns()}\n"
+    posted = subprocess.run(
+        [
+            "gh",
+            "api",
+            "-X",
+            "POST",
+            f"repos/{fixture_state.repo}/issues/{fixture_state.selected}/comments",
+            "--input",
+            "-",
+        ],
+        input=json.dumps({"body": live_body}),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert posted.returncode == 0, posted.stderr
+    second = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        second_directory,
+        "T019-second-read",
+    )
+    original_after = _live_issue(fixture_state.repo, fixture_state.selected)
+
+    assert second.returncode == 0, second.stderr
+    assert live_body not in first.stdout
+    assert second.stdout.count(live_body) == 1
+    assert (
+        json.loads(original_before)["body"]
+        == json.loads(original_after)["body"]
+        == fixture_state.selected_body
+    )
+    assert first.stdout.count(fixture_state.selected_body) == 1
+    assert second.stdout.count(fixture_state.selected_body) == 1
+    fixture_state.root.joinpath("T019-new-comment.json").write_text(
+        posted.stdout, encoding="utf-8"
+    )
+
+
+def test_read_only_execution_preserves_local_and_github_state(
+    fixture_state: FixtureState,
+) -> None:
+    invocation = fixture_state.root / "read-only-invocation"
+    governing_paths = (
+        "AGENTS.md",
+        "INTENT.md",
+        "CONTRIBUTING.md",
+        ".specify/memory/constitution.md",
+        "src/itree/WORKFLOWS.md",
+    )
+    instruction_before = {
+        path: _file_hash(fixture_state.checkout / path) for path in governing_paths
+    }
+    issue_before = _live_issue(fixture_state.repo, fixture_state.pagination)
+    comments_before = _live_comments(fixture_state.repo, fixture_state.pagination)
+    status_before = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
+    )
+    result = invoke_work(
+        fixture_state, fixture_state.pagination, "module", invocation, "T019-read-only"
+    )
+
+    assert result.returncode == 0, result.stderr
+    instruction_after = {
+        path: _file_hash(fixture_state.checkout / path) for path in governing_paths
+    }
+    status_after = subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=fixture_state.checkout, text=True
+    )
+
+    assert instruction_before == instruction_after
+    assert status_after == status_before
+    assert _live_issue(fixture_state.repo, fixture_state.pagination) == issue_before
+    assert (
+        _live_comments(fixture_state.repo, fixture_state.pagination) == comments_before
+    )
+    assert (
+        invocation.joinpath(".specify/feature.json").read_text(encoding="utf-8")
+        == "DECOY-FEATURE-POINTER\n"
+    )
+    assert (
+        invocation.joinpath(".itree/work/999/plan.md").read_text(encoding="utf-8")
+        == "DECOY-CACHED-PLAN\n"
+    )
+    assert (
+        invocation.joinpath("specs/999-wrong-issue/spec.md").read_text(encoding="utf-8")
+        == "DECOY-SPECIFICATION\n"
+    )
+    assert "DECOY-FEATURE-POINTER" not in result.stdout
+    assert "DECOY-CACHED-PLAN" not in result.stdout
+    assert "DECOY-SPECIFICATION" not in result.stdout
