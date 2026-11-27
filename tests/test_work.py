@@ -47,6 +47,7 @@ class FixtureState(BaseModel):
     cycle_b: int
     cycle_gh: Path
     fail_comments_gh: Path
+    assertion_gh: Path
     pinned: str
     head: str
     source_urls: dict[str, str]
@@ -390,6 +391,26 @@ def test_required_comment_read_failure_exits_three_without_package(
     assert result.returncode == 3
     assert result.stdout == ""
     assert "FIXTURE-REQUIRED-COMMENT-READ-FAILURE" in result.stderr
+    assert "Work package complete" not in result.stderr
+
+
+def test_internal_invariant_failures_are_not_reclassified_as_transport_errors(
+    fixture_state: FixtureState, tmp_path: Path
+) -> None:
+    result = invoke_work(
+        fixture_state,
+        fixture_state.selected,
+        "module",
+        tmp_path / "invariant-failure",
+        "T019-invariant-failure",
+        path_gh=fixture_state.assertion_gh,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "AssertionError" in result.stderr
+    assert "FIXTURE-GRAPHQL-INVARIANT" in result.stderr
+    assert "Work package read failure" not in result.stderr
     assert "Work package complete" not in result.stderr
 
 

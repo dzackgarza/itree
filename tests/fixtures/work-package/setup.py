@@ -367,6 +367,16 @@ def create(root: Path, output: Path) -> None:
         encoding="utf-8",
     )
     fail_comments_gh.chmod(0o755)
+    assertion_gh = root / "assertion-gh.py"
+    assertion_gh.write_text(
+        "#!/usr/bin/env python3\nimport os, sys\n"
+        "if 'graphql' in sys.argv:\n"
+        '    print(\'{"data": null, "errors": [{"message": "FIXTURE-GRAPHQL-INVARIANT"}]}\')\n'
+        "else:\n"
+        f"    os.execv({real_gh!r}, [{real_gh!r}, *sys.argv[1:]])\n",
+        encoding="utf-8",
+    )
+    assertion_gh.chmod(0o755)
 
     state: dict[str, JsonValue] = {
         "repo": slug,
@@ -395,6 +405,7 @@ def create(root: Path, output: Path) -> None:
         "cycle_b": cycle_b,
         "cycle_gh": str(cycle_gh),
         "fail_comments_gh": str(fail_comments_gh),
+        "assertion_gh": str(assertion_gh),
         "pinned": pinned,
         "head": head,
         "source_urls": source_urls,
