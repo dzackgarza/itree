@@ -1,5 +1,9 @@
 # itree Constitution
 
+Before any work in this repository, read `AGENTS.md`, `CONTRIBUTING.md`, and
+`src/itree/WORKFLOWS.md` in full. Those documents apply together with this
+constitution.
+
 This constitution governs changes to itree. The organization model defines the public
 meaning of its commands. The contributor guide applies these principles to work in this
 repository. [Organization model](../../src/itree/WORKFLOWS.md) · [Contributor guide](../../CONTRIBUTING.md)

@@ -161,6 +161,7 @@ Recovery starts by rereading live GitHub state.
 | `children` | List children | `itree children owner/repo#1` |
 | `tree` | Render the ordered tree (ASCII; `--json`) | `itree tree owner/repo` |
 | `next` | Find the next open work-unit issue | `itree next owner/repo` |
+| `work` | Print a live issue body, comments, ancestors, governing documents, and cited sources | `itree work owner/repo#5` |
 | `path` | Find the path from root to an issue | `itree path owner/repo#5` |
 
 ### Diagnostic
