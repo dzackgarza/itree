@@ -578,6 +578,19 @@ def ensure_issue_body(slug: str, number: int, body: str, root: Path) -> None:
     existing["body"] = body
 
 
+def _phase_comment(phase: dict[str, JsonObject], number: int, body: str) -> JsonObject:
+    matches = [
+        result
+        for label, result in phase.items()
+        if label.startswith(f"{number}:") and result["body"] == body
+    ]
+    if len(matches) != 1:
+        raise FixtureRecoveryError(
+            f"expected one comment for {number} with body={body!r}; found={len(matches)}"
+        )
+    return matches[0]
+
+
 def create_issue_family(
     slug: str, root: Path, specifications: list[tuple[str, str]]
 ) -> None:
@@ -1718,12 +1731,15 @@ def complete_fixture_objects(
             (cited, "CITED-COMMENT-BODY-EXACT\n"),
         ],
     )
-    roadmap_comment_id = _number(phase[f"{roadmap}:0"]["databaseId"])
-    roadmap_comment_url = str(phase[f"{roadmap}:0"]["url"])
-    binding_id = _number(phase[f"{selected}:0"]["databaseId"])
-    binding_url = str(phase[f"{selected}:0"]["url"])
-    cited_comment_id = _number(phase[f"{cited}:0"]["databaseId"])
-    cited_comment_url = str(phase[f"{cited}:0"]["url"])
+    roadmap_comment = _phase_comment(phase, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n")
+    roadmap_comment_id = _number(roadmap_comment["databaseId"])
+    roadmap_comment_url = str(roadmap_comment["url"])
+    binding_comment = _phase_comment(phase, selected, "BINDING-PRIOR-DECISION-EXACT\n")
+    binding_id = _number(binding_comment["databaseId"])
+    binding_url = str(binding_comment["url"])
+    cited_comment = _phase_comment(phase, cited, "CITED-COMMENT-BODY-EXACT\n")
+    cited_comment_id = _number(cited_comment["databaseId"])
+    cited_comment_url = str(cited_comment["url"])
     citation_edge = issue(
         slug,
         "Citation transport edges",
