@@ -20,6 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -123,6 +124,8 @@ type Family = Literal[
     "readIssueCatalog",
     "readCommentCatalog",
     "readPullRequestCatalog",
+    "createGitTag",
+    "createRef",
 ]
 type JsonObject = dict[str, JsonValue]
 
@@ -160,12 +163,15 @@ def comments(
     ]
 
 
-def add_comment_tail(
-    slug: str, root: Path, specifications: list[tuple[int, str]]
-) -> None:
+def add_comment_phase(
+    slug: str,
+    root: Path,
+    operation_prefix: str,
+    specifications: list[tuple[int, str]],
+) -> dict[str, JsonObject]:
     assert specifications
+    results: dict[str, JsonObject] = {}
     completed = _completed(root)
-    operation_prefix = "addComment:fixture-tail-v1"
     family_records = [
         record for key, record in completed.items() if key.startswith(operation_prefix)
     ]
@@ -191,6 +197,8 @@ def add_comment_tail(
             )
         if live is None:
             missing.append((label, number, body))
+        else:
+            results[label] = live
     batch_serial = len(family_records)
     for offset in range(0, len(missing), 15):
         batch = missing[offset : offset + 15]
@@ -221,9 +229,11 @@ def add_comment_tail(
             },
             elapsed,
         )
-        for (_label, number, body), record in zip(batch, created.values(), strict=True):
+        for (label, number, body), record in zip(batch, created.values(), strict=True):
             assert record["body"] == body
+            results[label] = record
             _live_comments(slug, number, root).append(record)
+    return results
 
 
 class FixtureRecoveryError(RuntimeError):
@@ -257,7 +267,14 @@ def _completed(root: Path) -> dict[str, FamilyRecord]:
         record
         for record in _records(root)
         if record.family
-        in ("createIssue", "createPullRequest", "addComment", "addSubIssue")
+        in (
+            "createIssue",
+            "createPullRequest",
+            "addComment",
+            "addSubIssue",
+            "createGitTag",
+            "createRef",
+        )
     ]
     records: dict[str, FamilyRecord] = {}
     for record in creations:
@@ -956,7 +973,160 @@ def _refs(output: str) -> dict[str, str]:
     }
 
 
-def _verify_required_refs(slug: str, checkout: Path) -> None:
+def _configure_lfs_policy(checkout: Path) -> None:
+    files = run(["git", "ls-files", "-z"], cwd=checkout).stdout
+    assert files
+    response = run(
+        ["git", "check-attr", "-z", "--stdin", "filter"],
+        cwd=checkout,
+        input_text=files,
+    ).stdout
+    parts = response.split("\0")
+    assert len(parts) % 3 == 1, parts
+    managed = [
+        parts[index]
+        for index in range(0, len(parts) - 1, 3)
+        if parts[index + 2] == "lfs"
+    ]
+    if managed:
+        raise FixtureRecoveryError(
+            f"LFS lock verification remains required for tracked paths: {managed}"
+        )
+    run(["git", "config", "lfs.sshTransfer", "never"], cwd=checkout)
+    run(["git", "config", "lfs.locksverify", "false"], cwd=checkout)
+
+
+def _publish_annotated_tag(
+    slug: str, checkout: Path, root: Path, refname: str, object_sha: str
+) -> None:
+    operation_id = f"createGitTag:{refname}"
+    journaled = _completed(root).get(operation_id)
+    try:
+        existing = _json_object(
+            run(["gh", "api", f"repos/{slug}/git/tags/{object_sha}"]).stdout
+        )
+    except FixtureCommandError as error:
+        if "HTTP 404" not in error.result.stderr:
+            raise
+        existing = None
+    if existing is not None:
+        if existing["sha"] != object_sha:
+            raise FixtureRecoveryError(
+                f"annotated tag object identity differs: {refname}"
+            )
+        return
+    if journaled is not None:
+        raise FixtureRecoveryError(
+            f"journaled annotated tag object is absent from GitHub: {refname}"
+        )
+    text = run(["git", "cat-file", "-p", object_sha], cwd=checkout).stdout
+    header, separator, message = text.partition("\n\n")
+    assert separator, text
+    metadata = dict(line.split(" ", 1) for line in header.splitlines())
+    target_type = metadata["type"]
+    assert target_type in {"commit", "tree"}, metadata
+    tagger_name, timestamp, zone = metadata["tagger"].rsplit(" ", 2)
+    name, email = tagger_name.split("<", 1)
+    assert zone[0] in {"+", "-"} and len(zone) == 5, zone
+    sign = 1 if zone[0] == "+" else -1
+    offset = timezone(sign * timedelta(hours=int(zone[1:3]), minutes=int(zone[3:5])))
+    tagger_date = datetime.fromtimestamp(int(timestamp), offset).isoformat()
+    payload = {
+        "tag": metadata["tag"],
+        "message": message,
+        "object": metadata["object"],
+        "type": target_type,
+        "tagger": {
+            "name": name.strip(),
+            "email": email.removesuffix(">"),
+            "date": tagger_date,
+        },
+    }
+    response = _json_object(
+        run(
+            ["gh", "api", "-X", "POST", f"repos/{slug}/git/tags", "--input", "-"],
+            input_text=json.dumps(payload),
+        ).stdout
+    )
+    if response["sha"] != object_sha:
+        raise FixtureRecoveryError(
+            f"annotated tag object differs after upload: {refname}; "
+            f"local={object_sha}, remote={response}"
+        )
+    _remember(
+        root,
+        "createGitTag",
+        operation_id,
+        {
+            refname: {
+                "id": object_sha,
+                "sha": object_sha,
+                "tag": metadata["tag"],
+                "type": target_type,
+            }
+        },
+        last_api_seconds,
+        last_pacing_seconds,
+    )
+
+
+def _create_missing_refs(slug: str, root: Path, missing: list[tuple[str, str]]) -> None:
+    if not missing:
+        return
+    completed = _completed(root)
+    for name, _sha in missing:
+        if any(
+            record.family == "createRef" and name in record.object_ids
+            for record in completed.values()
+        ):
+            raise FixtureRecoveryError(f"journaled ref is absent from GitHub: {name}")
+    serial = sum(record.family == "createRef" for record in completed.values())
+    operation_id = f"createRef:required-refs-v1-{serial:03d}"
+    repository_id = _repository_id(slug)
+    fields = [
+        f"r{index:03d}:createRef(input:{{repositoryId:{json.dumps(repository_id)},name:{json.dumps(name)},oid:{json.dumps(sha)}}}){{ref{{prefix name id target{{oid}}}}}}"
+        for index, (name, sha) in enumerate(missing)
+    ]
+    query = "mutation WorkPackageRefs {" + " ".join(fields) + "}"
+    assert len(fields) * 2 <= 500_000
+    assert len(query.encode("utf-8")) < 120_000
+    response = _graphql_response(query)
+    elapsed = last_api_seconds
+    created: dict[str, JsonObject] = {}
+    data = response.get("data")
+    for index, (name, sha) in enumerate(missing):
+        if not isinstance(data, dict):
+            break
+        payload = data.get(f"r{index:03d}")
+        if not isinstance(payload, dict):
+            continue
+        candidate = payload.get("createRef")
+        if not isinstance(candidate, dict) or candidate.get("ref") is None:
+            continue
+        result = candidate["ref"]
+        assert isinstance(result, dict)
+        target = result.get("target")
+        if (
+            not isinstance(result.get("id"), str)
+            or not isinstance(target, dict)
+            or target.get("oid") != sha
+            or result.get("prefix") is None
+            or result.get("name") is None
+            or f"{result['prefix']}{result['name']}" != name
+        ):
+            continue
+        created[name] = result
+    if created:
+        _remember(
+            root, "createRef", operation_id, created, elapsed, last_pacing_seconds
+        )
+    if len(created) != len(missing) or response.get("errors"):
+        raise FixtureRecoveryError(
+            f"ref creation returned failed or invalid aliases; valid IDs were persisted: {response}"
+        )
+
+
+def _verify_required_refs(slug: str, checkout: Path, root: Path) -> None:
     _assert_origin(slug, checkout)
     local = _refs(
         run(
@@ -1002,20 +1172,49 @@ def _verify_required_refs(slug: str, checkout: Path) -> None:
             f"unexpected remote refs: {sorted(unexpected_remote)}"
         )
     changed = {
-        name for name in expected if name in remote and remote[name] != local[name]
+        name
+        for name in expected
+        if name != "refs/heads/main" and name in remote and remote[name] != local[name]
     }
     if changed:
         raise FixtureRecoveryError(
             f"remote ref object IDs differ from preserved local refs: {sorted(changed)}"
         )
-    missing = sorted(expected - set(remote))
-    if missing:
-        run(["git", "push", "origin", *missing], cwd=checkout)
+    head_updates = [
+        name
+        for name in (
+            "refs/heads/main",
+            "refs/heads/feature/work-package",
+            "refs/heads/pull-request-source",
+        )
+        if remote.get(name) != local[name]
+    ]
+    if head_updates:
+        run(["git", "push", "origin", *head_updates], cwd=checkout)
         remote = _refs(
             run(
                 ["git", "ls-remote", "--refs", "--heads", "--tags", "origin"],
                 cwd=checkout,
             ).stdout
+        )
+    for name in (
+        "refs/tags/shared/annotated-work-package-ref",
+        "refs/tags/ambiguous/annotated-work-package-ref",
+        "refs/tags/annotated-tree-tag",
+    ):
+        if name not in remote:
+            _publish_annotated_tag(slug, checkout, root, name, local[name])
+    missing = sorted(expected - set(remote))
+    _create_missing_refs(slug, root, [(name, local[name]) for name in missing])
+    remote = _refs(
+        run(
+            ["git", "ls-remote", "--refs", "--heads", "--tags", "origin"], cwd=checkout
+        ).stdout
+    )
+    if set(remote) != expected:
+        raise FixtureRecoveryError(
+            f"published ref set differs: missing={sorted(expected - set(remote))}, "
+            f"unexpected={sorted(set(remote) - expected)}"
         )
     for name in sorted(expected):
         if remote.get(name) != local[name]:
@@ -1074,6 +1273,75 @@ def attach(slug: str, parent: int, child: int, root: Path) -> None:
         "result": result,
     }
     root.joinpath("attached.txt").write_text(f"{parent} -> {child}\n", encoding="utf-8")
+
+
+def attach_pairs(slug: str, root: Path, specifications: list[tuple[int, int]]) -> None:
+    prefix = "addSubIssue:fixture-parents-v1"
+    completed = _completed(root)
+    records = [record for key, record in completed.items() if key.startswith(prefix)]
+    missing: list[tuple[str, int, int]] = []
+    for index, (parent, child) in enumerate(specifications):
+        label = str(index)
+        saved_versions = [
+            objects[label]
+            for record in records
+            if label in (objects := _objects(record))
+        ]
+        legacy = completed.get(f"addSubIssue:{parent}->{child}")
+        if legacy is not None:
+            saved_versions.extend(_objects(legacy).values())
+        current_parent = _parent_number(slug, child)
+        if current_parent == parent:
+            if any(
+                saved["id"] != _live_issue(slug, child, root)["id"]
+                for saved in saved_versions
+            ):
+                raise FixtureRecoveryError(
+                    f"journaled parent identity changed for {parent}->{child}"
+                )
+            continue
+        if saved_versions:
+            raise FixtureRecoveryError(
+                f"journaled parent link is absent or different for {parent}->{child}"
+            )
+        missing.append((label, parent, child))
+    serial = len(records)
+    for offset in range(0, len(missing), 2):
+        batch = missing[offset : offset + 2]
+        operation_id = f"{prefix}-{serial:03d}"
+        assert operation_id not in completed
+        serial += 1
+        fields = [
+            f"p{index:03d}:addSubIssue(input:{{issueId:{json.dumps(str(_live_issue(slug, parent, root)['id']))},subIssueId:{json.dumps(str(_live_issue(slug, child, root)['id']))}}}){{subIssue{{number id}}}}"
+            for index, (_label, parent, child) in enumerate(batch)
+        ]
+        query = "mutation WorkPackageParents {" + " ".join(fields) + "}"
+        assert len(fields) * 2 <= 500_000
+        response = _graphql_response(query)
+        elapsed = last_api_seconds
+        data = response.get("data")
+        created: dict[str, JsonObject] = {}
+        for index, (label, parent, child) in enumerate(batch):
+            if not isinstance(data, dict):
+                break
+            node = data.get(f"p{index:03d}")
+            if not isinstance(node, dict):
+                continue
+            result = _response_for_family("addSubIssue", node)
+            if result["number"] == child:
+                created[label] = result
+        if created:
+            _remember(
+                root, "addSubIssue", operation_id, created, elapsed, last_pacing_seconds
+            )
+        if len(created) != len(batch) or response.get("errors"):
+            raise FixtureRecoveryError(
+                f"parent-link creation returned invalid aliases: {response}"
+            )
+    for parent, child in specifications:
+        root.joinpath("attached.txt").write_text(
+            f"{parent} -> {child}\n", encoding="utf-8"
+        )
 
 
 def managed(
@@ -1145,6 +1413,7 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", "."], cwd=checkout)
     run(["git", "commit", "-m", "Create work-package fixture"], cwd=checkout)
+    _configure_lfs_policy(checkout)
     run(["git", "push", "-u", "origin", "main"], cwd=checkout)
     pinned = run(["git", "rev-parse", "HEAD"], cwd=checkout).stdout.strip()
     checkout.joinpath("docs/primary.md").write_text(
@@ -1247,18 +1516,8 @@ def create(root: Path, output: Path) -> None:
     )
     run(["git", "add", "docs/pull-request.md"], cwd=checkout)
     run(["git", "commit", "-m", "Create a real pull request"], cwd=checkout)
-    run(
-        [
-            "git",
-            "push",
-            "origin",
-            "refs/heads/*:refs/heads/*",
-            "refs/tags/*:refs/tags/*",
-        ],
-        cwd=checkout,
-    )
     run(["git", "checkout", "main"], cwd=checkout)
-    _verify_required_refs(slug, checkout)
+    _verify_required_refs(slug, checkout, root)
     head = _assert_default_main(slug, checkout)
     _issue_catalogs[(slug, root)] = []
     with ThreadPoolExecutor(max_workers=3) as external_executor:
@@ -1289,7 +1548,7 @@ def resume(slug: str, root: Path, output: Path) -> None:
         ["git", "rev-list", "--max-parents=0", "HEAD"], cwd=checkout
     ).stdout.strip()
     run(["git", "checkout", "main"], cwd=checkout)
-    _verify_required_refs(slug, checkout)
+    _verify_required_refs(slug, checkout, root)
     head = _assert_default_main(slug, checkout)
     previous = (
         FixtureState.model_validate_json(output.read_text(encoding="utf-8"))
@@ -1425,15 +1684,6 @@ def complete_fixture_objects(
         self_referential=True,
     )
     recursive_url = f"https://github.com/{slug}/blob/{pinned}/docs/recursive.md"
-    (roadmap_comment_id, roadmap_comment_url), _ = comments(
-        slug,
-        roadmap,
-        [
-            "ROADMAP-COMMENT-DECISION-EXACT\n",
-            f"Ancestor-only citation: {recursive_url}\n",
-        ],
-        root,
-    )
 
     selected = issue(
         slug,
@@ -1448,22 +1698,32 @@ def complete_fixture_objects(
     )
     ensure_issue_body(slug, selected, selected_body, root)
     ensure_issue_body(slug, roadmap, roadmap_body, root)
-    attach(slug, roadmap, selected, root)
-    (binding_id, binding_url), _, _ = comments(
-        slug,
-        selected,
-        [
-            "BINDING-PRIOR-DECISION-EXACT\n",
-            "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
-            "OPEN-VERIFICATION-FINDING-EXACT\n",
-        ],
-        root,
-    )
-
+    cycle_a = issue(slug, "Cycle A", cycle_a_body, root)
+    cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
+    attach_pairs(slug, root, [(roadmap, selected), (cycle_b, cycle_a)])
     cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
-    cited_comment_id, cited_comment_url = comment(
-        slug, cited, "CITED-COMMENT-BODY-EXACT\n", root
+    phase = add_comment_phase(
+        slug,
+        root,
+        "addComment:fixture-intro-v1",
+        [
+            (roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n"),
+            (roadmap, f"Ancestor-only citation: {recursive_url}\n"),
+            (selected, "BINDING-PRIOR-DECISION-EXACT\n"),
+            (
+                selected,
+                "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
+            ),
+            (selected, "OPEN-VERIFICATION-FINDING-EXACT\n"),
+            (cited, "CITED-COMMENT-BODY-EXACT\n"),
+        ],
     )
+    roadmap_comment_id = _number(phase[f"{roadmap}:0"]["databaseId"])
+    roadmap_comment_url = str(phase[f"{roadmap}:0"]["url"])
+    binding_id = _number(phase[f"{selected}:0"]["databaseId"])
+    binding_url = str(phase[f"{selected}:0"]["url"])
+    cited_comment_id = _number(phase[f"{cited}:0"]["databaseId"])
+    cited_comment_url = str(phase[f"{cited}:0"]["url"])
     citation_edge = issue(
         slug,
         "Citation transport edges",
@@ -1602,14 +1862,13 @@ def complete_fixture_objects(
     cycle_b_body = "CYCLE-B-READABLE-BODY\n"
     cycle_a = issue(slug, "Cycle A", cycle_a_body, root)
     cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
-    attach(slug, cycle_b, cycle_a, root)
     tail_comments.extend(
         (
             (cycle_a, "CYCLE-A-READABLE-COMMENT\n"),
             (cycle_b, "CYCLE-B-READABLE-COMMENT\n"),
         )
     )
-    add_comment_tail(slug, root, tail_comments)
+    add_comment_phase(slug, root, "addComment:fixture-tail-v1", tail_comments)
 
     real_gh = shutil.which("gh")
     assert real_gh is not None
