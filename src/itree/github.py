@@ -51,6 +51,7 @@ from .models import (
     GithubBlob,
     GithubContentFile,
     GithubContentItem,
+    GithubCommit,
     GithubContentObject,
     GithubNonFileContent,
     GithubIndeterminateOperation,
@@ -123,7 +124,7 @@ class GithubApiError(RuntimeError):
 class GitRefLookupError(RuntimeError):
     def __init__(
         self,
-        reason: Literal["unknown_ref", "ambiguous_ref"],
+        reason: Literal["unknown_ref", "ambiguous_ref", "unsupported_kind"],
         requested_ref: str,
         repository_path: str,
     ) -> None:
@@ -382,6 +383,7 @@ class GithubApi(BaseModel):
     _ref_matches: dict[GitRefKind, tuple[GithubRefMatch, ...]] = PrivateAttr(
         default_factory=dict
     )
+    _commit_objects: dict[str, CommitSha] = PrivateAttr(default_factory=dict)
 
     @classmethod
     def from_repo_ref(cls, ref: RepoRef) -> GithubApi:
@@ -744,7 +746,28 @@ class GithubApi(BaseModel):
         proc = self._exec("GET", f"repos/{self.owner}/{self.repo}")
         return GithubRepository.model_validate_json(proc.stdout)
 
-    def _dereference_annotated_tag(self, sha: str) -> CommitSha:
+    def _require_commit(
+        self, sha: CommitSha, requested_ref: str, repository_path: str
+    ) -> CommitSha:
+        cached = self._commit_objects.get(sha)
+        if cached is not None:
+            return cached
+        endpoint = f"repos/{self.owner}/{self.repo}/git/commits/{sha}"
+        try:
+            proc = self._exec("GET", endpoint)
+        except GithubApiError as error:
+            if error.status in (404, 422):
+                raise GitRefLookupError(
+                    "unsupported_kind", requested_ref, repository_path
+                ) from error
+            raise
+        commit = GithubCommit.model_validate_json(proc.stdout)
+        self._commit_objects[sha] = commit.sha
+        return commit.sha
+
+    def _dereference_annotated_tag(
+        self, sha: str, requested_ref: str, repository_path: str
+    ) -> CommitSha:
         seen: set[str] = set()
         current = sha
         while True:
@@ -755,12 +778,23 @@ class GithubApi(BaseModel):
             target_type = _string(target["type"], "annotated tag target type")
             if target_type == "commit":
                 return _string(target["sha"], "annotated tag commit SHA")
-            assert target_type == "tag", (
-                f"annotated tag target must be tag or commit; found={target_type!r}; payload={payload!r}"
-            )
-            assert current not in seen, f"annotated tag cycle detected at {current}"
+            if target_type != "tag" or current in seen:
+                raise GitRefLookupError(
+                    "unsupported_kind", requested_ref, repository_path
+                )
             seen.add(current)
             current = _string(target["sha"], "nested annotated tag SHA")
+
+    def _resolve_ref_target(
+        self, match: GithubRefMatch, requested_ref: str, repository_path: str
+    ) -> CommitSha:
+        if match.target_type == "commit":
+            return match.object_sha
+        if match.target_type == "tag":
+            return self._dereference_annotated_tag(
+                match.object_sha, requested_ref, repository_path
+            )
+        raise GitRefLookupError("unsupported_kind", requested_ref, repository_path)
 
     def list_git_ref_matches(self, kind: GitRefKind) -> tuple[GithubRefMatch, ...]:
         assert kind in (GitRefKind.branch, GitRefKind.tag), (
@@ -780,9 +814,12 @@ class GithubApi(BaseModel):
                 name = _string(item["ref"], "Git ref name")
                 target = _object(item["object"], "Git ref target")
                 sha = _string(target["sha"], "Git ref target SHA")
-                if kind == GitRefKind.tag and target.get("type") == "tag":
-                    sha = self._dereference_annotated_tag(sha)
-                matches.append(GithubRefMatch(name=name, kind=kind, commit_sha=sha))
+                target_type = _string(target["type"], "Git ref target type")
+                matches.append(
+                    GithubRefMatch(
+                        name=name, kind=kind, object_sha=sha, target_type=target_type
+                    )
+                )
         resolved = tuple(matches)
         self._ref_matches[kind] = resolved
         return resolved
@@ -806,9 +843,12 @@ class GithubApi(BaseModel):
         self, requested_ref: str, repository_path: str
     ) -> GitRefResolution:
         if re.fullmatch(r"[0-9a-f]{40}", requested_ref):
+            commit_sha = self._require_commit(
+                requested_ref, requested_ref, repository_path
+            )
             return GitRefResolution(
                 requested_ref=requested_ref,
-                resolved_commit_sha=requested_ref,
+                resolved_commit_sha=commit_sha,
                 repository_path=repository_path,
                 matched_refs=(
                     GitRefIdentity(name=requested_ref, kind=GitRefKind.commit),
@@ -836,16 +876,22 @@ class GithubApi(BaseModel):
             for match, name, path in candidates
             if len(name) == longest
         ]
-        commits = {match.commit_sha for match, _, _ in selected}
+        commits = {
+            self._resolve_ref_target(match, requested_ref, repository_path)
+            for match, _, _ in selected
+        }
         if len(commits) != 1:
             raise GitRefLookupError("ambiguous_ref", requested_ref, repository_path)
         match, name, path = selected[0]
+        resolved_commit_sha = self._resolve_ref_target(
+            match, requested_ref, repository_path
+        )
         identities = tuple(
             GitRefIdentity(name=match.name, kind=match.kind) for match, _, _ in selected
         )
         return GitRefResolution(
             requested_ref=name,
-            resolved_commit_sha=match.commit_sha,
+            resolved_commit_sha=resolved_commit_sha,
             repository_path=path,
             matched_refs=identities,
         )

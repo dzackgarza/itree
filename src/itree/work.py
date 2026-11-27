@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import json
+import http.client
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
 from enum import StrEnum
 from typing import Annotated, Literal, NoReturn, TypeVar
@@ -161,6 +164,14 @@ RepositoryTextFailure = Literal[
 ]
 
 
+class WorkContentIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["issue", "issue_comment"]
+    issue_ref: IssueRef
+    issue_comment_id: int | None = None
+
+
 class PresentSource(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -174,6 +185,7 @@ class PresentSource(BaseModel):
     media_type: str
     resolution: GitRefResolution | None = None
     sub_anchor: str | None = None
+    content_identity: WorkContentIdentity | None = None
 
 
 class UnresolvedSource(BaseModel):
@@ -424,9 +436,12 @@ def _canonical_url(raw: str) -> str:
     userinfo, separator, _ = split.netloc.rpartition("@")
     userinfo_text = f"{userinfo}@" if separator else ""
     netloc = f"{userinfo_text}{hostname}{port_text}"
-    return urllib.parse.urlunsplit(
+    canonical = urllib.parse.urlunsplit(
         (scheme, netloc, split.path, split.query, split.fragment)
     )
+    empty_query = split.query == "" and "?" in raw.partition("#")[0]
+    empty_fragment = split.fragment == "" and "#" in raw
+    return canonical + ("?" if empty_query else "") + ("#" if empty_fragment else "")
 
 
 def _new_citation(raw: str) -> Citation:
@@ -484,6 +499,7 @@ def _present(
     media_type: str,
     resolution: GitRefResolution | None = None,
     sub_anchor: str | None = None,
+    content_identity: WorkContentIdentity | None = None,
 ) -> PresentSource:
     return PresentSource(
         citation=citation,
@@ -495,6 +511,7 @@ def _present(
         media_type=media_type,
         resolution=resolution,
         sub_anchor=sub_anchor,
+        content_identity=content_identity,
     )
 
 
@@ -532,19 +549,30 @@ def _resolve_github_issue(
             return _unresolved(citation, "unsupported_kind")
         if comment_id is not None:
             comment = api.get_comment(comment_id)
+            identity = WorkContentIdentity(
+                kind="issue_comment",
+                issue_ref=IssueRef(repo_ref=api.repo_ref, number=issue.number),
+                issue_comment_id=comment.id,
+            )
             return _present(
                 citation,
                 "github_comment",
                 comment.body,
                 "text/markdown",
                 sub_anchor=sub_anchor,
+                content_identity=identity,
             )
+        identity = WorkContentIdentity(
+            kind="issue",
+            issue_ref=IssueRef(repo_ref=api.repo_ref, number=issue.number),
+        )
         return _present(
             citation,
             "github_issue",
             issue.body or "",
             "text/markdown",
             sub_anchor=sub_anchor,
+            content_identity=identity,
         )
     except GithubApiError as error:
         return _unresolved(citation, _github_source_error(error))
@@ -617,7 +645,7 @@ def _resolve_external(citation: Citation) -> SourceDisposition:
         return _unresolved(
             citation, "redirect_failed" if redirected else "inaccessible"
         )
-    except urllib.error.URLError, TimeoutError, OSError:
+    except http.client.HTTPException, urllib.error.URLError, TimeoutError, OSError:
         return _unresolved(citation, "inaccessible")
     except ValueError:
         return _unresolved(citation, "invalid")
@@ -773,6 +801,35 @@ def render_work_package(package: WorkPackage) -> str:
     for ancestor in package.ancestors:
         lines.append(f"### Governing ancestor {ancestor.issue_ref.slug}")
         _append_issue(lines, ancestor.issue_ref, ancestor.issue, ancestor.comments)
+    emitted_identities = {
+        WorkContentIdentity(kind="issue", issue_ref=package.issue_ref),
+        *(
+            WorkContentIdentity(kind="issue", issue_ref=ancestor.issue_ref)
+            for ancestor in package.ancestors
+        ),
+    }
+    emitted_identities.update(
+        WorkContentIdentity(
+            kind="issue_comment",
+            issue_ref=package.issue_ref,
+            issue_comment_id=comment.id,
+        )
+        for comment in package.comments
+    )
+    for ancestor in package.ancestors:
+        emitted_identities.update(
+            WorkContentIdentity(
+                kind="issue_comment",
+                issue_ref=ancestor.issue_ref,
+                issue_comment_id=comment.id,
+            )
+            for comment in ancestor.comments
+        )
+    anchored_identities = {
+        source.content_identity
+        for source in package.present_sources
+        if source.sub_anchor is not None and source.content_identity is not None
+    }
     lines.append("## Governing documents")
     for document in package.governing_documents:
         lines.append(f"### {document.role.value}")
@@ -800,6 +857,17 @@ def render_work_package(package: WorkPackage) -> str:
             lines.append(f"repository_path={source.resolution.repository_path}")
             for ref in source.resolution.matched_refs:
                 lines.append(f"matched_ref={ref.name} kind={ref.kind.value}")
+        anchor_sibling = (
+            source.content_identity in anchored_identities and source.sub_anchor is None
+        )
+        if source.content_identity is not None and (
+            source.content_identity in emitted_identities or anchor_sibling
+        ):
+            lines.append("emission=deduplicated")
+            continue
+        if source.content_identity is not None:
+            emitted_identities.add(source.content_identity)
+        lines.append("emission=content")
         lines.append(source.content)
     lines.append("## Unresolved citations")
     for unresolved in package.unresolved_sources:
@@ -817,7 +885,13 @@ def _required_read(
 ) -> ReadResult:
     try:
         return read()
-    except (RuntimeError, ValidationError) as error:
+    except (
+        RuntimeError,
+        ValidationError,
+        json.JSONDecodeError,
+        TypeError,
+        KeyError,
+    ) as error:
         failure = WorkPackageReadFailure(
             issue_ref=issue_ref,
             operation=operation,
@@ -943,7 +1017,10 @@ def load_work_package(issue_ref: IssueRef) -> WorkPackage:
     citations = extract_citations(
         (selected_issue.body or "", *(comment.body for comment in comments))
     )
-    dispositions = tuple(resolve_citation(api, citation) for citation in citations)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        dispositions = tuple(
+            executor.map(lambda citation: resolve_citation(api, citation), citations)
+        )
     return WorkPackage(
         issue_ref=issue_ref,
         selected_issue=selected_issue,

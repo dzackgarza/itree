@@ -944,4 +944,11 @@ class GithubRefMatch(BaseModel):
 
     name: str
     kind: GitRefKind
-    commit_sha: CommitSha
+    object_sha: CommitSha
+    target_type: str
+
+
+class GithubCommit(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    sha: CommitSha

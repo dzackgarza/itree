@@ -1078,7 +1078,7 @@ def test_empty_query_and_fragment_delimiters_remain_distinct(
             "cited_issue_empty_fragment",
         )
     )
-    _set_citation_body(fixture_state, "\n".join(urls) + "\n")
+    _set_citation_body(fixture_state, "\n".join(f"<{url}>" for url in urls) + "\n")
     result = invoke_work(
         fixture_state,
         fixture_state.citation_edge,
