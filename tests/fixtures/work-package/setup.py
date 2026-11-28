@@ -40,11 +40,22 @@ type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
 last_mutation_at = 0.0
+last_mutation_wall_at: float | None = None
 _mutation_gate = threading.Lock()
 _phase_registry_lock = threading.RLock()
 _phase_operation_ids: dict[tuple[Path, str], int] = {}
 _request_local = threading.local()
 _stop_requested = threading.Event()
+
+
+class MutationStart(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    content_objects: int = Field(ge=1)
+    required_start_interval_seconds: float = Field(gt=0)
+    previous_mutation_started_at: float | None
+    mutation_started_at: float = Field(gt=0)
+    pacing_seconds: float = Field(ge=0)
 
 
 class RequestTiming(BaseModel):
@@ -61,20 +72,34 @@ def _timing() -> RequestTiming:
 
 
 def _begin_mutation(command: list[str]) -> float:
-    global last_mutation_at
+    global last_mutation_at, last_mutation_wall_at
     if _stop_requested.is_set():
         raise FixtureRecoveryError("another comment family failed; no new mutation")
     with _mutation_gate:
         if _stop_requested.is_set():
             raise FixtureRecoveryError("another comment family failed; no new mutation")
         started = time.perf_counter()
-        remaining = max(1.0, 0.75 * _content_units(command)) - (
-            time.perf_counter() - last_mutation_at
-        )
+        content_objects = _content_units(command)
+        required_interval = max(1.0, 0.75 * content_objects)
+        remaining = required_interval - (time.perf_counter() - last_mutation_at)
         if remaining > 0 and last_mutation_at != 0.0:
             time.sleep(remaining)
-        last_mutation_at = time.perf_counter()
-        return time.perf_counter() - started
+        mutation_started = time.perf_counter()
+        assert last_mutation_at == 0.0 or (
+            mutation_started - last_mutation_at >= required_interval
+        )
+        previous_wall_at = last_mutation_wall_at
+        last_mutation_at = mutation_started
+        last_mutation_wall_at = time.time()
+        pacing = MutationStart(
+            content_objects=content_objects,
+            required_start_interval_seconds=required_interval,
+            previous_mutation_started_at=previous_wall_at,
+            mutation_started_at=last_mutation_wall_at,
+            pacing_seconds=time.perf_counter() - started,
+        )
+        _request_local.mutation_start = pacing
+        return pacing.pacing_seconds
 
 
 class FixtureCommandError(RuntimeError):
@@ -116,6 +141,9 @@ def _content_units(command: list[str]) -> int:
     return max(
         1,
         text.count(":createIssue(input:")
+        + text.count(":createPullRequest(input:")
+        + text.count(":createGitTag(input:")
+        + text.count(":createRef(input:")
         + text.count(":addComment(input:")
         + text.count(":addSubIssue(input:"),
     )
@@ -127,18 +155,42 @@ def run(
     pace_seconds = _begin_mutation(command) if _is_mutation(command) else 0.0
     started = time.perf_counter()
     result = subprocess.run(
-        command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
+        command,
+        cwd=cwd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "GH_DEBUG": "api"}
+        if command[:3] == ["gh", "api", "graphql"] and _is_mutation(command)
+        else None,
     )
     elapsed = time.perf_counter() - started
     if _is_mutation(command):
         _request_local.timing = RequestTiming(
             api_seconds=elapsed, pacing_seconds=pace_seconds
         )
+        mutation_start = getattr(_request_local, "mutation_start", None)
+        assert isinstance(mutation_start, MutationStart)
+        print(
+            "FIXTURE-MUTATION "
+            + json.dumps(
+                {
+                    **mutation_start.model_dump(mode="json"),
+                    "api_seconds": elapsed,
+                    "exit": result.returncode,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
     print(
         f"FIXTURE-STEP seconds={elapsed:.6f} pacing_seconds={pace_seconds:.6f} exit={result.returncode} command={json.dumps(command)}",
         flush=True,
     )
     if result.returncode != 0:
+        print("FIXTURE-STEP-STDOUT " + json.dumps(result.stdout), file=sys.stderr)
+        print("FIXTURE-STEP-STDERR " + json.dumps(result.stderr), file=sys.stderr)
         raise FixtureCommandError(command, result, elapsed)
     return result
 
@@ -1859,6 +1911,7 @@ def complete_fixture_objects(
         ),
         "independent subject comments",
     )
+    _comment_result(executor, ordered_future, "ordered pagination comments")
     phase = _comment_result(executor, phase_future, "independent subject comments")
     roadmap_comment = _phase_comment(phase, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n")
     roadmap_comment_id = _number(roadmap_comment["databaseId"])
