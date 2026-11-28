@@ -68,6 +68,7 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     if os.environ.get("ITREE_WORK_FIXTURE_STATE") is None:
         root.joinpath("creation-started").write_text(str(time.time()))
+        root.joinpath("creation-started-monotonic").write_text(str(time.perf_counter()))
         started = time.perf_counter()
         parent = Path(tempfile.mkdtemp(prefix="itree-work-test-", dir="/tmp/opencode"))
         result = subprocess.run(
@@ -331,7 +332,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         assert trashed.returncode == 0, trashed.stderr
         assert not state.root.parent.exists()
         finished = time.perf_counter()
-        origin = float(root.joinpath("creation-started").read_text())
+        origin = float(root.joinpath("creation-started-monotonic").read_text())
         timings = {
             "setup_seconds": state.setup_elapsed_seconds,
             "case_seconds": case_finished - case_started,
@@ -363,6 +364,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         root.joinpath("teardown-timings.json").write_text(
             json.dumps(final, indent=2, sort_keys=True)
         )
+        assert total_seconds >= 0, final
         assert total_seconds < 300, final
 
 
