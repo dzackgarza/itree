@@ -15,6 +15,7 @@ from typing import IO
 import fcntl
 import pytest
 from itree.models import FixtureState
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 
 def _worker(
@@ -235,7 +236,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         root: Path = _controller_root(session.config)
         if not root.joinpath("owns-state").exists():
             root.joinpath("cleanup-blocked").write_text(
-                "Fixture creation did not complete; remote and journal preserved."
+                "No controller-owned complete fixture; no automatic cleanup."
             )
             return
         configured = os.environ.get("ITREE_WORK_FIXTURE_STATE")
@@ -281,6 +282,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         }
         root.joinpath("case-logs.json").write_text(
             json.dumps(case_logs, indent=2, sort_keys=True)
+        )
+        live_verification = _verify_live_fixture(state)
+        root.joinpath("live-verification.json").write_text(
+            json.dumps(live_verification, indent=2, sort_keys=True) + "\n"
         )
         deletion_started = time.perf_counter()
         deletion = subprocess.run(
@@ -349,7 +354,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             **timings,
             "case_logs": str(root / "case-logs.json"),
             "journal": str(_journal_path(state.root)),
-            "complete_families": True,
+            "live_objects_verified": True,
+            "live_verification": live_verification,
             "families": _family_costs(state.root),
         }
         total_seconds = finished - origin
@@ -358,6 +364,260 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             json.dumps(final, indent=2, sort_keys=True)
         )
         assert total_seconds < 300, final
+
+
+class _LiveRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _LivePageInfo(_LiveRecord):
+    hasNextPage: bool
+    endCursor: str | None
+
+
+class _LiveComment(_LiveRecord):
+    id: str
+    databaseId: int
+    body: str
+    url: str
+
+
+class _LiveComments(_LiveRecord):
+    totalCount: int
+    nodes: list[_LiveComment]
+    pageInfo: _LivePageInfo
+
+
+class _LiveParent(_LiveRecord):
+    number: int
+
+
+class _LiveIssue(_LiveRecord):
+    id: str
+    number: int
+    body: str
+    parent: _LiveParent | None
+    comments: _LiveComments
+
+
+class _LiveCommentPage(_LiveRecord):
+    comments: _LiveComments
+
+
+class _LiveIssues(_LiveRecord):
+    totalCount: int
+    nodes: list[_LiveIssue]
+
+
+class _LivePullRequest(_LiveRecord):
+    id: str
+    number: int
+
+
+class _LivePullRequests(_LiveRecord):
+    totalCount: int
+    nodes: list[_LivePullRequest]
+
+
+class _LiveRefTarget(_LiveRecord):
+    oid: str
+
+
+class _LiveRef(_LiveRecord):
+    id: str
+    name: str
+    prefix: str
+    target: _LiveRefTarget
+
+
+class _LiveRefs(_LiveRecord):
+    totalCount: int
+    nodes: list[_LiveRef]
+
+
+class _LiveRepository(_LiveRecord):
+    issues: _LiveIssues
+    pullRequests: _LivePullRequests
+    refs: _LiveRefs
+
+
+class _LiveRepositoryPage(_LiveRecord):
+    issue: _LiveCommentPage
+
+
+class _LiveData(_LiveRecord):
+    repository: _LiveRepository
+
+
+class _LiveDataPage(_LiveRecord):
+    repository: _LiveRepositoryPage
+
+
+class _LiveResponse(_LiveRecord):
+    data: _LiveData
+
+
+class _LiveResponsePage(_LiveRecord):
+    data: _LiveDataPage
+
+
+def _graphql(query: str) -> str:
+    result = subprocess.run(
+        ["gh", "api", "graphql", "-f", f"query={query}"],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def _verify_live_fixture(state: FixtureState) -> dict[str, bool | int]:
+    rows = [
+        json.loads(line) for line in _journal_path(state.root).read_text().splitlines()
+    ]
+    expected_issues = {
+        str(obj["id"])
+        for row in rows
+        if row["family"] == "createIssue"
+        for obj in row["result"]["objects"].values()
+    }
+    assert len(expected_issues) == 15
+    expected_pr = {
+        str(obj["id"])
+        for row in rows
+        if row["family"] == "createPullRequest"
+        for obj in row["result"]["objects"].values()
+    }
+    assert len(expected_pr) == 1
+    expected_comments = {
+        str(obj["id"]): str(obj["body"])
+        for row in rows
+        if row["family"] == "addComment"
+        for obj in row["result"]["objects"].values()
+    }
+    assert len(expected_comments) == 119
+    fresh = json.loads(state.root.joinpath("T019-new-comment.json").read_text())
+    expected_comments[fresh["node_id"]] = fresh["body"]
+    expected_refs = {
+        str(obj["id"])
+        for row in rows
+        if row["family"] == "createRef"
+        for obj in row["result"]["objects"].values()
+    }
+    assert len(expected_refs) == 11
+    expected_tags = {
+        str(obj["id"])
+        for row in rows
+        if row["family"] == "createGitTag"
+        for obj in row["result"]["objects"].values()
+    }
+    assert len(expected_tags) == 3
+    owner, name = state.repo.split("/", 1)
+    query = """query VerifyFixture {
+      repository(owner:%s,name:%s) {
+        issues(first:100) {
+          totalCount
+          nodes {
+            id number body
+            parent { number }
+            comments(first:100) {
+              totalCount
+              nodes { id databaseId body url }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+        pullRequests(first:10) { totalCount nodes { id number } }
+        refs(first:100,refPrefix:"refs/") {
+          totalCount
+          nodes { id name prefix target { oid } }
+        }
+      }
+    }""" % (json.dumps(owner), json.dumps(name))
+    repository = (
+        TypeAdapter(_LiveResponse).validate_json(_graphql(query)).data.repository
+    )
+    issues = repository.issues.nodes
+    assert repository.issues.totalCount == 15
+    assert {issue.id for issue in issues} == expected_issues
+    assert repository.pullRequests.totalCount == 1
+    assert {obj.id for obj in repository.pullRequests.nodes} == expected_pr
+    for issue_number, body in (
+        (state.selected, state.selected_body),
+        (state.roadmap, state.roadmap_body),
+    ):
+        issue = next(obj for obj in issues if obj.number == issue_number)
+        assert issue.body == body, issue
+    parents = {
+        issue.number: issue.parent.number
+        for issue in issues
+        if issue.parent is not None
+    }
+    assert parents == {state.selected: state.roadmap, state.cycle_a: state.cycle_b}
+    comments: dict[str, _LiveComment] = {}
+    issue_nodes: dict[int, list[_LiveComment]] = {}
+    for issue in issues:
+        page = issue.comments
+        nodes = list(page.nodes)
+        while page.pageInfo.hasNextPage:
+            cursor = json.dumps(page.pageInfo.endCursor)
+            continuation = (
+                TypeAdapter(_LiveResponsePage)
+                .validate_json(
+                    _graphql(
+                        """query MoreComments {
+                      repository(owner:%s,name:%s) {
+                        issue(number:%d) {
+                          comments(first:100,after:%s) {
+                            totalCount
+                            nodes { id databaseId body url }
+                            pageInfo { hasNextPage endCursor }
+                          }
+                        }
+                      }
+                    }"""
+                        % (json.dumps(owner), json.dumps(name), issue.number, cursor)
+                    )
+                )
+                .data.repository.issue
+            )
+            page = continuation.comments
+            nodes.extend(page.nodes)
+        assert page.totalCount == len(nodes)
+        issue_nodes[issue.number] = nodes
+        for comment in nodes:
+            assert comment.id not in comments, comment
+            comments[comment.id] = comment
+    assert set(comments) == set(expected_comments)
+    assert all(
+        comments[identifier].body == body
+        for identifier, body in expected_comments.items()
+    )
+    ordered = issue_nodes[state.pagination]
+    assert [comment.body for comment in ordered] == state.pagination_comments
+    assert [comment.databaseId for comment in ordered] == state.pagination_ids
+    required_refs = {obj.id: obj for obj in repository.refs.nodes}
+    assert set(expected_refs) <= set(required_refs)
+    annotated = {
+        obj.target.oid
+        for obj in required_refs.values()
+        if obj.target.oid in expected_tags
+    }
+    assert annotated == expected_tags
+    return {
+        "verified": True,
+        "issues": 15,
+        "pull_requests": 1,
+        "initial_comments": 119,
+        "mutation_comments": len(expected_comments) - 119,
+        "comments": len(comments),
+        "ordered_comments": len(ordered),
+        "parent_links": len(parents),
+        "required_refs": len(expected_refs),
+        "annotated_tags": len(annotated),
+    }
 
 
 def _family_costs(root: Path) -> dict[str, dict[str, int | float]]:
