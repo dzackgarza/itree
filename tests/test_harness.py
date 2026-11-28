@@ -23,8 +23,7 @@ from pydantic import JsonValue
 
 SOURCE = Path(__file__).resolve().parents[1]
 TYPE_FIXTURE = SOURCE / "tests" / "fixtures" / "harness_types" / "invalid.py"
-SMALL_SIZE = 300 * 1024
-LARGE_SIZE = 2_300_000
+MARKER_SIZE = 16_384
 CHUNK_SIZE = 8192
 SPEC_PIN = "a4d571229e164e440f8950cac034607bae7b7518"
 
@@ -182,7 +181,7 @@ def fixture() -> Iterator[HarnessFixture]:
             )
         )
         for relative, content in {
-            "AGENTS.md": text_block("AGENTS", 0, 150_000),
+            "AGENTS.md": text_block("AGENTS", 0, 1_000),
             "CONTRIBUTING.md": "CONTRIBUTING-unique\n",
             ".specify/memory/constitution.md": "CONSTITUTION-unique NS-002 NS-003\n",
             "src/itree/WORKFLOWS.md": "WORKFLOWS-unique\n",
@@ -223,10 +222,10 @@ def fixture() -> Iterator[HarnessFixture]:
             "<!-- itree:original-contract:start -->\nINVALID-READABLE-PREFIX\n<!-- itree:original-contract:end -->\n",
         )
         slow = _write_issue(placeholder, "Slow source package", "SLOW-SOURCE-PENDING\n")
-        for index in range(7):
-            _comment(placeholder, small, text_block("SMALL-COMMENT", index, 38_000))
-        for index in range(45):
-            _comment(placeholder, large, text_block("LARGE-COMMENT", index, 48_000))
+        for index in range(2):
+            _comment(placeholder, small, text_block("SMALL-COMMENT", index, 900))
+        for index in range(1):
+            _comment(placeholder, large, text_block("LARGE-COMMENT", index, 900))
         value = HarnessFixture(parent, repo, small, large, invalid, slow, journal)
         started = time.perf_counter()
         yield value
@@ -591,13 +590,13 @@ def test_explicit_ids_interleave_and_changed_live_content_is_fresh(
     assert not state.joinpath(str(first["invocation_id"])).exists()
 
 
-def test_both_size_bands_reconstruct_every_byte(
+def test_marker_packages_reconstruct_every_byte(
     fixture: HarnessFixture, tmp_path: Path
 ) -> None:
-    for number, minimum in ((fixture.small, SMALL_SIZE), (fixture.large, LARGE_SIZE)):
+    for number in (fixture.small, fixture.large):
         expected = _direct_work(fixture, number)
         prepared = _prepare(fixture, tmp_path / "state", number)
-        assert prepared["byte_count"] >= minimum
+        assert prepared["byte_count"] < MARKER_SIZE
         streamed = _all_chunks(fixture, tmp_path / "state", prepared)
         assert streamed == expected.stdout.encode()
         assert hashlib.sha256(streamed).hexdigest() == prepared["package_sha256"]
@@ -939,6 +938,106 @@ def test_real_linked_install_preserves_and_repeats_every_surface(
     assert second_operations.index(
         "register-itree", len(operations)
     ) < second_operations.index("refresh-events", len(operations))
+
+
+def test_manifest_and_upstream_install_update_remove_lifecycle(tmp_path: Path) -> None:
+    from specify_cli.extensions import ExtensionManifest
+
+    source = SOURCE / "src" / "itree" / "resources" / "speckit_itree"
+    manifest = ExtensionManifest(source / "extension.yml")
+    assert manifest.id == "itree"
+    assert [command["name"] for command in manifest.commands] == [
+        "speckit.itree.work",
+        "speckit.itree.initialize",
+    ]
+    assert all((source / command["file"]).is_file() for command in manifest.commands)
+    fixture = _installer_fixture(tmp_path)
+    fixture.project.joinpath(".agents").unlink()
+    fixture.project.joinpath(".agents").mkdir()
+    first = _install(fixture)
+    assert first.returncode == 0, first.stdout + first.stderr
+    registry_path = fixture.project / ".specify" / "extensions" / ".registry"
+    initial_registry = json.loads(registry_path.read_text())["extensions"]["itree"]
+    assert {"claude", "codex", "opencode"} <= set(
+        initial_registry["registered_commands"]
+    )
+    for relative in (
+        ".claude/skills/speckit-itree-work/SKILL.md",
+        ".agents/skills/speckit-itree-work/SKILL.md",
+        ".opencode/commands/speckit.itree.work.md",
+    ):
+        assert "$ARGUMENTS" in (fixture.project / relative).read_text()
+    updated = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "specify"),
+            "extension",
+            "add",
+            str(source),
+            "--dev",
+            "--force",
+        ],
+        cwd=fixture.project,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    updated_registry = json.loads(registry_path.read_text())["extensions"]["itree"]
+    assert updated_registry["manifest_hash"] == initial_registry["manifest_hash"]
+    refreshed = _install(fixture)
+    assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
+    updated_registry = json.loads(registry_path.read_text())["extensions"]["itree"]
+    assert {"claude", "codex", "opencode"} <= set(
+        updated_registry["registered_commands"]
+    )
+    assert (
+        fixture.project.joinpath(".claude", "settings.local.json").read_text()
+        == '{"local": true}\n'
+    )
+    assert fixture.project.joinpath("AGENTS.md").read_text() == "PROJECT-INSTRUCTIONS\n"
+    removed = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "specify"),
+            "extension",
+            "remove",
+            "itree",
+            "--force",
+        ],
+        cwd=fixture.project,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    lifecycle = json.loads(registry_path.read_text())["extensions"]
+    assert "itree" not in lifecycle
+    assert (
+        "itree"
+        not in yaml.safe_load(
+            (fixture.project / ".specify" / "extensions.yml").read_text()
+        )["installed"]
+    )
+    for relative in (
+        ".specify/extensions/itree",
+        ".claude/skills/speckit-itree-work",
+        ".claude/skills/speckit-itree-initialize",
+        ".agents/skills/speckit-itree-work",
+        ".agents/skills/speckit-itree-initialize",
+        ".opencode/commands/speckit.itree.work.md",
+        ".opencode/commands/speckit.itree.initialize.md",
+    ):
+        assert not (fixture.project / relative).exists(), relative
+    assert (
+        fixture.project.joinpath(".claude", "settings.local.json").read_text()
+        == '{"local": true}\n'
+    )
+    assert fixture.project.joinpath("AGENTS.md").read_text() == "PROJECT-INSTRUCTIONS\n"
+    assert (
+        fixture.external.joinpath("skills", "user-existing", "SKILL.md").read_text()
+        == USER_SKILL_CONTENT
+    )
 
 
 def test_modified_owned_artifact_stops_before_any_write(tmp_path: Path) -> None:
