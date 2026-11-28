@@ -301,7 +301,9 @@ def _writer_runtime_seal(api: GithubApi) -> WriterSeal:
     endpoint = f"repos/{api.owner}/{api.repo}/actions/runs/{run_id}/jobs?per_page=100"
     response = api._exec("GET", endpoint)
     raw_jobs = json.loads(response.stdout)["jobs"]
-    jobs = TypeAdapter(tuple[ActionsJobMetadata, ...]).validate_python(raw_jobs)
+    jobs = TypeAdapter(tuple[ActionsJobMetadata, ...]).validate_json(
+        canonical_payload_bytes(raw_jobs), strict=True
+    )
     job = next(job for job in jobs if job.name == job_name)
     content = api.get_repository_content(
         ".github/workflows/itree-issue-writer.yml", job.head_sha
@@ -388,15 +390,28 @@ def _job_authority(
     workflow = base64.b64decode(content.content)
     permissions = yaml.safe_load(workflow)["permissions"]
     assert isinstance(permissions, dict), permissions
-    log_text = api.get_actions_job_log(seal.job_id)
+    step = next(
+        step
+        for step in job.steps
+        if step.name == "Record operation bindings"
+        and step.status == "completed"
+        and step.conclusion == "success"
+    )
+    log_text = api.get_actions_job_step_log(seal.job_id, step.number)
     for line in log_text.splitlines():
-        try:
-            candidate = json.loads(line)
-            if binding.model_dump(mode="json") == candidate:
-                matched = True
-                break
-        except json.JSONDecodeError, TypeError:
+        if '"operation_log_binding"' not in line:
             continue
+        start = line.find("{")
+        assert start >= 0, line
+        try:
+            candidate = OperationLogBinding.model_validate_json(
+                line[start:], strict=True
+            )
+        except ValidationError:
+            continue
+        if candidate == binding:
+            matched = True
+            break
     else:
         matched = False
     return WriterAuthorityEvidence(
@@ -2492,6 +2507,47 @@ def _regenerate_pending(issue: IssueRef, attempt: AttemptId) -> DrainReport | No
                 )
         return None
     return None
+
+
+def record_operation_bindings(
+    issue: IssueRef, expected_node: IssueNodeId | None
+) -> StageCommandResult:
+    api = GithubApi.from_issue_ref(issue)
+    live = _require_live_issue(api, issue, expected_node)
+    seal = _writer_runtime_seal(api)
+    node = require_issue_node(live)
+    records = _all_records(api, issue)
+    bindings: dict[tuple[RequestId, OperationId], OperationLogBinding] = {}
+    drain = _drain_binding(node, seal)
+    bindings[(drain.request_id, drain.operation_id)] = drain
+    candidates = (
+        *_proposal_models(records),
+        *_upload_models(records),
+        *_session_models(records),
+        *_release_models(records),
+    )
+    for candidate in candidates:
+        for operation_id in {
+            OperationId(candidate.request_id),
+            _operation(candidate.request_id),
+        }:
+            binding = OperationLogBinding(
+                operation_id=operation_id,
+                issue_node_id=node,
+                request_id=candidate.request_id,
+                attempt_id=candidate.attempt_id,
+                revision=seal.default_head_sha,
+                workflow_path=seal.workflow_path,
+                workflow_sha256=seal.workflow_sha256,
+            )
+            bindings[(candidate.request_id, operation_id)] = binding
+    return StageCommandResult(
+        exit_code=0,
+        lines=tuple(
+            canonical_payload_bytes(binding.model_dump(mode="json")).decode()
+            for _, binding in sorted(bindings.items())
+        ),
+    )
 
 
 def resume_stage(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:

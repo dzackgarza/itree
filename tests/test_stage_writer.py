@@ -280,6 +280,44 @@ def test_actions_workflow_serializes_nodes_with_least_required_permissions() -> 
     assert "uv run --locked itree stage drain" in jobs["write"]["steps"][-1]["run"]
 
 
+def test_operation_binding_step_precedes_drain_and_names_each_candidate(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-bind")
+    current_plan = feature.joinpath("plan.md").read_text()
+    feature.joinpath("plan.md").write_text(
+        current_plan.replace("Plan zero", "Plan bound before mutation")
+    )
+    submitted = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-bind",
+        "--feature-directory",
+        str(feature),
+    )
+    assert submitted.returncode == 5
+
+    recorded = fixture.run("stage", "record-bindings", ISSUE_REF, writer=True)
+
+    assert recorded.returncode == 0, recorded.stdout + recorded.stderr
+    bindings = [line for line in recorded.stdout.splitlines() if line.startswith("{")]
+    assert any(
+        '"operation_id":"operation-request-A-bind"' in line
+        and '"request_id":"request-A-bind"' in line
+        for line in bindings
+    )
+    workflow = yaml.safe_load(
+        Path(".github/workflows/itree-issue-writer.yml").read_text()
+    )
+    step_names = [step.get("name") for step in workflow["jobs"]["write"]["steps"]]
+    assert step_names.index("Record operation bindings") < step_names.index(
+        "Drain durable issue proposals"
+    )
+
+
 def test_missing_operation_log_binding_blocks_writer_mutation(tmp_path: Path) -> None:
     fixture = StageFixture(tmp_path / "fixture")
     fixture.state["job_logs"] = ['{"kind":"different-run-or-forged-proof"}']
@@ -303,8 +341,7 @@ def test_missing_operation_log_binding_blocks_writer_mutation(tmp_path: Path) ->
     )
 
     assert result.returncode == 4
-    assert "writer_seal_invalid" in result.stdout
-    assert "operation_log_binding" in result.stdout
+    assert "writer_seal_invalid:writer_identity_unavailable" in result.stdout
     assert fixture.patches() == []
 
 

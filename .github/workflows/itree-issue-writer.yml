@@ -52,6 +52,18 @@ jobs:
         printf ''%s\n'' "ITREE_STAGE_BARRIER_REQUEST=${{ inputs.barrier_request_id
         }}"; printf ''%s\n'' "ITREE_STAGE_BARRIER_CONTROL_REPO=${{ github.repository
         }}"; } >> "$GITHUB_ENV"'
+    - name: Record operation bindings
+      shell: bash
+      run: 'ISSUE_NODE_ID="${{ github.event.issue.node_id || inputs.issue_node_id
+        }}"
+
+        ISSUE_NUMBER="${{ github.event.issue.number || inputs.issue_number }}"
+
+        ISSUE_REF="${{ github.repository }}#${ISSUE_NUMBER}"
+
+        export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+        uv run --locked itree stage record-bindings "${ISSUE_REF}" --expected-node "${ISSUE_NODE_ID}"'
     - name: Drain durable issue proposals
       shell: bash
       run: 'ISSUE_NODE_ID="${{ github.event.issue.node_id || inputs.issue_node_id

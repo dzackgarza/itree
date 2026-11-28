@@ -124,6 +124,14 @@ def example_state(body: str) -> dict[str, JsonValue]:
             "html_url": f"https://github.com/{SLUG}/actions/runs/101/job/201",
             "run_url": f"https://github.com/{SLUG}/actions/runs/101",
             "labels": ["ubuntu-latest"],
+            "steps": [
+                {
+                    "name": "Record operation bindings",
+                    "number": 6,
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ],
         },
     }
 

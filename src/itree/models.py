@@ -1803,6 +1803,15 @@ class CollaboratorPermission(StageModel):
     role_name: str = Field(min_length=1)
 
 
+class ActionsStepMetadata(StageModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    name: str = Field(min_length=1)
+    number: int = Field(gt=0)
+    status: Literal["queued", "in_progress", "completed"]
+    conclusion: Literal["success", "failure", "cancelled", "skipped"] | None
+
+
 class ActionsJobMetadata(StageModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
@@ -1815,6 +1824,7 @@ class ActionsJobMetadata(StageModel):
     head_branch: str = Field(min_length=1)
     html_url: str = Field(min_length=1)
     run_url: str = Field(min_length=1)
+    steps: tuple[ActionsStepMetadata, ...]
 
 
 class StageHttpApplied(StageModel):

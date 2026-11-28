@@ -155,7 +155,7 @@ with lock_path.open("a+b") as lock:
         content = Path(os.environ["ITREE_WORKFLOW_SOURCE"]).read_bytes()
         sys.stdout.write(json.dumps({"type": "file", "path": ".github/workflows/itree-issue-writer.yml", "encoding": "base64", "content": base64.b64encode(content).decode(), "sha": state["writer"]["workflow_blob"]}))
         sys.exit(0)
-    if "/actions/jobs/" in bare_path and bare_path.endswith("/logs"):
+    if "/actions/jobs/" in bare_path and "/logs" in bare_path:
         sys.stdout.write("\n".join(state.get("job_logs", [])) + "\n")
         sys.exit(0)
     if "/actions/jobs/" in bare_path:

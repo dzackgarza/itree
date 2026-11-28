@@ -1328,6 +1328,14 @@ def stage_drain(
     return drain_stage(issue, expected_node)
 
 
+def stage_record_bindings(
+    issue: IssueRef, expected_node: IssueNodeId | None
+) -> StageCommandResult:
+    from .stage_writer import record_operation_bindings
+
+    return record_operation_bindings(issue, expected_node)
+
+
 UploadProposal = (
     SectionEditProposal
     | LegacyIntakeProposal

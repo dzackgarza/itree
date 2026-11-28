@@ -71,6 +71,7 @@ from .stage import (
     StageCommandResult,
     stage_drain,
     stage_materialize,
+    stage_record_bindings,
     stage_resume,
     stage_write_back,
 )
@@ -168,6 +169,19 @@ def resume(
 ) -> None:
     """Reconcile one attempt from live GitHub records."""
     _stage_result(stage_resume(parse_ref(issue), AttemptId(attempt)))
+
+
+@stage_app.command(name="record-bindings")
+def record_bindings(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    expected_node: Annotated[
+        str | None, Parameter(help="Require the live issue node ID to equal this value")
+    ] = None,
+) -> None:
+    """Record candidate operation identities for the actual workflow job log."""
+    node = None if expected_node is None else IssueNodeId(expected_node)
+    _stage_result(stage_record_bindings(parse_ref(issue), node))
 
 
 @stage_app.command
