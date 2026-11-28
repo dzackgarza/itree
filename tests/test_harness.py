@@ -641,6 +641,34 @@ def test_read_and_usage_failures_preserve_public_process_semantics(
     assert malformed.stdout == ""
 
 
+def test_prepare_emits_only_bounded_metadata_before_chunks(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    environment = {**os.environ, "ITREE_HARNESS_WORK_ROOT": str(state)}
+    result = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "itree"),
+            "harness-work",
+            "prepare",
+            "dzackgarza/itree#68",
+            "--deadline-ms",
+            "180000",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stderr
+    invocation = json.loads(result.stdout)["invocation_id"]
+    cleaned = subprocess.run(
+        ["trash", str(state / invocation)], capture_output=True, check=False, timeout=30
+    )
+    assert cleaned.returncode == 0
+    assert len(result.stdout.encode()) < 20_000
+    assert "Work package complete" not in result.stdout
+
+
 def test_invalid_deadline_is_a_usage_failure(tmp_path: Path) -> None:
     environment = {**os.environ, "ITREE_HARNESS_WORK_ROOT": str(tmp_path / "state")}
     result = subprocess.run(
