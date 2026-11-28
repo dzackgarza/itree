@@ -1293,9 +1293,6 @@ class CommentHistory(StageModel):
     created_at: str = Field(min_length=1)
     updated_at: str = Field(min_length=1)
     last_edited_at: str | None
-    last_editor: str | None
-    edit_count: int = Field(ge=0)
-    history_exhausted: bool
 
 
 class SubmissionSeal(StageModel):

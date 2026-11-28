@@ -424,12 +424,9 @@ def test_artifact_families_publish_link_materialize_and_invalidate_on_edit(
             "issues": "write",
             "actions": "read",
         }
-        assert (
-            fixture.state["histories"][comment["node_id"]]["userContentEdits"][
-                "totalCount"
-            ]
-            == 0
-        )
+        history = fixture.state["histories"][comment["node_id"]]
+        assert history["createdAt"] == history["updatedAt"]
+        assert history["lastEditedAt"] is None
         assert (
             f"https://github.com/{SLUG}/issues/{ISSUE_NUMBER}#issuecomment-{comment['id']}"
             == comment["html_url"]

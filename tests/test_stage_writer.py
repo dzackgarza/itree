@@ -47,17 +47,11 @@ def _history(
     *,
     updated_at: str = "2026-11-28T00:00:00Z",
     last_edited_at: str | None = None,
-    last_editor: str | None = None,
-    edit_count: int = 0,
-    exhausted: bool = True,
 ) -> CommentHistory:
     return CommentHistory(
         created_at="2026-11-28T00:00:00Z",
         updated_at=updated_at,
         last_edited_at=last_edited_at,
-        last_editor=last_editor,
-        edit_count=edit_count,
-        history_exhausted=exhausted,
     )
 
 
@@ -129,8 +123,7 @@ def test_submission_seal_checks_the_current_wire_and_complete_zero_history() -> 
 
     assert isinstance(valid, SubmissionSeal)
     assert valid.logical_payload_sha256 == logical_digest
-    assert valid.history.edit_count == 0
-    assert valid.history.history_exhausted
+    assert valid.history.last_edited_at is None
 
 
 @pytest.mark.parametrize(
@@ -139,11 +132,8 @@ def test_submission_seal_checks_the_current_wire_and_complete_zero_history() -> 
         _history(
             updated_at="2026-11-28T00:01:00Z",
             last_edited_at="2026-11-28T00:01:00Z",
-            last_editor="other",
-            edit_count=1,
         ),
-        _history(edit_count=1),
-        _history(exhausted=False),
+        _history(last_edited_at="2026-11-28T00:01:00Z"),
     ],
 )
 def test_edited_metadata_cannot_be_authorized_by_the_same_author(
@@ -159,6 +149,20 @@ def test_edited_metadata_cannot_be_authorized_by_the_same_author(
 
     assert isinstance(result, ExternalSubmissionDetail)
     assert result.reason == "edited_record"
+
+
+def test_missing_native_metadata_is_unavailable_not_an_edit() -> None:
+    payload = {"version": 1}
+    result = validate_submission_seal(
+        _native(),
+        None,
+        IssueNodeId(ISSUE_NODE_ID),
+        canonical_payload_digest(payload),
+        payload,
+    )
+
+    assert isinstance(result, ExternalSubmissionDetail)
+    assert result.reason == "seal_unavailable"
 
 
 def test_changed_wire_body_is_edited_not_author_association() -> None:

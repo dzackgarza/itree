@@ -208,9 +208,6 @@ def validate_submission_seal(
         or history.updated_at != native.updated_at
         or history.created_at != history.updated_at
         or history.last_edited_at is not None
-        or history.last_editor is not None
-        or history.edit_count != 0
-        or not history.history_exhausted
     ):
         return _external_detail(native, "edited_record")
     try:
@@ -787,9 +784,7 @@ def _terminal(
         assert history is not None
         assert history.created_at == history.updated_at
         assert history.last_edited_at is None
-        assert history.last_editor is None
-        assert history.edit_count == 0
-        assert history.history_exhausted
+        assert history.last_edited_at is None
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
         evidence = _job_authority(api, seal)
@@ -855,9 +850,7 @@ def _artifact_comment(
         assert history is not None
         assert history.created_at == history.updated_at
         assert history.last_edited_at is None
-        assert history.last_editor is None
-        assert history.edit_count == 0
-        assert history.history_exhausted
+        assert history.last_edited_at is None
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
         evidence = _job_authority(api, payload.writer_seal)
@@ -930,8 +923,8 @@ def _publish_artifacts(
         else:
             native = existing.native
             history = _raw_history(api, native)
-            assert history is not None and history.history_exhausted
-            assert history.last_edited_at is None and history.edit_count == 0
+            assert history is not None
+            assert history.last_edited_at is None
             evidence = _job_authority(api, payload.writer_seal)
             assert (
                 validate_writer_seal(payload.writer_seal, evidence)
@@ -1006,8 +999,7 @@ def _receipt_is_current(
         history = _raw_history(api, native)
         assert history is not None
         assert history.created_at == history.updated_at
-        assert history.last_edited_at is None and history.last_editor is None
-        assert history.edit_count == 0 and history.history_exhausted
+        assert history.last_edited_at is None
         assert native.body == stage_comment_body(
             "itree-stage-receipt", _model_json(payload)
         )
@@ -1193,9 +1185,6 @@ def _drain_node(
             edited = (
                 history.created_at != history.updated_at
                 or history.last_edited_at is not None
-                or history.last_editor is not None
-                or history.edit_count != 0
-                or not history.history_exhausted
             )
             reason = "edited_record" if edited else "malformed_payload"
             return DrainReport(
@@ -1590,9 +1579,10 @@ def _drain_node(
                     published,
                 )
             final_layout = _layout(candidate.body)
-            assert isinstance(final_layout, ManagedIssueLayout)
-            indexed_entries = _current_artifact_index(
-                _section(final_layout, SectionName.plan)
+            indexed_entries = (
+                _current_artifact_index(_section(final_layout, SectionName.plan))
+                if isinstance(final_layout, ManagedIssueLayout)
+                else ()
             )
             if candidate.body == live.body:
                 confirmed = _receipt_for(

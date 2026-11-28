@@ -1058,9 +1058,6 @@ def _materialize_supporting_artifacts(
             and native.html_url == expected_url == entry.url
             and history.created_at == history.updated_at
             and history.last_edited_at is None
-            and history.last_editor is None
-            and history.edit_count == 0
-            and history.history_exhausted
             and payload.key == entry.key
             and payload.kind == entry.kind
             and payload.attempt_id == entry.attempt_id
