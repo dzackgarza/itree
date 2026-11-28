@@ -16,7 +16,11 @@ from itree.models import (
     SessionReleaseRequest,
     StageModel,
 )
-from itree.stage import artifact_upload_contents, build_upload_manifest
+from itree.stage import (
+    artifact_upload_contents,
+    build_upload_manifest,
+    make_upload_parts,
+)
 from itree.stage import sha256_text
 from itree.stage_writer import stage_comment_body
 from tests.stage_support import ISSUE_REF, ISSUE_NUMBER, SLUG, StageFixture
@@ -500,3 +504,110 @@ def test_pending_upload_blocks_session_release_and_any_body_effect(
     assert "release_blocked" in result.stdout
     assert "session_released" not in result.stdout
     assert fixture.patches() == []
+
+
+def test_same_second_tampering_is_rejected_from_public_edit_history(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature = _prepare_changed_plan(fixture, "A-tamper")
+    submitted = _write(fixture, "A-tamper", feature, writer=False)
+    assert submitted.returncode == 5
+    fixture.load()
+    proposal = next(
+        comment
+        for comment in fixture.state["comments"]
+        if comment["body"].startswith("```itree-stage-edit")
+        and '"request_kind":"sections"' in comment["body"]
+    )
+    proposal["body"] = proposal["body"].replace(
+        "Plan recovered β", "Plan same-second tampered β"
+    )
+    proposal["updated_at"] = proposal["created_at"]
+    fixture.state["histories"][proposal["node_id"]]["userContentEdits"][
+        "totalCount"
+    ] = 1
+    fixture.save()
+
+    result = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+
+    assert result.returncode == 4
+    assert "edited_record" in result.stdout
+    assert not any(
+        '"status":"intended"' in comment["body"]
+        for comment in fixture.state["comments"]
+    )
+    assert fixture.patches() == []
+    assert "Plan same-second tampered β" not in fixture.issue_body()
+
+
+def test_direct_proposal_cannot_bypass_older_pending_manifest(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("session-order")
+    admitted = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "session-order",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+    body = fixture.issue_body()
+    manifest_proposal = ArtifactProposal(
+        version=1,
+        request_kind="artifacts",
+        issue_node_id="I_stage_node_71",
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id="older-manifest",
+        attempt_id="session-order",
+        session_id="session-session-order",
+        base_body_sha256=sha256_text(body),
+        base_body=body,
+        artifacts=(
+            ArtifactDraft(
+                key="older-research", kind="research", content="Older research\n"
+            ),
+            ArtifactDraft(
+                key="older-evidence", kind="evidence", content="Older evidence\n"
+            ),
+        ),
+    )
+    manifest = build_upload_manifest(
+        manifest_proposal, artifact_upload_contents(manifest_proposal)
+    )
+    parts = make_upload_parts(manifest, artifact_upload_contents(manifest_proposal))
+    _post_model(fixture, "itree-stage-upload-manifest", manifest)
+    _post_model(fixture, "itree-stage-upload-part", parts[0])
+    later_feature, _ = fixture.materialize("A-order")
+    later_feature.joinpath("plan.md").write_text(
+        'Later direct plan\n```itree-contract\nkind = "audit"\nevidence = "narrows"\n```\n'
+    )
+
+    blocked = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-order",
+        "--feature-directory",
+        str(later_feature),
+        writer=True,
+    )
+    assert blocked.returncode == 5
+    assert "pending_upload" in blocked.stdout
+    assert fixture.patches() == []
+
+    _post_model(fixture, "itree-stage-upload-part", parts[1])
+    _post_model(fixture, "itree-stage-upload-part", parts[2])
+    recovered = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert len(fixture.patches()) == 2
+    assert "older-research" in fixture.issue_body()
+    assert "older-evidence" in fixture.issue_body()
+    assert "Later direct plan" in fixture.issue_body()
+    replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert replay.returncode == 0
+    assert len(fixture.patches()) == 2

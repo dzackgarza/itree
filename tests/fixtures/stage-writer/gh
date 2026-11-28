@@ -101,6 +101,7 @@ with lock_path.open("a+b") as lock:
             "updatedAt": timestamp,
             "lastEditedAt": None,
             "editor": None,
+            "userContentEdits": {"totalCount": 0, "nodes": []},
         }
         state_path.write_text(json.dumps(state))
         response = json.dumps(comment)
