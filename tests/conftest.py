@@ -245,6 +245,7 @@ def pytest_runtest_call(item: pytest.Item) -> Generator[None, None, None]:
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not _worker(session):
         root: Path = _controller_root(session.config)
+        root.mkdir(parents=True, exist_ok=True)
         if not root.joinpath("owns-state").exists():
             root.joinpath("cleanup-blocked").write_text(
                 "No controller-owned complete fixture; no automatic cleanup."
