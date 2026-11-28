@@ -1,14 +1,3 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#   "cyclopts>=2.0",
-#   "networkx>=3.0",
-#   "markdown-it-py[linkify]",
-#   "pydantic>=2.0",
-# ]
-# ///
-
 from __future__ import annotations
 
 import importlib.resources
@@ -52,6 +41,7 @@ from .metrics import (
 from .milestone import execute_milestone, preflight_milestone
 from .models import (
     AssignedPriorMilestone,
+    AttemptId,
     AttachRequest,
     CreateMilestoneRequest,
     DetachRequest,
@@ -59,6 +49,7 @@ from .models import (
     FindingSeverity,
     GithubIssue,
     IssueCloseReason,
+    IssueNodeId,
     IssueRef,
     MilestoneCreationFailed,
     MilestonePreflightRejected,
@@ -76,6 +67,13 @@ from .models import (
 from .render import prune_closed, render_scan, render_tree, shape_summary
 from .traversal import build_dag
 from .readiness import issue_label
+from .stage import (
+    StageCommandResult,
+    stage_drain,
+    stage_materialize,
+    stage_resume,
+    stage_write_back,
+)
 from .validate import (
     DIAGNOSTIC_CATALOG,
     RoutedOwnerResolver,
@@ -121,6 +119,68 @@ Use `itree doctor --explain CODE` for detailed remediation of a diagnostic.""",
 )
 harness_work_app = App(name="harness-work", help="Transport one live work package.")
 app.command(harness_work_app)
+stage_app = App(name="stage", help="Materialize and reconcile one issue-owned stage.")
+app.command(stage_app)
+
+
+def _stage_result(result: StageCommandResult) -> None:
+    for line in result.lines:
+        print(line)
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
+
+
+@stage_app.command
+def materialize(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    attempt: Annotated[str, Parameter(help="Stage attempt identifier")],
+) -> None:
+    """Materialize one selected issue into private scratch storage."""
+    _stage_result(stage_materialize(parse_ref(issue), AttemptId(attempt)))
+
+
+@stage_app.command(name="write-back")
+def write_back(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    attempt: Annotated[str, Parameter(help="Stage attempt identifier")],
+    feature_directory: Annotated[
+        Path, Parameter(help="Absolute private materialization directory")
+    ],
+    managed_intake: Annotated[
+        bool, Parameter(help="Atomically introduce the four managed section pairs")
+    ] = False,
+) -> None:
+    """Submit disposable scratch content through the issue writer."""
+    _stage_result(
+        stage_write_back(
+            parse_ref(issue), AttemptId(attempt), feature_directory, managed_intake
+        )
+    )
+
+
+@stage_app.command
+def resume(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    attempt: Annotated[str, Parameter(help="Stage attempt identifier")],
+) -> None:
+    """Reconcile one attempt from live GitHub records."""
+    _stage_result(stage_resume(parse_ref(issue), AttemptId(attempt)))
+
+
+@stage_app.command
+def drain(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    expected_node: Annotated[
+        str | None, Parameter(help="Require the live issue node ID to equal this value")
+    ] = None,
+) -> None:
+    """Drain every durable proposal for the selected issue node."""
+    node = None if expected_node is None else IssueNodeId(expected_node)
+    _stage_result(stage_drain(parse_ref(issue), node))
 
 
 def _harness_work_result(result: CommandResult) -> None:
