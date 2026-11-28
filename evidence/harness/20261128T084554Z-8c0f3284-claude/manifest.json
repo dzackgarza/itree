@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "run_id": "20261128T084554Z-8c0f3284-claude",
+  "code_revision": "81826b7d6545e6327356d5e1349c03d9c3c83a42",
+  "upstream_revision": "a4d571229e164e440f8950cac034607bae7b7518",
+  "harness": {
+    "name": "claude",
+    "executable": "claude",
+    "cli_version": "2.1.332 (Claude Code)",
+    "model_provider": "unavailable",
+    "native_session_ids": [
+      "589e16ba-dc88-43d8-996d-d0ad63740878"
+    ]
+  },
+  "environment": {
+    "python": "3.14.7",
+    "node": "v25.8.2",
+    "operating_system": "Linux-7.3.6-zen1-1-zen-x86_64-with-glibc2.44",
+    "uv": "uv 0.12.5 (x86_64-unknown-linux-gnu)",
+    "pythonpath": null,
+    "live_harness_enabled": true,
+    "provider_capture_enabled": false
+  },
+  "invocations": [],
+  "artifacts": [
+    {
+      "invocation_id": "39ece845f6c4d9fb523ebcbf81bc9886",
+      "kind": "emission-record",
+      "ordinal": 0,
+      "path": "emission/native.jsonl",
+      "media_type": "application/x-ndjson",
+      "byte_count": 11951,
+      "sha256": "843a48c47f68a9a85f2547cc45a1b6b21aa16ff6e806b2bdc8a0ff68236d013c"
+    }
+  ],
+  "comparisons": [],
+  "install_outcome": null,
+  "processes": [
+    {
+      "status": "exited",
+      "native_deadline_ms": 180000,
+      "external_elapsed_seconds": 21.88409407499421,
+      "signals": [],
+      "terminate_wait_seconds": null,
+      "kill_wait_seconds": null,
+      "reaped": true,
+      "leader_returncode": 1,
+      "remaining_children": []
+    }
+  ],
+  "evidence_level": "unaccepted",
+  "acceptance": "unaccepted",
+  "manifest_sha256": "c9f3d99234b7ca1b1e8419081033fd541522637fe50eb8c759ae3a3f37358fd4"
+}

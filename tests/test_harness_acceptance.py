@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import yaml
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from itree.harness import (
     EnvironmentIdentity,
     EvidenceManifest,
     HarnessIdentity,
+    InstallOutcome,
     InvocationRecord,
     LiveAcceptanceConfig,
     ProviderComparisonRecord,
@@ -43,6 +45,7 @@ from tests.test_harness import (
     HarnessFixture,
     _install,
     _installer_fixture,
+    _snapshot,
 )
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -108,18 +111,24 @@ def _opt_ins() -> LiveAcceptanceConfig | AcceptanceDisabled:
     )
 
 
-def _text_leaves(value: JsonValue) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [leaf for item in value for leaf in _text_leaves(item)]
+def _append_json_document(value: JsonValue, documents: list[JsonValue]) -> None:
+    documents.append(value)
     if isinstance(value, dict):
-        return [leaf for item in value.values() for leaf in _text_leaves(item)]
-    return []
+        for child in value.values():
+            _append_json_document(child, documents)
+    elif isinstance(value, list):
+        for child in value:
+            _append_json_document(child, documents)
+    elif isinstance(value, str) and value.startswith(("{", "[")):
+        try:
+            nested = json.loads(value)
+        except ValueError:
+            return
+        _append_json_document(nested, documents)
 
 
 def _json_documents(raw: str) -> list[JsonValue]:
-    candidates: list[JsonValue] = []
+    documents: list[JsonValue] = []
     for line in raw.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -128,15 +137,8 @@ def _json_documents(raw: str) -> list[JsonValue]:
             outer = TypeAdapter(JsonValue).validate_json(stripped)
         except ValueError:
             continue
-        candidates.append(outer)
-        for text in _text_leaves(outer):
-            if not text.startswith(("{", "[")):
-                continue
-            try:
-                candidates.append(TypeAdapter(JsonValue).validate_json(text))
-            except ValueError:
-                continue
-    return candidates
+        _append_json_document(outer, documents)
+    return documents
 
 
 def _observations(
@@ -149,18 +151,40 @@ def _observations(
     prepared: dict[str, PreparedObservation] = {}
     chunks: dict[str, list[ChunkObservation]] = {}
     receipts: list[ReceiptObservation] = []
-    for document in _json_documents(path.read_text(errors="replace")):
-        if not isinstance(document, dict) or "kind" not in document:
+    for raw in path.read_text(errors="replace").splitlines():
+        operation = json.loads(raw)
+        if not isinstance(operation, dict) or not isinstance(
+            operation.get("stdout"), str
+        ):
             continue
-        kind = document["kind"]
-        if kind == "prepared":
-            observation = PreparedObservation.model_validate(document)
-            prepared[observation.invocation_id] = observation
-        elif kind == "chunk":
-            observation = ChunkObservation.model_validate(document)
-            chunks.setdefault(observation.invocation_id, []).append(observation)
-        elif kind == "emission-receipt":
-            receipts.append(ReceiptObservation.model_validate(document))
+        for event in operation["stdout"].splitlines():
+            part = json.loads(event)["part"]
+            state = part.get("state", {})
+            payloads = [state.get("output")]
+            content = state.get("metadata", {}).get("content", [])
+            payloads.extend(
+                item.get("text") for item in content if isinstance(item, dict)
+            )
+            for text in payloads:
+                if not isinstance(text, str) or not text.startswith('{"kind"'):
+                    continue
+                document = json.loads(text)
+                kind = document["kind"]
+                if kind == "prepared":
+                    observation = PreparedObservation.model_validate(document)
+                    prepared[observation.invocation_id] = observation
+                elif kind == "chunk":
+                    observation = ChunkObservation.model_validate(document)
+                    existing = chunks.setdefault(observation.invocation_id, [])
+                    if observation.index not in {chunk.index for chunk in existing}:
+                        existing.append(observation)
+                elif kind == "emission-receipt":
+                    observation = ReceiptObservation.model_validate(document)
+                    if all(
+                        receipt.invocation_id != observation.invocation_id
+                        for receipt in receipts
+                    ):
+                        receipts.append(observation)
     return prepared, chunks, receipts
 
 
@@ -469,7 +493,10 @@ def _watchdog_outcomes(path: Path) -> tuple[WatchdogOutcome, ...]:
 
 
 def _persist_run(
-    run: NativeRun, code_revision: str, environment: LiveAcceptanceConfig
+    run: NativeRun,
+    code_revision: str,
+    environment: LiveAcceptanceConfig,
+    install_outcome: InstallOutcome | None = None,
 ) -> EvidenceManifest:
     root = run.output.parents[1]
     prepared, chunk_records, receipts = _observations(run.output)
@@ -581,6 +608,20 @@ def _persist_run(
         for ordinal, request in enumerate(run.provider_requests)
     ]
     artifacts.extend(provider_artifacts)
+    install_owner = (
+        InvocationId(next(iter(prepared))) if prepared else InvocationId.generate()
+    )
+    for index, path in enumerate(sorted((root / "install").glob("*.json"))):
+        artifacts.append(
+            _descriptor(
+                install_owner,
+                "install-record",
+                index,
+                path,
+                root,
+                "application/json",
+            )
+        )
     complete_sources = len(invocations) == len(prepared) == 1
     payload_matched = (
         bool(provider_artifacts)
@@ -629,7 +670,7 @@ def _persist_run(
         invocations=tuple(invocations),
         artifacts=tuple(artifacts),
         comparisons=tuple(comparisons),
-        install_outcome=None,
+        install_outcome=install_outcome,
         processes=_watchdog_outcomes(run.output),
         evidence_level=level,
         acceptance=acceptance,
@@ -637,6 +678,145 @@ def _persist_run(
     )
     write_sealed_manifest(root, manifest)
     return manifest
+
+
+def _installation_lifecycle(
+    installer: InstallerFixture, evidence: Path, harness: str
+) -> InstallOutcome:
+    update_output = evidence / "install" / "update-and-remove.json"
+    update_output.parent.mkdir(parents=True, exist_ok=True)
+    extension = SOURCE / "src" / "itree" / "resources" / "speckit_itree"
+    before_project = _snapshot(installer.project)
+    before_external = _snapshot(installer.external)
+    updated = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "specify"),
+            "extension",
+            "add",
+            str(extension),
+            "--dev",
+            "--force",
+        ],
+        cwd=installer.project,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    refreshed = _install(installer)
+    assert refreshed.returncode == 0, refreshed.stdout + refreshed.stderr
+    refreshed_outcome = json.loads(refreshed.stdout)["outcome"]
+    updated_registry = (
+        installer.project / ".specify" / "extensions" / ".registry"
+    ).read_text()
+    removed = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "specify"),
+            "extension",
+            "remove",
+            "itree",
+            "--force",
+        ],
+        cwd=installer.project,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    registry_after = json.loads(
+        (installer.project / ".specify" / "extensions" / ".registry").read_text()
+    )
+    assert "itree" not in registry_after["extensions"]
+    installed_after = yaml.safe_load(
+        (installer.project / ".specify" / "extensions.yml").read_text()
+    )["installed"]
+    assert "itree" not in installed_after
+    removed_paths = (
+        ".specify/extensions/itree",
+        ".claude/skills/speckit-itree-work",
+        ".claude/skills/speckit-itree-initialize",
+        ".agents/skills/speckit-itree-work",
+        ".agents/skills/speckit-itree-initialize",
+        ".opencode/commands/speckit.itree.work.md",
+        ".opencode/commands/speckit.itree.initialize.md",
+    )
+    for relative in removed_paths:
+        assert not (installer.project / relative).exists(), relative
+    assert (
+        installer.project.joinpath("AGENTS.md").read_text() == "PROJECT-INSTRUCTIONS\n"
+    )
+    assert (
+        installer.project.joinpath("CLAUDE.md").read_text() == "CLAUDE-INSTRUCTIONS\n"
+    )
+    assert (
+        installer.project.joinpath(".claude", "settings.local.json").read_text()
+        == '{"local": true}\n'
+    )
+    assert installer.project.joinpath(".agents").is_symlink()
+    assert os.readlink(installer.project / ".agents") == str(installer.external)
+    after_project = _snapshot(installer.project)
+    after_external = _snapshot(installer.external)
+    preserved_before = {
+        path: value
+        for path, value in before_external.items()
+        if value[0] in {"file", "symlink"}
+    }
+    preserved_after = {
+        path: value
+        for path, value in after_external.items()
+        if value[0] in {"file", "symlink"}
+    }
+    removed_external = tuple(
+        source.removeprefix(".agents/")
+        for source in removed_paths
+        if source.startswith(".agents/")
+    )
+    for relative in removed_external:
+        preserved_before = {
+            path: value
+            for path, value in preserved_before.items()
+            if path != relative and not path.startswith(relative + "/")
+        }
+        preserved_after = {
+            path: value
+            for path, value in preserved_after.items()
+            if path != relative and not path.startswith(relative + "/")
+        }
+    assert preserved_before == preserved_after, {
+        "external_differences": {
+            path: (preserved_before.get(path), preserved_after.get(path))
+            for path in sorted(set(preserved_before) | set(preserved_after))
+            if preserved_before.get(path) != preserved_after.get(path)
+        }
+    }
+    evidence_record = {
+        "harness": harness,
+        "before_project": before_project,
+        "before_external": before_external,
+        "update": {
+            "exit": updated.returncode,
+            "stdout": updated.stdout,
+            "stderr": updated.stderr,
+        },
+        "refresh": {"exit": refreshed.returncode, "outcome": refreshed_outcome},
+        "registry_after_refresh": json.loads(updated_registry),
+        "remove": {
+            "exit": removed.returncode,
+            "stdout": removed.stdout,
+            "stderr": removed.stderr,
+        },
+        "registry_after_remove": registry_after,
+        "after_project": after_project,
+        "after_external": after_external,
+        "preserved_external_unrelated": preserved_after,
+        "removed_entries_satisfied": True,
+    }
+    update_output.write_text(
+        json.dumps(evidence_record, indent=2, sort_keys=True) + "\n"
+    )
+    return InstallOutcome.model_validate(refreshed_outcome)
 
 
 def test_real_native_harness_acceptance(
@@ -660,7 +840,8 @@ def test_real_native_harness_acceptance(
         destination = SOURCE / "evidence" / "harness" / run_id
         destination.parent.mkdir(parents=True, exist_ok=True)
         run = _run_native(fixture, installer, harness, destination)
-        manifest = _persist_run(run, revision, config)
+        install_outcome = _installation_lifecycle(installer, destination, harness)
+        manifest = _persist_run(run, revision, config, install_outcome)
         results[harness] = manifest.acceptance
     assert set(results) == {"claude", "codex", "opencode"}
     assert all(

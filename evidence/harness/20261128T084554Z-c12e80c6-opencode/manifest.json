@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "run_id": "20261128T084554Z-c12e80c6-opencode",
+  "code_revision": "81826b7d6545e6327356d5e1349c03d9c3c83a42",
+  "upstream_revision": "a4d571229e164e440f8950cac034607bae7b7518",
+  "harness": {
+    "name": "opencode",
+    "executable": "opencode",
+    "cli_version": "opencode v2.4.2",
+    "model_provider": "unavailable",
+    "native_session_ids": [
+      "ses_ddea9d294ffeXF7N1MWd2t1vR2"
+    ]
+  },
+  "environment": {
+    "python": "3.14.7",
+    "node": "v25.8.2",
+    "operating_system": "Linux-7.3.6-zen1-1-zen-x86_64-with-glibc2.44",
+    "uv": "uv 0.12.5 (x86_64-unknown-linux-gnu)",
+    "pythonpath": null,
+    "live_harness_enabled": true,
+    "provider_capture_enabled": false
+  },
+  "invocations": [
+    {
+      "invocation_id": "b7c6730ed34dbf12155df0f82c994cf4",
+      "issue_ref": "dzackgarza/itree-harness-1795855532077996906#1",
+      "package_sha256": "933b0a5429a22df8af4c90962069784a61f86b12bad1f2fa5338f6322f23da7f",
+      "package_bytes": 11530,
+      "first_chunk_index": 0,
+      "last_chunk_index": 1,
+      "distribution_launcher": "/home/dzack/Dropbox/gitclones/itree/.venv/bin/itree",
+      "process_outcome": "exited",
+      "wall_seconds": 2.742516700993292
+    }
+  ],
+  "artifacts": [
+    {
+      "invocation_id": "b7c6730ed34dbf12155df0f82c994cf4",
+      "kind": "emission-record",
+      "ordinal": 0,
+      "path": "emission/native.jsonl",
+      "media_type": "application/x-ndjson",
+      "byte_count": 161163,
+      "sha256": "4a00418be135920746a1844df7069aea1ebf8e00169ff4563789a6eba327b4ea"
+    },
+    {
+      "invocation_id": "b7c6730ed34dbf12155df0f82c994cf4",
+      "kind": "source-chunk",
+      "ordinal": 0,
+      "path": "source-chunks/b7c6730ed34dbf12155df0f82c994cf4/000000.md",
+      "media_type": "text/markdown",
+      "byte_count": 8191,
+      "sha256": "60d18ef8c7e123e3e5af23acff7f74a1b0eda3840dee121b6f7800b5f3518dd1"
+    },
+    {
+      "invocation_id": "b7c6730ed34dbf12155df0f82c994cf4",
+      "kind": "source-chunk",
+      "ordinal": 1,
+      "path": "source-chunks/b7c6730ed34dbf12155df0f82c994cf4/000001.md",
+      "media_type": "text/markdown",
+      "byte_count": 3339,
+      "sha256": "bdfd0228799d4952673a408928ab63c71bc572502b9ddba323568680b4a89aa9"
+    }
+  ],
+  "comparisons": [],
+  "install_outcome": null,
+  "processes": [
+    {
+      "status": "exited",
+      "native_deadline_ms": 180000,
+      "external_elapsed_seconds": 28.521851698009414,
+      "signals": [],
+      "terminate_wait_seconds": null,
+      "kill_wait_seconds": null,
+      "reaped": true,
+      "leader_returncode": 0,
+      "remaining_children": []
+    },
+    {
+      "status": "exited",
+      "native_deadline_ms": 180000,
+      "external_elapsed_seconds": 165.03477743400435,
+      "signals": [],
+      "terminate_wait_seconds": null,
+      "kill_wait_seconds": null,
+      "reaped": true,
+      "leader_returncode": 0,
+      "remaining_children": []
+    }
+  ],
+  "evidence_level": "emission-only",
+  "acceptance": "emission-only",
+  "manifest_sha256": "f44681e04991b45e7ba4de5177da21613370169758d6c2fa3741d3d2a9078b1a"
+}

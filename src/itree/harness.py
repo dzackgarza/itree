@@ -891,14 +891,18 @@ def _operation(
         case "merge-codex-core":
             return _sync_codex_core(staging, project)
         case "select-codex":
+            codex_staging = staging / "codex"
             failure = _run_checked(
-                (str(launcher), "integration", "use", "codex"), project
+                (str(launcher), "integration", "use", "codex"), codex_staging
             )
             if failure is not None:
                 return failure
-            source = (
-                staging / "codex" / ".specify" / "integrations" / "codex.manifest.json"
-            )
+            source_state = _read_state(codex_staging)
+            real_state = _read_state(project)
+            real_state.integration = source_state.integration
+            real_state.default_integration = source_state.default_integration
+            _write_state(project, real_state)
+            source = codex_staging / ".specify" / "integrations" / "codex.manifest.json"
             destination = project / ".specify" / "integrations" / "codex.manifest.json"
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(source.read_bytes())
