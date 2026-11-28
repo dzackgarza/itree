@@ -28,7 +28,13 @@ from itree.stage_writer import (
     validate_submission_seal,
     validate_writer_seal,
 )
-from tests.stage_support import COMMIT_SHA, ISSUE_NODE_ID, ISSUE_REF, SLUG
+from tests.stage_support import (
+    COMMIT_SHA,
+    ISSUE_NODE_ID,
+    ISSUE_REF,
+    SLUG,
+    StageFixture,
+)
 
 
 def _native(body: str = "```itree-stage-edit\n{}\n```\n") -> IssueComment:
@@ -50,6 +56,8 @@ def _history(
     return CommentHistory(
         created_at="2026-11-28T00:00:00Z",
         updated_at=updated_at,
+        edit_total_count=0,
+        history_exhausted=True,
     )
 
 
@@ -121,7 +129,7 @@ def test_submission_seal_checks_the_current_wire_and_complete_zero_history() -> 
 
     assert isinstance(valid, SubmissionSeal)
     assert valid.logical_payload_sha256 == logical_digest
-    assert valid.history.created_at == valid.history.updated_at
+    assert valid.history.is_zero_edit()
 
 
 @pytest.mark.parametrize(
@@ -270,6 +278,34 @@ def test_actions_workflow_serializes_nodes_with_least_required_permissions() -> 
     )
     jobs = workflow["jobs"]
     assert "uv run --locked itree stage drain" in jobs["write"]["steps"][-1]["run"]
+
+
+def test_missing_operation_log_binding_blocks_writer_mutation(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    fixture.state["job_logs"] = ['{"kind":"different-run-or-forged-proof"}']
+    fixture.save()
+    feature, _ = fixture.materialize("A-log")
+    current_plan = feature.joinpath("plan.md").read_text()
+    assert "Plan zero" in current_plan
+    feature.joinpath("plan.md").write_text(
+        current_plan.replace("Plan zero", "Plan with operation log proof")
+    )
+
+    result = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-log",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+
+    assert result.returncode == 4
+    assert "writer_seal_invalid" in result.stdout
+    assert "operation_log_binding" in result.stdout
+    assert fixture.patches() == []
 
 
 def test_external_history_unavailable_is_not_a_writer_failure() -> None:

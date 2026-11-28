@@ -95,13 +95,30 @@ with lock_path.open("a+b") as lock:
             "performed_via_github_app": {"id": 1, "node_id": "A_github", "slug": "github-actions"} if is_writer_record else None,
         }
         state["comments"].append(comment)
+        if is_writer_record:
+            payload = json.loads(comment["body"].splitlines()[1])
+            log_entry = {
+                "kind": "operation_log_binding",
+                "operation_id": payload.get("operation_id") or payload["request_id"],
+                "issue_node_id": payload["issue_node_id"],
+                "request_id": payload["request_id"],
+                "attempt_id": payload["attempt_id"],
+                "revision": state["job"]["head_sha"],
+                "workflow_path": state["writer"]["workflow_path"] if "workflow_path" in state["writer"] else ".github/workflows/itree-issue-writer.yml",
+                "workflow_sha256": state["writer"]["workflow_sha256"],
+            }
+            state.setdefault("job_logs", []).append(json.dumps(log_entry, sort_keys=True))
         state["histories"][node_id] = {
             "id": node_id,
             "createdAt": timestamp,
             "updatedAt": timestamp,
             "lastEditedAt": None,
             "editor": None,
-            "userContentEdits": {"totalCount": 0, "nodes": []},
+            "userContentEdits": {
+                "totalCount": 0,
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
         state_path.write_text(json.dumps(state))
         response = json.dumps(comment)
@@ -137,6 +154,9 @@ with lock_path.open("a+b") as lock:
     if "/contents/.github/workflows/itree-issue-writer.yml" in bare_path:
         content = Path(os.environ["ITREE_WORKFLOW_SOURCE"]).read_bytes()
         sys.stdout.write(json.dumps({"type": "file", "path": ".github/workflows/itree-issue-writer.yml", "encoding": "base64", "content": base64.b64encode(content).decode(), "sha": state["writer"]["workflow_blob"]}))
+        sys.exit(0)
+    if "/actions/jobs/" in bare_path and bare_path.endswith("/logs"):
+        sys.stdout.write("\n".join(state.get("job_logs", [])) + "\n")
         sys.exit(0)
     if "/actions/jobs/" in bare_path:
         sys.stdout.write(json.dumps(state["job"]))
