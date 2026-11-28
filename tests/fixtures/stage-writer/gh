@@ -82,7 +82,7 @@ with lock_path.open("a+b") as lock:
         comment_id = max([100] + [comment["id"] for comment in state["comments"]]) + 1
         node_id = "IC_stage_" + str(comment_id)
         timestamp = f"2026-11-28T00:{comment_id // 60:02d}:{comment_id % 60:02d}Z"
-        is_writer_record = json.loads(stdin)["body"].startswith(("```itree-stage-receipt", "```itree-stage-artifact"))
+        is_writer_record = json.loads(stdin)["body"].startswith(("```itree-stage-receipt", "```itree-stage-artifact", "```itree-stage-regenerated-part"))
         comment = {
             "id": comment_id,
             "node_id": node_id,

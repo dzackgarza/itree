@@ -1601,6 +1601,10 @@ class UploadPart(StageModel):
     payload_sha256: Sha256
 
 
+class RegeneratedUploadPart(UploadPart):
+    writer_seal: WriterSeal
+
+
 class MissingPart(StageModel):
     role: str = Field(min_length=1)
     ordinal: int = Field(ge=0)

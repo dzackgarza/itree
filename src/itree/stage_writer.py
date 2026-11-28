@@ -38,6 +38,7 @@ from .models import (
     ReceiptPayload,
     ReceiptRejectionReason,
     ReceiptStatus,
+    RegeneratedUploadPart,
     RequestId,
     SectionEditProposal,
     SectionReplacement,
@@ -140,7 +141,7 @@ def _writer_enabled() -> bool:
 
 JSON_VALUE: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 STAGE_FENCE = re.compile(
-    r"^```(?P<fence>itree-stage-edit|itree-stage-upload-manifest|itree-stage-upload-part|itree-stage-receipt|itree-stage-artifact|itree-stage-artifact-index)\n(?P<payload>[^\n]+)\n```\n$"
+    r"^```(?P<fence>itree-stage-edit|itree-stage-upload-manifest|itree-stage-upload-part|itree-stage-regenerated-part|itree-stage-receipt|itree-stage-artifact|itree-stage-artifact-index)\n(?P<payload>[^\n]+)\n```\n$"
 )
 
 
@@ -160,6 +161,7 @@ def stage_comment_body(fence: str, payload: JsonValue) -> str:
         "itree-stage-edit",
         "itree-stage-upload-manifest",
         "itree-stage-upload-part",
+        "itree-stage-regenerated-part",
         "itree-stage-receipt",
         "itree-stage-artifact",
         "itree-stage-artifact-index",
@@ -360,7 +362,9 @@ def _drain_binding(issue_node_id: IssueNodeId, seal: WriterSeal) -> OperationLog
     )
 
 
-def _binding_for(payload: ReceiptPayload | ArtifactPayload) -> OperationLogBinding:
+def _binding_for(
+    payload: ReceiptPayload | ArtifactPayload | RegeneratedUploadPart,
+) -> OperationLogBinding:
     operation = (
         payload.operation_id or payload.request_id
         if isinstance(payload, ReceiptPayload)
@@ -626,6 +630,22 @@ def _external_authorized(
     return sealed
 
 
+def _regenerated_authorized(
+    api: GithubApi,
+    record: DurableRecord,
+    part: RegeneratedUploadPart,
+) -> WriterSeal | WriterSealInvalidContext:
+    current = api.get_comment(record.native.id)
+    history = _raw_history(api, current)
+    assert history is not None and history.is_zero_edit(), record.native.id
+    assert current.body == stage_comment_body(
+        "itree-stage-regenerated-part", _model_json(part)
+    )
+    return validate_writer_seal(
+        part.writer_seal, _job_authority(api, part.writer_seal, _binding_for(part))
+    )
+
+
 class UploadDrain(StageModel):
     proposals: tuple[StageProposal, ...]
     pending: tuple[str, ...]
@@ -647,15 +667,23 @@ def _upload_models(records: tuple[DurableRecord, ...]) -> tuple[UploadManifest, 
 def _upload_part_models(
     records: tuple[DurableRecord, ...], manifest: UploadManifest
 ) -> tuple[UploadPart, ...]:
-    return tuple(
-        UploadPart.model_validate_json(
-            canonical_payload_bytes(record.payload), strict=True
+    parts: list[UploadPart] = []
+    for record in records:
+        if record.fence not in {
+            "itree-stage-upload-part",
+            "itree-stage-regenerated-part",
+        } or not isinstance(record.payload, dict):
+            continue
+        if record.payload.get("manifest_request_id") != manifest.request_id:
+            continue
+        payload = record.payload.copy()
+        payload.pop("writer_seal", None)
+        parts.append(
+            UploadPart.model_validate_json(
+                canonical_payload_bytes(payload), strict=True
+            )
         )
-        for record in records
-        if record.fence == "itree-stage-upload-part"
-        and isinstance(record.payload, dict)
-        and record.payload.get("manifest_request_id") == manifest.request_id
-    )
+    return tuple(parts)
 
 
 def _native_upload_part(
@@ -665,7 +693,7 @@ def _native_upload_part(
     return next(
         record.native
         for record in records
-        if record.fence == "itree-stage-upload-part"
+        if record.fence in {"itree-stage-upload-part", "itree-stage-regenerated-part"}
         and isinstance(record.payload, dict)
         and (record.payload.get("role"), record.payload.get("ordinal")) == identity
         and record.payload.get("manifest_request_id") == part.manifest_request_id
@@ -723,18 +751,39 @@ def _upload_proposals(
             )
             break
         sealed_parts: list[UploadPart] = []
-        invalid: ExternalSubmissionDetail | None = None
+        invalid: ExternalSubmissionDetail | WriterSealInvalidContext | None = None
         for part in _upload_part_models(records, manifest):
             native_part = _native_upload_part(records, part)
-            checked = _external_authorized(
-                api, native_part, part, live, session.enrolled_actors, False
+            part_record = next(
+                record for record in records if record.native.id == native_part.id
             )
-            if isinstance(checked, ExternalSubmissionDetail):
+            checked = (
+                _regenerated_authorized(
+                    api,
+                    part_record,
+                    RegeneratedUploadPart.model_validate_json(
+                        canonical_payload_bytes(part_record.payload), strict=True
+                    ),
+                )
+                if part_record.fence == "itree-stage-regenerated-part"
+                else _external_authorized(
+                    api, native_part, part, live, session.enrolled_actors, False
+                )
+            )
+            if isinstance(checked, ExternalSubmissionDetail | WriterSealInvalidContext):
                 invalid = checked
                 break
             sealed_parts.append(part)
         if invalid is not None:
-            failed.append(f"{manifest.request_id}:{invalid.reason}")
+            reason = (
+                "external_submission"
+                if isinstance(invalid, ExternalSubmissionDetail)
+                else invalid.kind
+            )
+            failed.append(
+                f"{manifest.request_id}:"
+                f"{invalid.reason if isinstance(invalid, ExternalSubmissionDetail) else invalid.failure_dimension}"
+            )
             rejections.append(
                 _receipt_for(
                     manifest,
@@ -742,7 +791,7 @@ def _upload_proposals(
                     "rejected",
                     _operation(manifest.request_id),
                     ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
-                    "external_submission",
+                    reason,
                     invalid,
                 )
             )
@@ -2496,8 +2545,28 @@ def _regenerate_pending(issue: IssueRef, attempt: AttemptId) -> DrainReport | No
             )
         assert isinstance(resumed, FinalizedProposal), resumed
         restored = resumed.parts[len(_upload_part_models(records, manifest)) :]
+        seal = _writer_runtime_seal(api)
         for part in restored:
-            posted = _post_record(api, issue, "itree-stage-upload-part", part)
+            regenerated = RegeneratedUploadPart.model_validate(
+                {
+                    **part.model_dump(mode="json"),
+                    "writer_seal": seal.model_dump(mode="json"),
+                },
+                strict=True,
+            )
+            checked = validate_writer_seal(
+                seal, _job_authority(api, seal, _binding_for(regenerated))
+            )
+            if isinstance(checked, WriterSealInvalidContext):
+                return DrainReport(
+                    exit_code=4,
+                    confirmed=False,
+                    lines=(f"writer_seal_invalid={checked.failure_dimension}",),
+                    pending=True,
+                )
+            posted = _post_record(
+                api, issue, "itree-stage-regenerated-part", regenerated
+            )
             if not isinstance(posted, IssueComment):
                 return DrainReport(
                     exit_code=5,

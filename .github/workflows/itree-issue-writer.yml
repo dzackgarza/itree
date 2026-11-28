@@ -13,6 +13,11 @@ name: itree issue writer
         description: Issue number in this repository
         required: true
         type: string
+      attempt_id:
+        description: Optional attempt to resume with live multipart regeneration
+        required: false
+        type: string
+        default: ''
       after_final_read_barrier:
         description: Enable only with the disposable acceptance marker
         required: false
@@ -75,4 +80,8 @@ jobs:
 
         export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
 
-        uv run --locked itree stage drain "${ISSUE_REF}" --expected-node "${ISSUE_NODE_ID}"'
+        if [[ -n "${{ inputs.attempt_id }}" ]]; then
+          uv run --locked itree stage resume "${ISSUE_REF}" --attempt "${{ inputs.attempt_id }}";
+        else
+          uv run --locked itree stage drain "${ISSUE_REF}" --expected-node "${ISSUE_NODE_ID}";
+        fi'

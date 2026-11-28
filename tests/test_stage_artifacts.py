@@ -700,6 +700,11 @@ def test_live_issue_reconstruction_matches_manifest_without_scratch(
     _post_record(fixture, "itree-stage-upload-manifest", manifest)
     for part in parts[:-1]:
         _post_record(fixture, "itree-stage-upload-part", part)
+    recorded = fixture.run("stage", "record-bindings", ISSUE_REF, writer=True)
+    assert recorded.returncode == 0, recorded.stdout + recorded.stderr
+    fixture.load()
+    fixture.state["job_logs"] = recorded.stdout.splitlines()
+    fixture.save()
     recovered = fixture.run(
         "stage", "resume", ISSUE_REF, "--attempt", "A-regenerate", writer=True
     )
