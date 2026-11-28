@@ -1457,7 +1457,7 @@ class GithubApi(BaseModel):
                 "node(id: $id) { ... on IssueComment {"
                 "userContentEdits(first: 100, after: $after) {"
                 "totalCount pageInfo { hasNextPage endCursor }"
-                "} } }"
+                "} } } }"
             )
             command = [
                 "gh",
