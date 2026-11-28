@@ -48,6 +48,14 @@ def _controller_root(
     return root
 
 
+def _harness_only_selection(config: pytest.Config) -> bool:
+    harness_files = {"test_harness.py", "test_harness_acceptance.py"}
+    selected = [argument.split("::", maxsplit=1)[0] for argument in config.args]
+    return bool(selected) and all(
+        Path(argument).name in harness_files for argument in selected
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     if _worker(config):
         root = _controller_root(config)
@@ -66,6 +74,8 @@ def pytest_configure(config: pytest.Config) -> None:
     root.joinpath("owner.json").write_text(
         json.dumps({"root": str(root), "pid": os.getpid()}, sort_keys=True)
     )
+    if _harness_only_selection(config):
+        return
     if os.environ.get("ITREE_WORK_FIXTURE_STATE") is None:
         root.joinpath("creation-started").write_text(str(time.time()))
         root.joinpath("creation-started-monotonic").write_text(str(time.perf_counter()))

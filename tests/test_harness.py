@@ -1200,6 +1200,36 @@ def test_external_watchdog_kills_nested_process_group_and_reaps() -> None:
     assert outcome.leader_returncode != 0
 
 
+def test_harness_only_gate_does_not_create_unrelated_work_package(
+    tmp_path: Path,
+) -> None:
+    controller = tmp_path / "controller"
+    environment = os.environ.copy()
+    environment.pop("ITREE_WORK_FIXTURE_STATE", None)
+    environment["ITREE_WORK_CONTROLLER_ROOT"] = str(controller)
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "--locked",
+            "pytest",
+            "tests/test_harness.py::test_illegal_work_and_evidence_states_are_static_errors",
+            "-q",
+        ],
+        cwd=SOURCE,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert controller.joinpath("owner.json").is_file()
+    assert not controller.joinpath("owns-state").exists()
+    assert not controller.joinpath("creation-started").exists()
+
+
 def test_illegal_work_and_evidence_states_are_static_errors() -> None:
     result = subprocess.run(
         ["uv", "run", "--with", "mypy", "mypy", "--strict", str(TYPE_FIXTURE)],
