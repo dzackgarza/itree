@@ -1,8 +1,51 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import shutil
+import tempfile
 from pathlib import Path
+from typing import Literal
 
-from .models import AttemptId, IssueNodeId, IssueRef, StageModel
+from pydantic import JsonValue, TypeAdapter, ValidationError
+
+from .github import GithubApi, GithubApiError
+from .models import (
+    AttemptId,
+    DeclaredOrder,
+    EvidenceRef,
+    GithubIssue,
+    GoalContribution,
+    GoalId,
+    IssueNodeId,
+    IssueRef,
+    LocalTaskRef,
+    OpaqueSpan,
+    PendingEvidence,
+    QualifiedTaskRef,
+    RequirementId,
+    ResolvedEvidence,
+    SectionReplacement,
+    Sha256,
+    SourceSpan,
+    StageModel,
+    TaskDocument,
+    TaskField,
+    TaskId,
+    TaskParseFailure,
+    TaskPrerequisite,
+    TaskRecord,
+)
+from .work import (
+    IssueLayout,
+    LegacyIssueLayout,
+    ManagedIssueLayout,
+    SectionName,
+    ValidIssueLayout,
+    contract_fence_inventory,
+    parse_issue_layout,
+)
 
 
 class StageCommandResult(StageModel):
@@ -10,20 +53,979 @@ class StageCommandResult(StageModel):
     lines: tuple[str, ...]
 
 
-def _pending(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
+class ProjectionFailure(StageModel):
+    reason: Literal[
+        "invalid_layout",
+        "ambiguous_boundary",
+        "legacy_intake_required",
+        "legacy_missing_final_newline",
+        "missing_file",
+        "unexpected_file_change",
+        "contract_fence_change",
+        "original_contract_target",
+        "missing_node",
+        "issue_unavailable",
+        "wrong_attempt",
+        "unsupported_task_wire",
+    ]
+    exit_code: Literal[2, 3, 4]
+    detail: str
+
+
+class StageFailure(RuntimeError):
+    def __init__(self, failure: ProjectionFailure) -> None:
+        self.failure = failure
+        super().__init__(failure.detail)
+
+
+class NoBodyChange(StageModel):
+    kind: Literal["no_body_change"] = "no_body_change"
+    live_body_sha256: Sha256
+
+
+class BodyCandidate(StageModel):
+    kind: Literal["body_candidate"] = "body_candidate"
+    body: str
+    body_sha256: Sha256
+    original_sha256: Sha256
+    changed_sections: tuple[str, ...]
+    before_fences: tuple[str, ...]
+    after_fences: tuple[str, ...]
+
+
+class MergeConflict(StageModel):
+    kind: Literal["conflict"] = "conflict"
+    section: str
+    task_id: str | None = None
+    field: str | None = None
+    retained_body: str
+    competing_request_id: str | None = None
+
+
+class TaskWireFailure(StageModel):
+    kind: Literal["task_parse_failure"] = "task_parse_failure"
+    reason: TaskParseFailure
+    detail: str
+    task_id: TaskId | None = None
+    source: str
+
+
+class TaskFieldConflict(StageModel):
+    kind: Literal["task_field_conflict"] = "task_field_conflict"
+    task_id: TaskId | None
+    field: TaskField
+    retained_source: str
+
+
+class ScratchMetadata(StageModel):
+    version: Literal[1]
+    issue_ref: IssueRef
+    issue_node_id: IssueNodeId
+    attempt_id: AttemptId
+    layout: Literal["legacy", "managed"]
+    base_body: str
+    body_sha256: Sha256
+    original_sha256: Sha256
+
+
+def sha256_text(text: str) -> Sha256:
+    return Sha256(hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+
+def _defect(failure: ProjectionFailure) -> StageCommandResult:
     return StageCommandResult(
-        exit_code=5,
-        lines=(
+        exit_code=failure.exit_code,
+        lines=(f"reason={failure.reason}", f"detail={failure.detail}"),
+    )
+
+
+def _result(lines: tuple[str, ...], exit_code: int = 0) -> StageCommandResult:
+    return StageCommandResult(exit_code=exit_code, lines=lines)
+
+
+def require_issue_node(issue: GithubIssue) -> IssueNodeId:
+    node = issue.node_id
+    if node is None or not node:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="missing_node",
+                exit_code=3,
+                detail=f"issue {issue.repository_slug}#{issue.number} has no REST node_id",
+            )
+        )
+    return node
+
+
+def _layout_or_raise(body: str) -> ValidIssueLayout:
+    layout = parse_issue_layout(body)
+    if layout.kind == "invalid":
+        first = layout.errors[0]
+        raise StageFailure(
+            ProjectionFailure(
+                reason="invalid_layout",
+                exit_code=2,
+                detail=f"{first.name}:{first.line}:{first.reason}",
+            )
+        )
+    return layout
+
+
+def _read_layout(
+    api: GithubApi, issue: IssueRef
+) -> tuple[GithubIssue, ValidIssueLayout]:
+    try:
+        live = api.get_issue(issue.number)
+    except GithubApiError as error:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="issue_unavailable", exit_code=3, detail=str(error)
+            )
+        ) from error
+    assert live.repository_slug == issue.repo_ref.slug, (
+        live.repository_slug,
+        issue.repo_ref.slug,
+    )
+    require_issue_node(live)
+    return live, _layout_or_raise(live.body or "")
+
+
+def _section(layout: ManagedIssueLayout, name: SectionName) -> str:
+    return next(section.text for section in layout.sections if section.name == name)
+
+
+def _validate_replacement_text(text: str) -> None:
+    if text and not text.endswith("\n"):
+        raise StageFailure(
+            ProjectionFailure(
+                reason="ambiguous_boundary",
+                exit_code=2,
+                detail="non-empty replacement text must end in LF",
+            )
+        )
+
+
+def replace_sections(
+    layout: ManagedIssueLayout, replacements: tuple[SectionReplacement, ...]
+) -> BodyCandidate | NoBodyChange:
+    if not replacements:
+        return NoBodyChange(live_body_sha256=sha256_text(layout.body))
+    by_name = {section.name.value: section for section in layout.sections}
+    changed: list[str] = []
+    for replacement in replacements:
+        section = by_name[replacement.section]
+        assert replacement.base_text == section.text, replacement.section
+        assert replacement.base_sha256 == sha256_text(section.text), replacement.section
+        assert replacement.proposed_sha256 == sha256_text(replacement.proposed_text), (
+            replacement.section
+        )
+        _validate_replacement_text(replacement.proposed_text)
+    sorted_replacements = sorted(
+        replacements, key=lambda item: by_name[item.section].byte_start
+    )
+    body_bytes = layout.body.encode("utf-8")
+    cursor = 0
+    candidate_bytes = bytearray()
+    for replacement in sorted_replacements:
+        section = by_name[replacement.section]
+        candidate_bytes.extend(body_bytes[cursor : section.byte_start])
+        candidate_bytes.extend(replacement.proposed_text.encode("utf-8"))
+        cursor = section.byte_end
+        if replacement.base_text != replacement.proposed_text:
+            changed.append(replacement.section)
+    candidate_bytes.extend(body_bytes[cursor:])
+    candidate = candidate_bytes.decode("utf-8")
+    if candidate == layout.body:
+        return NoBodyChange(live_body_sha256=sha256_text(layout.body))
+    reparsed = _layout_or_raise(candidate)
+    assert isinstance(reparsed, ManagedIssueLayout), reparsed
+    original_before = _section(layout, SectionName.original_contract)
+    original_after = _section(reparsed, SectionName.original_contract)
+    assert original_before == original_after, "original contract changed"
+    before_fences = tuple(fence.text for fence in contract_fence_inventory(layout.body))
+    after_fences = tuple(fence.text for fence in contract_fence_inventory(candidate))
+    if before_fences != after_fences:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="contract_fence_change",
+                exit_code=4,
+                detail="every top-level itree-contract fence must survive byte for byte",
+            )
+        )
+    return BodyCandidate(
+        body=candidate,
+        body_sha256=sha256_text(candidate),
+        original_sha256=sha256_text(original_after),
+        changed_sections=tuple(changed),
+        before_fences=before_fences,
+        after_fences=after_fences,
+    )
+
+
+TASK_DOCUMENT_START = "<!-- itree-task-document:v1:start -->\n"
+TASK_DOCUMENT_END = "<!-- itree-task-document:v1:end -->"
+TASK_FIRST_LINE = re.compile(
+    r"^- \[(?P<state>[ x])\] (?P<visible>T[0-9]+) id = (?P<raw>[^\r\n]+)\n$"
+)
+TASK_CONTINUATION_LINE = re.compile(r"^    (?P<name>[a-z]+) = (?P<raw>[^\r\n]+)\n$")
+TASK_CONTINUATION_NAMES = (
+    "order",
+    "prerequisites",
+    "requirements",
+    "evidence",
+    "goals",
+    "description",
+    "acceptance",
+)
+EVIDENCE_ADAPTER: TypeAdapter[EvidenceRef] = TypeAdapter(EvidenceRef)
+JSON_VALUE_ADAPTER: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+
+
+def _task_failure(
+    source: str,
+    reason: TaskParseFailure,
+    detail: str,
+    task_id: TaskId | None = None,
+) -> TaskWireFailure:
+    return TaskWireFailure(reason=reason, detail=detail, task_id=task_id, source=source)
+
+
+def _json_object(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _json_value(raw: str) -> JsonValue:
+    assert "\n" not in raw and "\r" not in raw, raw
+    return JSON_VALUE_ADAPTER.validate_python(
+        json.loads(raw, object_pairs_hook=_json_object)
+    )
+
+
+def _span(source: str, start: int, end: int) -> SourceSpan:
+    return SourceSpan(
+        character_start=start,
+        character_end=end,
+        byte_start=len(source[:start].encode("utf-8")),
+        byte_end=len(source[:end].encode("utf-8")),
+    )
+
+
+def _prerequisites(
+    source: str, raw: str
+) -> tuple[TaskPrerequisite, ...] | TaskParseFailure:
+    value = _json_value(raw)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return "unsupported_task_wire"
+    prerequisites: list[TaskPrerequisite] = []
+    for item in value:
+        assert isinstance(item, str)
+        if re.fullmatch(r"T[0-9]+", item):
+            prerequisites.append(LocalTaskRef(task_id=TaskId(item)))
+            continue
+        qualified = re.fullmatch(
+            r"(?P<issue>[^/\s]+/[^/\s]+#[1-9][0-9]*):(?P<task>T[0-9]+)", item
+        )
+        if qualified is None:
+            return "malformed_ref"
+        prerequisites.append(
+            QualifiedTaskRef(
+                issue_ref=IssueRef.parse(qualified["issue"]),
+                task_id=TaskId(qualified["task"]),
+            )
+        )
+    return tuple(prerequisites)
+
+
+def _requirements(raw: str) -> tuple[RequirementId, ...] | TaskParseFailure:
+    value = _json_value(raw)
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        return "unsupported_task_wire"
+    return tuple(RequirementId(item) for item in value if isinstance(item, str))
+
+
+def _evidence(
+    source: str, raw: str, task_id: TaskId
+) -> PendingEvidence | ResolvedEvidence | TaskWireFailure:
+    value = _json_value(raw)
+    if not isinstance(value, dict) or len(value) != 1:
+        return _task_failure(
+            source,
+            "unsupported_task_wire",
+            "evidence expects exactly pending or resolved",
+            task_id,
+        )
+    if "pending" in value:
+        pending = value["pending"]
+        if not isinstance(pending, str) or not pending:
+            return _task_failure(
+                source,
+                "unsupported_task_wire",
+                "pending evidence must be nonempty text",
+                task_id,
+            )
+        return PendingEvidence(pending=pending)
+    resolved = value.get("resolved")
+    if not isinstance(resolved, list) or not resolved:
+        return _task_failure(
+            source,
+            "unsupported_task_wire",
+            "resolved evidence must be a nonempty array",
+            task_id,
+        )
+    references: list[EvidenceRef] = []
+    for reference in resolved:
+        if not isinstance(reference, dict):
+            return _task_failure(
+                source,
+                "unsupported_task_wire",
+                "evidence reference must be an object",
+                task_id,
+            )
+        kind = reference.get("kind")
+        if kind not in ("issue_comment", "commit", "pull_request", "documented_test"):
+            return _task_failure(
+                source,
+                "unknown_evidence_kind",
+                f"unknown evidence kind: {kind!r}",
+                task_id,
+            )
+        try:
+            references.append(EVIDENCE_ADAPTER.validate_python(reference, strict=True))
+        except ValidationError as error:
+            return _task_failure(source, "unsupported_task_wire", str(error), task_id)
+    return ResolvedEvidence(resolved=tuple(references))
+
+
+def _goals(
+    source: str, raw: str, task_id: TaskId
+) -> tuple[GoalContribution, ...] | TaskWireFailure:
+    value = _json_value(raw)
+    if not isinstance(value, list):
+        return _task_failure(
+            source, "unsupported_task_wire", "goals must be an array", task_id
+        )
+    goals: list[GoalContribution] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"id", "rationale"}:
+            return _task_failure(
+                source,
+                "unsupported_task_wire",
+                "each goal requires exactly id and rationale",
+                task_id,
+            )
+        identifier = item["id"]
+        rationale = item["rationale"]
+        if (
+            not isinstance(identifier, str)
+            or not identifier
+            or not isinstance(rationale, str)
+            or not rationale
+        ):
+            return _task_failure(
+                source,
+                "unsupported_task_wire",
+                "goal id and rationale must be nonempty",
+                task_id,
+            )
+        goals.append(GoalContribution(id=GoalId(identifier), rationale=rationale))
+    return tuple(goals)
+
+
+def _parse_task_item(
+    lines: tuple[str, ...], source: str, position: int
+) -> TaskRecord | TaskWireFailure:
+    first = TASK_FIRST_LINE.fullmatch(lines[0])
+    if first is None or len(lines) != 8:
+        return _task_failure(
+            source,
+            "unsupported_task_wire",
+            "expected one complete eight-line task item",
+        )
+    try:
+        identifier_value = _json_value(first["raw"])
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        return _task_failure(source, "unsupported_task_wire", str(error))
+    if not isinstance(identifier_value, str) or not re.fullmatch(
+        r"T[0-9]+", identifier_value
+    ):
+        return _task_failure(source, "missing_id", "task id must be a JSON T... string")
+    task_id = TaskId(identifier_value)
+    if first["visible"] != task_id:
+        return _task_failure(
+            source, "unsupported_task_wire", "visible and JSON task IDs differ", task_id
+        )
+    spans: dict[str, SourceSpan] = {
+        "id": _span(source, first.start("raw"), first.end("raw"))
+    }
+    values: dict[str, str] = {"id": first["raw"]}
+    for index, expected_name in enumerate(TASK_CONTINUATION_NAMES, start=1):
+        match = TASK_CONTINUATION_LINE.fullmatch(lines[index])
+        if match is None or match["name"] != expected_name:
+            return _task_failure(
+                source,
+                "unsupported_task_wire",
+                f"expected {expected_name} at member {index + 1}",
+                task_id,
+            )
+        line_start = sum(len(line) for line in lines[:index])
+        spans[expected_name] = _span(
+            source,
+            line_start + match.start("raw"),
+            line_start + match.end("raw"),
+        )
+        values[expected_name] = match["raw"]
+    try:
+        order_value = _json_value(values["order"])
+        prerequisites = _prerequisites(source, values["prerequisites"])
+        requirements = _requirements(values["requirements"])
+        evidence = _evidence(source, values["evidence"], task_id)
+        goals = _goals(source, values["goals"], task_id)
+        description = _json_value(values["description"])
+        acceptance = _json_value(values["acceptance"])
+    except (ValueError, TypeError, json.JSONDecodeError) as error:
+        return _task_failure(source, "unsupported_task_wire", str(error), task_id)
+    if isinstance(prerequisites, str):
+        return _task_failure(
+            source, prerequisites, "invalid prerequisite list", task_id
+        )
+    if isinstance(requirements, str):
+        return _task_failure(source, requirements, "invalid requirement list", task_id)
+    if isinstance(evidence, TaskWireFailure):
+        return evidence
+    if isinstance(goals, TaskWireFailure):
+        return goals
+    if (
+        not isinstance(order_value, int)
+        or isinstance(order_value, bool)
+        or order_value < 0
+    ):
+        return _task_failure(
+            source, "invalid_order", "order must be a nonnegative JSON integer", task_id
+        )
+    if order_value != position:
+        return _task_failure(
+            source,
+            "invalid_order",
+            f"order {order_value} does not equal item position {position}",
+            task_id,
+        )
+    if not isinstance(description, str) or not isinstance(acceptance, str):
+        return _task_failure(
+            source,
+            "unsupported_task_wire",
+            "description and acceptance must be JSON strings",
+            task_id,
+        )
+    return TaskRecord(
+        id=task_id,
+        order=DeclaredOrder(order_value),
+        state="complete" if first["state"] == "x" else "unfinished",
+        prerequisites=prerequisites,
+        requirements=requirements,
+        evidence=evidence,
+        goals=goals,
+        description=description,
+        acceptance=acceptance,
+        source=source,
+        field_spans=spans,
+        state_span=_span(source, 3, 4),
+    )
+
+
+def parse_task_document(source: str) -> TaskDocument | TaskWireFailure:
+    if TASK_DOCUMENT_START not in source and TASK_DOCUMENT_END not in source:
+        return TaskDocument(
+            source=source,
+            wrapped=False,
+            tasks=(),
+            opaque=(OpaqueSpan(source=source, span=_span(source, 0, len(source))),),
+        )
+    if source.count(TASK_DOCUMENT_START) != 1 or source.count(TASK_DOCUMENT_END) != 1:
+        return _task_failure(
+            source, "ambiguous_span", "expected exactly one v1 document wrapper"
+        )
+    start = source.index(TASK_DOCUMENT_START)
+    end = source.index(TASK_DOCUMENT_END)
+    if end < start:
+        return _task_failure(source, "ambiguous_span", "v1 end precedes start")
+    inner_start = start + len(TASK_DOCUMENT_START)
+    inner = source[inner_start:end]
+    lines = tuple(inner.splitlines(keepends=True))
+    tasks: list[TaskRecord] = []
+    cursor = 0
+    while cursor < len(lines):
+        line = lines[cursor]
+        if line.startswith("- ["):
+            if cursor + 8 > len(lines):
+                return _task_failure(
+                    source, "unsupported_task_wire", "task item is truncated"
+                )
+            item_source = "".join(lines[cursor : cursor + 8])
+            record = _parse_task_item(
+                lines[cursor : cursor + 8], item_source, len(tasks)
+            )
+            if isinstance(record, TaskWireFailure):
+                return record
+            tasks.append(record)
+            cursor += 8
+            continue
+        cursor += 1
+    seen: set[TaskId] = set()
+    for task in tasks:
+        if task.id in seen:
+            return _task_failure(
+                source, "duplicate_id", f"duplicate task ID {task.id}", task.id
+            )
+        seen.add(task.id)
+    returned = TaskDocument(source=source, wrapped=True, tasks=tuple(tasks), opaque=())
+    opaque: list[OpaqueSpan] = []
+    cursor = 0
+    for task in tasks:
+        position = source.index(task.source, cursor)
+        if position > cursor:
+            opaque.append(
+                OpaqueSpan(
+                    source=source[cursor:position], span=_span(source, cursor, position)
+                )
+            )
+        cursor = position + len(task.source)
+    if cursor < len(source):
+        opaque.append(
+            OpaqueSpan(source=source[cursor:], span=_span(source, cursor, len(source)))
+        )
+    return returned.model_copy(update={"opaque": tuple(opaque)})
+
+
+def _task_slots(document: TaskDocument) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    gaps: list[str] = []
+    cursor = 0
+    for task in document.tasks:
+        position = document.source.index(task.source, cursor)
+        gaps.append(document.source[cursor:position])
+        cursor = position + len(task.source)
+    gaps.append(document.source[cursor:])
+    return tuple(gaps), tuple(task.source for task in document.tasks)
+
+
+def _raw_field(task: TaskRecord, field: TaskField) -> str:
+    if field == TaskField.state:
+        span = task.state_span
+    else:
+        span = task.field_spans[field.value]
+    return task.source[span.character_start : span.character_end]
+
+
+def _splice_task_field(task: TaskRecord, field: TaskField, raw_value: str) -> str:
+    if field == TaskField.state:
+        assert raw_value in {" ", "x"}, raw_value
+        span = task.state_span
+    else:
+        span = task.field_spans[field.value]
+    return (
+        task.source[: span.character_start]
+        + raw_value
+        + task.source[span.character_end :]
+    )
+
+
+def replace_task_field(
+    document: TaskDocument, task_id: TaskId, field: TaskField, raw_value: str
+) -> TaskDocument | TaskWireFailure:
+    if not document.wrapped:
+        return _task_failure(
+            document.source,
+            "unsupported_task_wire",
+            "opaque legacy tasks expose no field spans",
+            task_id,
+        )
+    if field == TaskField.opaque:
+        return _task_failure(
+            document.source,
+            "unsupported_field",
+            "opaque is not directly editable",
+            task_id,
+        )
+    task = next((task for task in document.tasks if task.id == task_id), None)
+    if task is None:
+        return _task_failure(
+            document.source, "missing_id", f"no task {task_id}", task_id
+        )
+    updated_task = _splice_task_field(task, field, raw_value)
+    updated_source = document.source.replace(task.source, updated_task, 1)
+    return parse_task_document(updated_source)
+
+
+def reorder_task_document(
+    document: TaskDocument, task_ids: tuple[TaskId, ...]
+) -> TaskDocument | TaskWireFailure:
+    if not document.wrapped:
+        return _task_failure(
+            document.source,
+            "unsupported_task_wire",
+            "opaque legacy tasks cannot be reordered semantically",
+        )
+    by_id = {task.id: task for task in document.tasks}
+    if len(task_ids) != len(by_id) or set(task_ids) != set(by_id):
+        return _task_failure(
+            document.source, "missing_id", "reorder must name every task exactly once"
+        )
+    gaps, original_items = _task_slots(document)
+    rebuilt = gaps[0]
+    for index, task_id in enumerate(task_ids):
+        task = by_id[task_id]
+        rebuilt += (
+            _splice_task_field(task, TaskField.order, str(index)) + gaps[index + 1]
+        )
+    assert len(original_items) == len(task_ids), (original_items, task_ids)
+    return parse_task_document(rebuilt)
+
+
+def _three_way(base: str, live: str, proposed: str) -> str | None:
+    if live == proposed or base == proposed:
+        return live
+    if base == live:
+        return proposed
+    return None
+
+
+def merge_task_documents(
+    base: TaskDocument, live: TaskDocument, proposed: TaskDocument
+) -> TaskDocument | TaskFieldConflict:
+    if not base.wrapped or not live.wrapped or not proposed.wrapped:
+        value = _three_way(base.source, live.source, proposed.source)
+        if value is not None:
+            parsed = parse_task_document(value)
+            if isinstance(parsed, TaskWireFailure):
+                return TaskFieldConflict(
+                    task_id=None, field=TaskField.opaque, retained_source=live.source
+                )
+            return parsed
+        task_id = base.tasks[0].id if base.tasks else None
+        return TaskFieldConflict(
+            task_id=task_id, field=TaskField.opaque, retained_source=live.source
+        )
+    base_ids = tuple(task.id for task in base.tasks)
+    live_ids = tuple(task.id for task in live.tasks)
+    proposed_ids = tuple(task.id for task in proposed.tasks)
+    if (
+        len(set(base_ids)) != len(base_ids)
+        or len(set(live_ids)) != len(live_ids)
+        or len(set(proposed_ids)) != len(proposed_ids)
+    ):
+        return TaskFieldConflict(
+            task_id=None, field=TaskField.order, retained_source=live.source
+        )
+    if set(base_ids) != set(live_ids) or set(base_ids) != set(proposed_ids):
+        if base_ids == proposed_ids:
+            return live
+        if base_ids == live_ids:
+            return proposed
+        return TaskFieldConflict(
+            task_id=None, field=TaskField.order, retained_source=live.source
+        )
+    base_by_id = {task.id: task for task in base.tasks}
+    live_by_id = {task.id: task for task in live.tasks}
+    proposed_by_id = {task.id: task for task in proposed.tasks}
+    merged = live
+    for task_id in live_ids:
+        for field in (
+            TaskField.state,
+            TaskField.order,
+            TaskField.prerequisites,
+            TaskField.requirements,
+            TaskField.evidence,
+            TaskField.goals,
+            TaskField.description,
+            TaskField.acceptance,
+        ):
+            selected = _three_way(
+                _raw_field(base_by_id[task_id], field),
+                _raw_field(live_by_id[task_id], field),
+                _raw_field(proposed_by_id[task_id], field),
+            )
+            if selected is None:
+                return TaskFieldConflict(
+                    task_id=task_id, field=field, retained_source=live.source
+                )
+            if selected != _raw_field(live_by_id[task_id], field):
+                changed = replace_task_field(merged, task_id, field, selected)
+                if isinstance(changed, TaskWireFailure):
+                    return TaskFieldConflict(
+                        task_id=task_id, field=field, retained_source=live.source
+                    )
+                merged = changed
+    selected_order = _three_way(
+        ",".join(base_ids), ",".join(live_ids), ",".join(proposed_ids)
+    )
+    if selected_order is None:
+        return TaskFieldConflict(
+            task_id=None, field=TaskField.order, retained_source=live.source
+        )
+    desired_ids: tuple[TaskId, ...] = (
+        tuple(TaskId(part) for part in selected_order.split(","))
+        if selected_order
+        else ()
+    )
+    if desired_ids != tuple(task.id for task in merged.tasks):
+        reordered = reorder_task_document(merged, desired_ids)
+        if isinstance(reordered, TaskWireFailure):
+            return TaskFieldConflict(
+                task_id=None, field=TaskField.order, retained_source=live.source
+            )
+        merged = reordered
+    gaps_base, _ = _task_slots(base)
+    gaps_live, _ = _task_slots(live)
+    gaps_proposed, _ = _task_slots(proposed)
+    if len(gaps_base) == len(gaps_live) == len(gaps_proposed):
+        selected_gaps: list[str] = []
+        for values in zip(gaps_base, gaps_live, gaps_proposed, strict=True):
+            selected = _three_way(*values)
+            if selected is None:
+                return TaskFieldConflict(
+                    task_id=None,
+                    field=TaskField.opaque,
+                    retained_source=live.source,
+                )
+            selected_gaps.append(selected)
+        _, merged_items = _task_slots(merged)
+        rebuilt = selected_gaps[0]
+        for index, item in enumerate(merged_items):
+            rebuilt += item + selected_gaps[index + 1]
+        parsed = parse_task_document(rebuilt)
+        if isinstance(parsed, TaskWireFailure):
+            return TaskFieldConflict(
+                task_id=None,
+                field=TaskField.opaque,
+                retained_source=live.source,
+            )
+        return parsed
+    return merged
+
+
+def merge_stage_values(
+    base: ManagedIssueLayout,
+    live: ManagedIssueLayout,
+    replacements: tuple[SectionReplacement, ...],
+) -> BodyCandidate | MergeConflict:
+    original_base = _section(base, SectionName.original_contract)
+    original_live = _section(live, SectionName.original_contract)
+    if original_base != original_live:
+        return MergeConflict(
+            section="original-contract",
+            retained_body=live.body,
+        )
+    accepted: list[SectionReplacement] = []
+    for replacement in replacements:
+        section = SectionName(replacement.section)
+        base_value = _section(base, section)
+        live_value = _section(live, section)
+        assert replacement.base_text == base_value, (
+            replacement.base_text,
+            base_value,
+            replacement.section,
+        )
+        proposed = replacement.proposed_text
+        if live_value == proposed or replacement.base_text == proposed:
+            selected = live_value
+        elif base_value == live_value:
+            selected = proposed
+        else:
+            return MergeConflict(
+                section=replacement.section,
+                retained_body=live.body,
+            )
+        if selected != live_value:
+            accepted.append(
+                SectionReplacement(
+                    section=replacement.section,
+                    base_text=live_value,
+                    proposed_text=selected,
+                    base_sha256=sha256_text(live_value),
+                    proposed_sha256=sha256_text(selected),
+                )
+            )
+    projected = replace_sections(live, tuple(accepted))
+    if isinstance(projected, NoBodyChange):
+        return BodyCandidate(
+            body=live.body,
+            body_sha256=sha256_text(live.body),
+            original_sha256=sha256_text(original_live),
+            changed_sections=(),
+            before_fences=tuple(
+                fence.text for fence in contract_fence_inventory(live.body)
+            ),
+            after_fences=tuple(
+                fence.text for fence in contract_fence_inventory(live.body)
+            ),
+        )
+    return projected
+
+
+def build_legacy_intake(
+    layout: LegacyIssueLayout,
+    requirements: str,
+    plan: str,
+    tasks: str,
+) -> BodyCandidate:
+    if not layout.body.endswith("\n"):
+        raise StageFailure(
+            ProjectionFailure(
+                reason="legacy_missing_final_newline",
+                exit_code=2,
+                detail="managed intake cannot preserve a legacy original without final LF",
+            )
+        )
+    for text in (requirements, plan, tasks):
+        _validate_replacement_text(text)
+    candidate = (
+        "<!-- itree:original-contract:start -->\n"
+        f"{layout.body}"
+        "<!-- itree:original-contract:end -->\n"
+        "<!-- itree:requirements:start -->\n"
+        f"{requirements}"
+        "<!-- itree:requirements:end -->\n"
+        "<!-- itree:plan:start -->\n"
+        f"{plan}"
+        "<!-- itree:plan:end -->\n"
+        "<!-- itree:tasks:start -->\n"
+        f"{tasks}"
+        "<!-- itree:tasks:end -->"
+    )
+    reparsed = _layout_or_raise(candidate)
+    assert isinstance(reparsed, ManagedIssueLayout), reparsed
+    assert _section(reparsed, SectionName.original_contract) == layout.body
+    changed = tuple(
+        section.value
+        for section, current in zip(
+            (SectionName.requirements, SectionName.plan, SectionName.tasks),
+            (requirements, plan, tasks),
+            strict=True,
+        )
+        if current
+    )
+    return BodyCandidate(
+        body=candidate,
+        body_sha256=sha256_text(candidate),
+        original_sha256=sha256_text(layout.body),
+        changed_sections=changed,
+        before_fences=tuple(f.text for f in contract_fence_inventory(layout.body)),
+        after_fences=tuple(f.text for f in contract_fence_inventory(candidate)),
+    )
+
+
+def _original_text(layout: ValidIssueLayout) -> str:
+    if isinstance(layout, LegacyIssueLayout):
+        return layout.original_contract
+    return _section(layout, SectionName.original_contract)
+
+
+def _write_materialization(
+    issue: IssueRef,
+    live: GithubIssue,
+    layout: ValidIssueLayout,
+    attempt: AttemptId,
+) -> StageCommandResult:
+    directory = Path(tempfile.mkdtemp(prefix="itree-stage-", dir="/tmp/opencode"))
+    directory.chmod(0o700)
+    original = _original_text(layout)
+    original_path = directory / "original-contract.md"
+    original_path.write_text(original, encoding="utf-8", newline="")
+    original_path.chmod(0o400)
+    sections = (
+        ("spec.md", SectionName.requirements),
+        ("plan.md", SectionName.plan),
+        ("tasks.md", SectionName.tasks),
+    )
+    for filename, name in sections:
+        text = "" if isinstance(layout, LegacyIssueLayout) else _section(layout, name)
+        directory.joinpath(filename).write_text(text, encoding="utf-8", newline="")
+    metadata = ScratchMetadata(
+        version=1,
+        issue_ref=issue,
+        issue_node_id=require_issue_node(live),
+        attempt_id=attempt,
+        layout=layout.kind,
+        base_body=layout.body,
+        body_sha256=sha256_text(layout.body),
+        original_sha256=sha256_text(original),
+    )
+    directory.joinpath(".itree-stage.json").write_text(
+        metadata.model_dump_json(), encoding="utf-8"
+    )
+    return _result(
+        (
             f"issue_ref={issue.slug}",
+            f"issue_node_id={require_issue_node(live)}",
             f"attempt_id={attempt}",
-            "stage_complete=false",
-            f"recovery=itree stage resume {issue.slug} --attempt {attempt}",
-        ),
+            f"SPECIFY_FEATURE_DIRECTORY={directory}",
+            "SPECIFY_FEATURE_NO_PERSIST=1",
+            f"original_contract_sha256={metadata.original_sha256}",
+            f"body_sha256={metadata.body_sha256}",
+            f"layout={layout.kind}",
+        )
     )
 
 
 def stage_materialize(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
-    return _pending(issue, attempt)
+    try:
+        live, layout = _read_layout(GithubApi.from_issue_ref(issue), issue)
+        return _write_materialization(issue, live, layout, attempt)
+    except StageFailure as error:
+        return _defect(error.failure)
+
+
+def _read_metadata(
+    issue: IssueRef, attempt: AttemptId, directory: Path
+) -> ScratchMetadata:
+    try:
+        metadata = ScratchMetadata.model_validate_json(
+            directory.joinpath(".itree-stage.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValidationError) as error:
+        raise StageFailure(
+            ProjectionFailure(reason="missing_file", exit_code=2, detail=str(error))
+        ) from error
+    if metadata.issue_ref != issue or metadata.attempt_id != attempt:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="wrong_attempt",
+                exit_code=2,
+                detail=f"scratch belongs to {metadata.issue_ref.slug}:{metadata.attempt_id}",
+            )
+        )
+    return metadata
+
+
+def _read_scratch(directory: Path, filename: str) -> str:
+    try:
+        return directory.joinpath(filename).read_text(encoding="utf-8")
+    except OSError as error:
+        raise StageFailure(
+            ProjectionFailure(reason="missing_file", exit_code=2, detail=str(error))
+        ) from error
+
+
+def _cleanup(directory: Path) -> str:
+    shutil.rmtree(directory)
+    return "removed"
+
+
+def _confirmed_no_change(directory: Path, body_sha256: Sha256) -> StageCommandResult:
+    cleanup = _cleanup(directory)
+    return _result(
+        (
+            "stage_complete=true",
+            "no_body_write=true",
+            f"body_sha256={body_sha256}",
+            f"scratch_cleanup={cleanup}",
+        )
+    )
 
 
 def stage_write_back(
@@ -32,20 +1034,79 @@ def stage_write_back(
     feature_directory: Path,
     managed_intake: bool,
 ) -> StageCommandResult:
-    assert feature_directory.is_absolute(), feature_directory
-    assert isinstance(managed_intake, bool), managed_intake
-    return _pending(issue, attempt)
+    try:
+        metadata = _read_metadata(issue, attempt, feature_directory)
+        original = _read_scratch(feature_directory, "original-contract.md")
+        base_layout = _layout_or_raise(metadata.base_body)
+        if (
+            original != _original_text(base_layout)
+            or sha256_text(original) != metadata.original_sha256
+        ):
+            raise StageFailure(
+                ProjectionFailure(
+                    reason="original_contract_target",
+                    exit_code=2,
+                    detail="original-contract.md differs from its materialized bytes",
+                )
+            )
+        requirements = _read_scratch(feature_directory, "spec.md")
+        plan = _read_scratch(feature_directory, "plan.md")
+        tasks = _read_scratch(feature_directory, "tasks.md")
+        if isinstance(base_layout, LegacyIssueLayout):
+            changed = any((requirements, plan, tasks))
+            if not changed:
+                return _confirmed_no_change(feature_directory, metadata.body_sha256)
+            if not managed_intake:
+                raise StageFailure(
+                    ProjectionFailure(
+                        reason="legacy_intake_required",
+                        exit_code=2,
+                        detail="changed legacy input requires --managed-intake",
+                    )
+                )
+            candidate = build_legacy_intake(base_layout, requirements, plan, tasks)
+        else:
+            replacement_names: tuple[Literal["requirements", "plan", "tasks"], ...] = (
+                "requirements",
+                "plan",
+                "tasks",
+            )
+            replacements: list[SectionReplacement] = []
+            for name, proposed in zip(
+                replacement_names, (requirements, plan, tasks), strict=True
+            ):
+                base = _section(base_layout, SectionName(name))
+                replacements.append(
+                    SectionReplacement(
+                        section=name,
+                        base_text=base,
+                        proposed_text=proposed,
+                        base_sha256=sha256_text(base),
+                        proposed_sha256=sha256_text(proposed),
+                    )
+                )
+            projected = replace_sections(base_layout, tuple(replacements))
+            if isinstance(projected, NoBodyChange):
+                return _confirmed_no_change(feature_directory, metadata.body_sha256)
+            candidate = projected
+        from .stage_writer import apply_stage_candidate
+
+        return apply_stage_candidate(
+            issue, attempt, feature_directory, metadata, candidate
+        )
+    except StageFailure as error:
+        return _defect(error.failure)
 
 
 def stage_resume(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
-    return _pending(issue, attempt)
+    from .stage_writer import resume_stage
+
+    return resume_stage(issue, attempt)
 
 
 def stage_drain(
     issue: IssueRef, expected_node: IssueNodeId | None
 ) -> StageCommandResult:
-    assert expected_node is None or len(expected_node) > 0, expected_node
-    return StageCommandResult(
-        exit_code=5,
-        lines=(f"issue_ref={issue.slug}", "stage_complete=false"),
-    )
+    from .stage_writer import drain_stage
+
+    return drain_stage(issue, expected_node)

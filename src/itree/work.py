@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import re
 import threading
@@ -54,6 +55,17 @@ class IssueSection(BaseModel):
     byte_start: int = Field(ge=0)
     byte_end: int = Field(ge=0)
     text: str
+
+
+class ContractFence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    byte_start: int = Field(ge=0)
+    byte_end: int = Field(ge=0)
+    text: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class LegacyIssueLayout(BaseModel):
@@ -436,6 +448,38 @@ def parse_issue_layout(body: str) -> IssueLayout:
             )
         )
     return ManagedIssueLayout(body=body, sections=tuple(sections))
+
+
+def contract_fence_inventory(body: str) -> tuple[ContractFence, ...]:
+    lines = body.splitlines(keepends=True)
+    starts: list[int] = []
+    offset = 0
+    for line in lines:
+        starts.append(offset)
+        offset += len(line)
+    fences: list[ContractFence] = []
+    for token in _markdown_parser().parse(body):
+        if (
+            token.type != "fence"
+            or token.map is None
+            or token.info.strip() != "itree-contract"
+        ):
+            continue
+        first, last = token.map
+        character_start = starts[first]
+        character_end = starts[last - 1] + len(lines[last - 1])
+        exact = body[character_start:character_end]
+        fences.append(
+            ContractFence(
+                line_start=first + 1,
+                line_end=last,
+                byte_start=len(body[:character_start].encode("utf-8")),
+                byte_end=len(body[:character_end].encode("utf-8")),
+                text=exact,
+                sha256=hashlib.sha256(exact.encode("utf-8")).hexdigest(),
+            )
+        )
+    return tuple(fences)
 
 
 def _canonical_url(raw: str) -> str:

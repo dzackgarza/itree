@@ -485,6 +485,7 @@ class GithubIssue(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     id: GithubIssueId
+    node_id: IssueNodeId | None = None
     number: IssueNumber
     title: str
     state: IssueState

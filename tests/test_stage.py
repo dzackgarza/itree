@@ -137,6 +137,7 @@ def test_original_scratch_change_is_rejected_before_any_proposal(
     fixture = StageFixture(tmp_path / "fixture")
     feature, _ = fixture.materialize("A-original-target")
     before = fixture.issue_body()
+    feature.joinpath("original-contract.md").chmod(0o600)
     feature.joinpath("original-contract.md").write_text("tampered\n")
 
     result = fixture.run(
