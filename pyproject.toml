@@ -15,6 +15,7 @@ dependencies = [
     "networkx>=3.0",
     "markdown-it-py[linkify]>=4.2.0",
     "specify-cli==1.4.4.dev0",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -22,7 +23,10 @@ test = [
     "pytest>=9.0",
     "pytest-xdist>=3.8.0",
 ]
-typing = ["types-networkx>=3.6.0"]
+typing = [
+    "types-networkx>=3.6.0",
+    "types-pyyaml>=6.0",
+]
 
 [project.scripts]
 itree = "itree.cli:app"

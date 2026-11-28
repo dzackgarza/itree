@@ -114,7 +114,7 @@ second reuse registry.
 | OpenCode integration | `specify integration install opencode` and its renderers | Direct | Reuse native commands, runtime plugins, and configuration. Owner: #68. |
 | itree commands in every harness | `extension.yml`; `specify extension add --dev`; `specify integration use` | Wrapped installer | Reuse extension rendition for `speckit.<extension>.<command>` while selecting each harness as the default in turn because extension commands render only for the default. Owner: #68. |
 | Scoped prompt changes | `specify preset add --dev`; `replace`, `prepend`, `append`, `wrap`, `replace-section` | Direct | Apply exact, uniquely selected replacements such as the original-contract source in convergence. Owners: #66, #69, #70, #73, #74. |
-| Session-start context | `src/specify_cli/events/`; `.specify/events.py`; `events:` in `extension.yml` | Direct | Reuse supported Claude Code, Codex, and OpenCode events to load the selected issue at session start without editing instruction files. Owner: #68. |
+| Session-start context | `src/specify_cli/events/`; `.specify/events.py`; `events:` in `extension.yml` | Direct with explicit lifecycle | Reuse one prerequisite-only session-start event in every supported harness. Explicit `speckit.itree.work` arguments load each fresh issue through prepared chunks; session-start output never selects or caches issue content. Parent clarification: [#64 comment 7234772396](https://github.com/dzackgarza/itree/issues/64#issuecomment-7234772396). Owner: #68. |
 | Agent-context extension | `extensions/agent-context/` | Not used | Reuse the session event instead because this extension edits managed blocks in `AGENTS.md` or `CLAUDE.md`; #64 prohibits that route for harness context. Owner: #68. |
 | Workflow backend | `src/specify_cli/workflows/engine.py`; `specify workflow run/resume` | Direct | Retain upstream steps, loops, gates, and resume behavior while defining the issue-owned analysis and convergence stages omitted by the bundled Speckit workflow. Owner: #74. |
 | Extension hook registration | `ExtensionManifest`, `ExtensionManager`, `.specify/extensions.yml`, `before_*` and `after_*` | Direct | Keep upstream registration and condition data so stages expose the same extension surface. Owner: #75. |
@@ -131,3 +131,91 @@ The optional `extensions/github` issue exporter, `extensions/git` feature
 branches, upstream feature counters, and `.specify/feature.json` stay outside
 this model because they create competing work identity or storage. Workflow run
 state stays local to one execution and is not a work registry.
+
+## #68 implementation-adjacent decisions and measured boundaries
+
+### Explicit invocation, distribution, and process ownership
+
+Invoke `itree harness-work prepare` only through the launcher identified by the
+installed distribution's exact `console_scripts` entry `itree = itree.cli:app`
+and one matching `RECORD` entry. Normalize `Distribution.locate_file` before
+recording or spawning it so paths such as `site-packages/../../../bin/itree`
+become the actual `venv/bin/itree`. Reject missing entry points, missing or
+ambiguous launcher records, and module-only installations instead of selecting
+an interpreter or source checkout. The generated outer scripts use only the
+standard library and call the same public `harness-work` boundary. The upstream
+`{SCRIPT}` surface is a `sh` variant containing the executable script path, not
+a project `python work_loader.py` invocation.
+
+One `InvocationId` identifies one fresh `itree work REF` process and its own
+chunk source, manifest, and cursor. `next` and `finish` require that ID. Public
+interleaved A0/B0/A1, changed-A, replay, wrong-ID, and premature-finish tests
+reject recency or cross-invocation selection. `prepare` invokes the resolved CLI
+once. There is no hidden retry. It records UTC, monotonic wall, and CPU timing,
+and distinguishes exit, timeout, interruption, and spawn failure. Termination
+terminates the child group, waits, kills if necessary, and reaps. The acceptance
+watchdog is a separate process owner so a broken helper cannot turn a deadline
+into success.
+
+Exact source bytes are split at valid UTF-8 boundaries into chunks of at most
+8,192 bytes. Every index, byte range, and digest is verified during emission and
+again before an `emission-only` receipt. A complete receipt trashes its scratch
+invocation. Partial, premature, modified, replayed, interrupted, and timed-out
+streams cannot finish. No summary, source selection, compression, or feature
+pointer is involved. Both focused size bands use this identical path.
+Model-context acceptance instead requires actual continued-session provider
+input after native truncation or spill handling; native output, transcripts,
+and emitted chunks never promote themselves to model-context evidence.
+
+### Linked project installation and ordered effects
+
+The pinned upstream implementation has three linked-target restrictions that a
+naive install cannot suppress: direct Codex core setup rejects an external
+`.agents` destination, `integration use codex` warns while snapshotting hashes
+through that link, and real-project extension registration warns and skips a
+symlinked skill directory. The installer therefore uses the upstream adapters
+in private staging for Codex/OpenCode core and extension registration. On the
+real linked project it performs the upstream Codex default selection before the
+generated registration is synchronized, and only then invokes the pinned native
+event refresh. The synchronized surface is limited to upstream-generated Codex
+skills, extension resources, and registration metadata. The external `.agents`
+link and unrelated skill bytes remain in place. Real `.codex/config.toml`,
+`.specify/integration.json`, `.specify/integrations/codex.manifest.json`,
+`.specify/events.py`, `.opencode/plugin/speckit-events.ts`, and native event
+settings all come from the pinned adapters. No command is authored separately
+for a harness.
+
+The operation sequence is staged Codex core, safe Claude/OpenCode cores,
+integration-state merge, real Codex default, upstream registration and linked
+synchronization, native event refresh, default rendering, restoration of the
+supported prior default, and fresh confirmation. Subsequent installs compare
+owned bytes and installed metadata and skip every write operation when all are
+unchanged. Predictable collisions fail before the first write. A real mid-write
+collision returns the confirmed prefix, the failing operation and its observed
+state, and the untouched suffix; there is no rollback or partial-success claim.
+Upstream warnings and missing generated artifacts fail rather than laundering a
+zero parent exit status.
+
+### Evidence, tiers, and the existing parent clarification
+
+The durable evidence store under `evidence/harness/RUN_ID/` contains ordered raw
+chunks, native emissions, available provider request bodies, linked install
+snapshots, and process logs. Its manifest records ordered artifact descriptors,
+environment and invocation identities, byte counts, and SHA-256 digests.
+Canonical hashing serializes the manifest with root `manifest_sha256` omitted;
+the sidecar contains that digest, and fresh verification performs the identical
+omission. It never hashes the manifest containing itself. Issue comments link
+the committed evidence store and never embed multi-megabyte streams.
+
+`tests/test_harness.py` is the focused tier. `tests/test_harness_acceptance.py`
+is separately invoked after implementation and requires both explicit live and
+provider-capture opt-ins. `AcceptanceDisabled` is a configuration result, not a
+pass. Missing provider payload remains `emission-only`; loss, spill,
+compaction, truncation, wrong ordering, or unsupported capture is `unaccepted`.
+Final live limitations belong only after the final real run.
+
+The existing parent clarifications are authoritative and must not be duplicated:
+[#64 lifecycle clarification 7234772396](https://github.com/dzackgarza/itree/issues/64#issuecomment-7234772396)
+covers C1, U1-U5, D1, U6, I1, and U7; [#68 revised design 7234769366](https://github.com/dzackgarza/itree/issues/68#issuecomment-7234769366)
+covers R1-R3, X1, and D2. This section records the implementation design and
+measured upstream restrictions; it makes no final live-harness acceptance claim.

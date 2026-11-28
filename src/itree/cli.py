@@ -27,6 +27,7 @@ if __package__ in (None, ""):
 
 from cyclopts import App, Parameter
 
+from .harness import InstallBoundaryResult, install_harness
 from .harness_work import (
     CommandResult,
     finish_command,
@@ -162,6 +163,15 @@ def finish(
 def initialize() -> None:
     """Check prerequisites without selecting or loading an issue."""
     _harness_work_result(initialize_command())
+
+
+@app.command
+def harness() -> None:
+    """Install the shared itree extension through pinned upstream adapters."""
+    result: InstallBoundaryResult = install_harness()
+    print(result.outcome.model_dump_json())
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
 
 
 help_app = App(name="help", help="Organization guide and model explanation.")

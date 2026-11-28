@@ -801,7 +801,7 @@ def test_real_linked_install_preserves_and_repeats_every_surface(
         ".specify/integration.json",
         ".specify/integrations/codex.manifest.json",
         ".specify/events.py",
-        ".specify/extensions/registry.json",
+        ".specify/extensions.yml",
         ".opencode/plugin/speckit-events.ts",
     ):
         assert fixture.project.joinpath(relative).is_file(), relative
@@ -856,6 +856,86 @@ def test_modified_owned_artifact_stops_before_any_write(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert _snapshot(fixture.project) == before
     assert _snapshot(fixture.external) == external_before
+
+
+def test_midwrite_collision_reports_actual_prefix_and_untouched_suffix(
+    tmp_path: Path,
+) -> None:
+    fixture = _installer_fixture(tmp_path)
+    collision = (
+        fixture.project / ".specify" / "extensions" / "itree" / "commands" / "work.md"
+    )
+
+    def interfere() -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if fixture.trace.exists():
+                lines = fixture.trace.read_text().splitlines()
+                if any(
+                    (
+                        lambda record: (
+                            record["operation"] == "register-itree"
+                            and record["status"] == "started"
+                        )
+                    )(json.loads(line))
+                    for line in lines
+                ):
+                    collision.parent.mkdir(parents=True, exist_ok=True)
+                    collision.write_text("REAL-MIDWRITE-COLLISION\n")
+                    return
+            time.sleep(0.001)
+        raise AssertionError(
+            "registration did not start before the synchronization deadline"
+        )
+
+    thread = threading.Thread(target=interfere)
+    thread.start()
+    result = _install(fixture)
+    thread.join(timeout=35)
+    assert not thread.is_alive()
+    assert result.returncode != 0
+    outcome = json.loads(result.stdout)
+    assert outcome["kind"] == "partial"
+    effects = outcome["outcome"]
+    assert [item["operation_id"] for item in effects["confirmed"]] == [
+        "stage-codex-core",
+        "install-claude",
+        "install-opencode",
+        "merge-codex-core",
+        "select-codex",
+    ]
+    assert effects["failed"]["operation_id"] == "register-itree"
+    assert [item["operation_id"] for item in effects["untouched"]] == [
+        "refresh-events",
+        "render-claude",
+        "render-codex",
+        "render-opencode",
+        "restore-default",
+        "confirm",
+    ]
+    assert collision.read_text() == "REAL-MIDWRITE-COLLISION\n"
+    assert not fixture.project.joinpath(
+        ".claude", "skills", "speckit-itree-work", "SKILL.md"
+    ).exists()
+    assert not fixture.project.joinpath(
+        ".opencode", "commands", "speckit.itree.work.md"
+    ).exists()
+    assert not fixture.project.joinpath(".specify", "events.py").exists()
+
+
+def test_unsafe_linked_target_fails_before_writes(tmp_path: Path) -> None:
+    fixture = _installer_fixture(tmp_path)
+    missing = tmp_path / "missing-target"
+    fixture.project.joinpath(".agents").unlink()
+    fixture.project.joinpath(".agents").symlink_to(missing, target_is_directory=True)
+    before = _snapshot(fixture.project)
+    external_before = _snapshot(fixture.external)
+    result = _install(fixture)
+    assert result.returncode == 2
+    assert _snapshot(fixture.project) == before
+    assert _snapshot(fixture.external) == external_before
+    assert not missing.exists()
+    assert not fixture.project.joinpath(".specify", "extensions.yml").exists()
 
 
 class _SlowHandler(http.server.BaseHTTPRequestHandler):
