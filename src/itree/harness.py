@@ -25,7 +25,17 @@ from pydantic import (
 )
 import yaml
 
-from .harness_work import EvidenceLevel, InvocationId, Sha256, WatchdogOutcome
+from .harness_work import (
+    EvidenceLevel,
+    InvocationId,
+    ModelInputMatch,
+    PackageChunk,
+    ProviderInputPayload,
+    Sha256,
+    WatchdogOutcome,
+    WatchdogStatus,
+    compare_source_chunks,
+)
 from .models import CommitSha
 
 IntegrationKey = Literal["claude", "codex", "opencode"]
@@ -307,6 +317,78 @@ def write_sealed_manifest(run_directory: Path, manifest: EvidenceManifest) -> Pa
     return destination
 
 
+def _verify_invocation_contents(
+    manifest: EvidenceManifest, contents: dict[Path, bytes]
+) -> None:
+    for invocation in manifest.invocations:
+        descriptors = sorted(
+            (
+                descriptor
+                for descriptor in manifest.artifacts
+                if descriptor.kind == "source-chunk"
+                and descriptor.invocation_id == invocation.invocation_id
+            ),
+            key=lambda descriptor: descriptor.ordinal,
+        )
+        assert descriptors, {"invocation": invocation.invocation_id}
+        assert tuple(descriptor.ordinal for descriptor in descriptors) == tuple(
+            range(invocation.first_chunk_index, invocation.last_chunk_index + 1)
+        ), {"invocation": invocation.invocation_id, "descriptors": descriptors}
+        for descriptor in descriptors:
+            expected = (
+                Path("source-chunks")
+                / invocation.invocation_id.root
+                / f"{descriptor.ordinal:06d}.md"
+            )
+            assert descriptor.path == expected, {
+                "actual": descriptor.path,
+                "expected": expected,
+            }
+        package = b"".join(contents[descriptor.path] for descriptor in descriptors)
+        assert len(package) == invocation.package_bytes, {
+            "invocation": invocation.invocation_id,
+            "actual": len(package),
+        }
+        assert Sha256.of(package) == invocation.package_sha256, {
+            "invocation": invocation.invocation_id,
+        }
+        if manifest.evidence_level != EvidenceLevel.model_context_verified:
+            continue
+        session_id = manifest.harness.native_session_ids[0]
+        chunks = tuple(
+            PackageChunk(
+                invocation_id=invocation.invocation_id,
+                index=descriptor.ordinal,
+                byte_start=sum(
+                    previous.byte_count
+                    for previous in descriptors[: descriptor.ordinal]
+                ),
+                byte_end=sum(
+                    previous.byte_count
+                    for previous in descriptors[: descriptor.ordinal + 1]
+                ),
+                text=contents[descriptor.path].decode("utf-8"),
+                digest=descriptor.sha256,
+            )
+            for descriptor in descriptors
+        )
+        requests = [
+            contents[descriptor.path]
+            for descriptor in manifest.artifacts
+            if descriptor.kind == "provider-input"
+        ]
+        assert any(
+            isinstance(
+                compare_source_chunks(
+                    chunks,
+                    ProviderInputPayload(session_id=session_id, body=request),
+                ),
+                ModelInputMatch,
+            )
+            for request in requests
+        ), {"invocation": invocation.invocation_id, "session": session_id}
+
+
 def verify_manifest_directory(run_directory: Path) -> EvidenceManifest:
     manifest = EvidenceManifest.model_validate_json(
         (run_directory / "manifest.json").read_bytes()
@@ -322,6 +404,7 @@ def verify_manifest_directory(run_directory: Path) -> EvidenceManifest:
     assert len(recorded) == len(manifest.artifacts), {
         "duplicate_artifact_paths": recorded
     }
+    contents: dict[Path, bytes] = {}
     for descriptor in manifest.artifacts:
         relative = descriptor.path
         assert not relative.is_absolute() and ".." not in relative.parts, {
@@ -333,6 +416,7 @@ def verify_manifest_directory(run_directory: Path) -> EvidenceManifest:
             "bytes": len(content),
         }
         assert Sha256.of(content) == descriptor.sha256, {"path": relative}
+        contents[relative] = content
     actual = {
         path.relative_to(run_directory)
         for path in run_directory.rglob("*")
@@ -342,6 +426,11 @@ def verify_manifest_directory(run_directory: Path) -> EvidenceManifest:
         "unrecorded": actual - recorded,
         "missing": recorded - actual,
     }
+    _verify_invocation_contents(manifest, contents)
+    assert all(
+        process.status != WatchdogStatus.survivor_error
+        for process in manifest.processes
+    )
     return manifest
 
 
@@ -398,6 +487,7 @@ def verify_manifest_commit(
     assert len(recorded) == len(manifest.artifacts)
     assert actual - recorded == {Path("manifest.json"), Path("manifest.sha256")}
     assert recorded - actual == set()
+    contents: dict[Path, bytes] = {}
     for descriptor in manifest.artifacts:
         content = subprocess.run(
             ["git", "show", f"{commit}:{prefix}{descriptor.path.as_posix()}"],
@@ -409,6 +499,12 @@ def verify_manifest_commit(
         assert content.returncode == 0, {"commit": commit, "path": descriptor.path}
         assert len(content.stdout) == descriptor.byte_count
         assert Sha256.of(content.stdout) == descriptor.sha256
+        contents[descriptor.path] = content.stdout
+    _verify_invocation_contents(manifest, contents)
+    assert all(
+        process.status != WatchdogStatus.survivor_error
+        for process in manifest.processes
+    )
     return manifest
 
 

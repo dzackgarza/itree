@@ -719,9 +719,6 @@ def _persist_run(
         if level == EvidenceLevel.emission_only
         else "unaccepted"
     )
-    code = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=SOURCE, text=True
-    ).strip()
     manifest = EvidenceManifest(
         schema_version=1,
         run_id=root.name,
