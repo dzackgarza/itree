@@ -657,6 +657,207 @@ def test_modified_and_premature_streams_have_no_receipt(
     assert not state.joinpath(invocation).exists()
 
 
+@dataclass(frozen=True)
+class InstallerFixture:
+    project: Path
+    external: Path
+    trace: Path
+
+
+def _installer_fixture(root: Path) -> InstallerFixture:
+    project = root / "project"
+    external = root / "external"
+    project.joinpath(".specify", "integrations").mkdir(parents=True)
+    external.joinpath("skills", "user-existing").mkdir(parents=True)
+    external.joinpath("skills", "user-existing", "SKILL.md").write_text(
+        "USER-EXTERNAL-SKILL\n"
+    )
+    project.joinpath("AGENTS.md").write_text("PROJECT-INSTRUCTIONS\n")
+    project.joinpath("CLAUDE.md").write_text("CLAUDE-INSTRUCTIONS\n")
+    project.joinpath(".claude").mkdir()
+    project.joinpath(".claude", "settings.local.json").write_text('{"local": true}\n')
+    project.joinpath(".claude", "settings.json").write_text(
+        json.dumps(
+            {
+                "custom": {"preserve": 7},
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "matcher": "user",
+                            "hooks": [{"type": "command", "command": "user-hook"}],
+                        }
+                    ]
+                },
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    project.joinpath(".codex").mkdir()
+    project.joinpath(".codex", "config.toml").write_text(
+        'model = "retained-model"\n[custom]\npreserve = true\n'
+    )
+    project.joinpath("opencode.json").write_text(
+        json.dumps({"custom": "retained", "$schema": "custom-schema"}) + "\n"
+    )
+    integration = {
+        "version": "1.4.4",
+        "integration_state_schema": 1,
+        "installed_integrations": ["none"],
+        "integration_settings": {"none": {"script": "sh", "invoke_separator": "."}},
+        "integration": "none",
+        "default_integration": "none",
+    }
+    project.joinpath(".specify", "integration.json").write_text(
+        json.dumps(integration, indent=2) + "\n"
+    )
+    project.joinpath(".specify", "init-options.json").write_text(
+        json.dumps(
+            {
+                "ai": "none",
+                "integration": "none",
+                "script": "sh",
+                "speckit_version": "1.4.4",
+            }
+        )
+        + "\n"
+    )
+    project.joinpath(".agents").symlink_to(external, target_is_directory=True)
+    return InstallerFixture(project, external, root / "install-trace.jsonl")
+
+
+def _install(fixture: InstallerFixture) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["ITREE_HARNESS_INSTALL_TRACE"] = str(fixture.trace)
+    return subprocess.run(
+        [str(SOURCE / ".venv" / "bin" / "itree"), "harness"],
+        cwd=fixture.project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=300,
+    )
+
+
+def _snapshot(
+    root: Path, ignored: tuple[Path, ...] = ()
+) -> dict[str, tuple[str, int, str | None, int]]:
+    values: dict[str, tuple[str, int, str | None, int]] = {}
+    for path in sorted(root.rglob("*")):
+        if any(path == excluded or excluded in path.parents for excluded in ignored):
+            continue
+        relative = str(path.relative_to(root))
+        if path.is_symlink():
+            values[relative] = ("symlink", 0, os.readlink(path), path.lstat().st_mode)
+        elif path.is_file():
+            values[relative] = (
+                "file",
+                path.stat().st_mtime_ns,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.stat().st_mode,
+            )
+        else:
+            values[relative] = ("directory", 0, None, path.stat().st_mode)
+    return values
+
+
+def _trace_operations(trace: Path) -> list[str]:
+    return [json.loads(line)["operation"] for line in trace.read_text().splitlines()]
+
+
+def test_real_linked_install_preserves_and_repeats_every_surface(
+    tmp_path: Path,
+) -> None:
+    fixture = _installer_fixture(tmp_path)
+    preserved = {
+        "AGENTS.md": fixture.project.joinpath("AGENTS.md").read_bytes(),
+        "CLAUDE.md": fixture.project.joinpath("CLAUDE.md").read_bytes(),
+        ".claude/settings.local.json": fixture.project.joinpath(
+            ".claude", "settings.local.json"
+        ).read_bytes(),
+    }
+    first = _install(fixture)
+    assert first.returncode == 0, first.stdout + first.stderr
+    for harness, relative in {
+        "claude": ".claude/skills/speckit-itree-work/SKILL.md",
+        "codex": ".agents/skills/speckit-itree-work/SKILL.md",
+        "opencode": ".opencode/commands/speckit.itree.work.md",
+    }.items():
+        path = fixture.project / relative
+        assert path.is_file(), (harness, path)
+        content = path.read_text()
+        assert "$ARGUMENTS" in content
+        assert "prepare" in content and "next" in content and "finish" in content
+    assert fixture.external.joinpath(
+        "skills", "speckit-itree-work", "SKILL.md"
+    ).is_file()
+    assert (
+        fixture.external.joinpath("skills", "user-existing", "SKILL.md").read_text()
+        == "USER-EXTERNAL-SKILL\n"
+    )
+    for relative in (
+        ".codex/config.toml",
+        ".specify/integration.json",
+        ".specify/integrations/codex.manifest.json",
+        ".specify/events.py",
+        ".specify/extensions/registry.json",
+        ".opencode/plugin/speckit-events.ts",
+    ):
+        assert fixture.project.joinpath(relative).is_file(), relative
+    for relative, expected in preserved.items():
+        assert fixture.project.joinpath(relative).read_bytes() == expected
+    claude = json.loads(
+        fixture.project.joinpath(".claude", "settings.json").read_text()
+    )
+    assert claude["custom"] == {"preserve": 7}
+    assert claude["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "user-hook"
+    codex = fixture.project.joinpath(".codex", "config.toml").read_text()
+    assert 'model = "retained-model"' in codex
+    assert "[custom]" in codex and "speckit" in codex
+    opencode = json.loads(fixture.project.joinpath("opencode.json").read_text())
+    assert opencode["custom"] == "retained"
+    assert "speckit-events" in json.dumps(opencode)
+    integration = json.loads(
+        fixture.project.joinpath(".specify", "integration.json").read_text()
+    )
+    assert integration["default_integration"] == "none"
+    assert {"none", "claude", "codex", "opencode"} <= set(
+        integration["installed_integrations"]
+    )
+    assert not fixture.project.joinpath(".specify", "feature.json").exists()
+    assert not fixture.project.joinpath(
+        ".specify", "extensions", "agent-context"
+    ).exists()
+    assert not list(fixture.project.glob(".specify/presets/**"))
+    operations = _trace_operations(fixture.trace)
+    assert operations.index("register-itree") < operations.index("refresh-events")
+    first_project = _snapshot(fixture.project, (fixture.trace,))
+    first_external = _snapshot(fixture.external)
+    second = _install(fixture)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert _snapshot(fixture.project, (fixture.trace,)) == first_project
+    assert _snapshot(fixture.external) == first_external
+    second_operations = _trace_operations(fixture.trace)
+    assert second_operations.index(
+        "register-itree", len(operations)
+    ) < second_operations.index("refresh-events", len(operations))
+
+
+def test_modified_owned_artifact_stops_before_any_write(tmp_path: Path) -> None:
+    fixture = _installer_fixture(tmp_path)
+    first = _install(fixture)
+    assert first.returncode == 0, first.stdout + first.stderr
+    command = fixture.project / ".claude" / "skills" / "speckit-itree-work" / "SKILL.md"
+    command.write_text(command.read_text() + "LOCAL-MODIFICATION\n")
+    before = _snapshot(fixture.project)
+    external_before = _snapshot(fixture.external)
+    result = _install(fixture)
+    assert result.returncode != 0
+    assert _snapshot(fixture.project) == before
+    assert _snapshot(fixture.external) == external_before
+
+
 class _SlowHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         time.sleep(15)
