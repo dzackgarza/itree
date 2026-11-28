@@ -1145,8 +1145,27 @@ def test_packaged_extension_has_one_shared_upstream_surface() -> None:
     assert "{SCRIPT}" in work
     assert "prepare" in work and "next" in work and "finish" in work
     assert "emission-only" in work
-    initialization = (resource / "scripts" / "python" / "initialize.py").read_text()
-    assert "work_loader" not in initialization
+    bare_root = SOURCE / ".venv"
+    initialized = subprocess.run(
+        [
+            str(bare_root / "bin" / "python"),
+            str(resource / "scripts" / "python" / "initialize.py"),
+        ],
+        cwd=SOURCE,
+        env={
+            **os.environ,
+            "ITREE_HARNESS_WORK_ROOT": str(bare_root / "no-work-selection"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+    assert initialized.stderr == ""
+    assert json.loads(initialized.stdout)["kind"] == "initialized"
+    assert "dzackgarza/itree#" not in initialized.stdout
+    assert not (bare_root / "no-work-selection").exists()
 
 
 def test_provider_comparison_requires_every_chunk_in_order() -> None:
