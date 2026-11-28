@@ -641,6 +641,71 @@ def test_read_and_usage_failures_preserve_public_process_semantics(
     assert malformed.stdout == ""
 
 
+def test_invalid_deadline_is_a_usage_failure(tmp_path: Path) -> None:
+    environment = {**os.environ, "ITREE_HARNESS_WORK_ROOT": str(tmp_path / "state")}
+    result = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "itree"),
+            "harness-work",
+            "prepare",
+            "dzackgarza/itree#68",
+            "--deadline-ms",
+            "0",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["kind"] == "usage_failure"
+
+
+def test_manifest_identity_must_match_requested_invocation(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    environment = {**os.environ, "ITREE_HARNESS_WORK_ROOT": str(state)}
+    prepared = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "itree"),
+            "harness-work",
+            "prepare",
+            "dzackgarza/itree#68",
+            "--deadline-ms",
+            "180000",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=240,
+    )
+    assert prepared.returncode == 0, prepared.stderr
+    actual = json.loads(prepared.stdout)["invocation_id"]
+    requested = "b" * 32
+    assert requested != actual
+    state.joinpath(actual).rename(state / requested)
+
+    result = subprocess.run(
+        [
+            str(SOURCE / ".venv" / "bin" / "itree"),
+            "harness-work",
+            "next",
+            requested,
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
 def test_modified_and_premature_streams_have_no_receipt(
     fixture: HarnessFixture, tmp_path: Path
 ) -> None:
@@ -977,9 +1042,49 @@ def test_real_slow_endpoint_is_terminated_and_reaped(
         "--deadline-ms",
         "600",
     )
+    from itree.harness_work import WatchdogStatus
+    from tests.test_harness_acceptance import external_watchdog
+
+    watchdog_outcome, watchdog_stdout, watchdog_stderr = external_watchdog(
+        [
+            str(
+                SOURCE
+                / "src"
+                / "itree"
+                / "resources"
+                / "speckit_itree"
+                / "scripts"
+                / "python"
+                / "work_loader.py"
+            ),
+            "prepare",
+            fixture.ref(fixture.slow),
+            "--deadline-ms",
+            "180000",
+        ],
+        fixture.root,
+        {**os.environ, "ITREE_HARNESS_WORK_ROOT": str(tmp_path / "external-state")},
+        100,
+    )
+    tmp_path.joinpath("external-watchdog.json").write_text(
+        json.dumps(
+            {
+                "outcome": watchdog_outcome.model_dump(mode="json"),
+                "stdout": watchdog_stdout,
+                "stderr": watchdog_stderr,
+            }
+        )
+        + "\n"
+    )
     server.shutdown()
     thread.join()
     server.server_close()
+    assert watchdog_outcome.status == WatchdogStatus.forced_termination
+    assert watchdog_outcome.reaped is True
+    assert watchdog_outcome.remaining_children == ()
+    assert watchdog_outcome.signals == (int(signal.SIGTERM), int(signal.SIGKILL))
+    assert watchdog_outcome.external_elapsed_seconds > 0
+    assert watchdog_stdout == ""
     assert result.returncode == 4
     process_files = list((tmp_path / "state").glob("*/process.json"))
     assert len(process_files) == 1
