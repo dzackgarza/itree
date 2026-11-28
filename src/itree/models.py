@@ -954,6 +954,14 @@ class GitRefResolution(BaseModel):
     matched_refs: tuple[GitRefIdentity, ...] = Field(min_length=1)
 
 
+class GithubInstallation(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    id: int = Field(gt=0)
+    node_id: str = Field(min_length=1)
+    slug: str = Field(min_length=1)
+
+
 class IssueComment(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -964,6 +972,7 @@ class IssueComment(BaseModel):
     created_at: str
     updated_at: str
     html_url: str
+    performed_via_github_app: GithubInstallation | None = None
 
     @field_validator("author", mode="before")
     @classmethod
@@ -1379,6 +1388,31 @@ class ReceiptContent(StageModel):
     artifacts: tuple[ArtifactIndexEntry, ...] = ()
 
 
+ReceiptStatus = Literal[
+    "intended",
+    "confirmed",
+    "rejected",
+    "indeterminate",
+    "session_admitted",
+    "session_released",
+    "drain_scanned",
+    "seal_invalidated",
+]
+ReceiptRejectionReason = Literal[
+    "duplicate_payload_conflict",
+    "github_http_rejection",
+    "conflict",
+    "writer_seal_invalid",
+    "layout_invalid",
+    "fence_changed",
+    "candidate_changed",
+    "readback_mismatch",
+    "authorization_revoked",
+    "node_changed",
+    "external_submission",
+]
+
+
 class ReceiptPayload(StageModel):
     version: Literal[1]
     issue_node_id: IssueNodeId
@@ -1614,7 +1648,52 @@ class SectionEditProposal(StageModel):
     attempt_id: AttemptId
     session_id: SessionId
     base_body_sha256: Sha256
+    base_body: str
     changes: tuple[SectionReplacement, ...] = Field(min_length=1)
+
+
+class SessionAdmissionRequest(StageModel):
+    version: Literal[1]
+    request_kind: Literal["session_admit"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    entry_body_sha256: Sha256
+    enrolled_actors: tuple[ActorLogin, ...] = Field(min_length=1)
+
+
+class SessionReleaseRequest(StageModel):
+    version: Literal[1]
+    request_kind: Literal["session_release"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    expected_last_scanned_comment_id: IssueCommentId
+
+
+class LegacyIntakeProposal(StageModel):
+    version: Literal[1]
+    request_kind: Literal["legacy_intake"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    base_body_sha256: Sha256
+    legacy_base: str
+    requirements: str
+    plan: str
+    tasks: str
+
+
+StageProposal = Annotated[
+    SectionEditProposal | LegacyIntakeProposal,
+    Field(discriminator="request_kind"),
+]
 
 
 class TaskFieldProposal(StageModel):

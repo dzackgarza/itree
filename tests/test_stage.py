@@ -72,6 +72,10 @@ def test_no_change_legacy_round_trip_preserves_zero_markers(
 ) -> None:
     fixture = StageFixture(tmp_path / "fixture", legacy)
     feature, values = fixture.materialize("A-legacy-no-change")
+    original_inputs = {
+        name: feature.joinpath(name).read_bytes()
+        for name in ("spec.md", "plan.md", "tasks.md")
+    }
 
     result = fixture.run(
         "stage",
@@ -86,9 +90,7 @@ def test_no_change_legacy_round_trip_preserves_zero_markers(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert values["layout"] == "legacy"
-    assert feature.joinpath("spec.md").read_bytes() == b""
-    assert feature.joinpath("plan.md").read_bytes() == b""
-    assert feature.joinpath("tasks.md").read_bytes() == b""
+    assert original_inputs == {"spec.md": b"", "plan.md": b"", "tasks.md": b""}
     assert not feature.exists()
     assert fixture.issue_body() == legacy
     assert fixture.patches() == []
@@ -98,7 +100,8 @@ def test_only_the_changed_owned_ranges_move(tmp_path: Path) -> None:
     fixture = StageFixture(tmp_path / "fixture")
     feature, _ = fixture.materialize("A-ranges")
     original = fixture.issue_body()
-    feature.joinpath("plan.md").write_text("Plan one β\n", encoding="utf-8")
+    plan = 'Plan one β\n```itree-contract\nkind = "audit"\nevidence = "narrows"\n```\n'
+    feature.joinpath("plan.md").write_text(plan, encoding="utf-8")
     feature.joinpath("tasks.md").write_text("Tasks changed δ\n", encoding="utf-8")
 
     result = fixture.run(
@@ -198,7 +201,7 @@ def test_legacy_intake_is_atomic_and_requires_an_explicit_flag(
         "write-back",
         ISSUE_REF,
         "--attempt",
-        "A-intake-required",
+        "A-intake",
         "--feature-directory",
         str(feature),
         writer=True,

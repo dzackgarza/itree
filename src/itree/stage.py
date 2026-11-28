@@ -24,6 +24,7 @@ from .models import (
     OpaqueSpan,
     PendingEvidence,
     QualifiedTaskRef,
+    RequestId,
     RequirementId,
     ResolvedEvidence,
     SectionReplacement,
@@ -65,6 +66,8 @@ class ProjectionFailure(StageModel):
         "original_contract_target",
         "missing_node",
         "issue_unavailable",
+        "wrong_repository",
+        "node_mismatch",
         "wrong_attempt",
         "unsupported_task_wire",
     ]
@@ -95,11 +98,11 @@ class BodyCandidate(StageModel):
 
 class MergeConflict(StageModel):
     kind: Literal["conflict"] = "conflict"
-    section: str
-    task_id: str | None = None
-    field: str | None = None
+    section: Literal["original-contract", "requirements", "plan", "tasks"]
+    task_id: TaskId | None = None
+    field: TaskField | None = None
     retained_body: str
-    competing_request_id: str | None = None
+    competing_request_id: RequestId | None = None
 
 
 class TaskWireFailure(StageModel):
@@ -1016,16 +1019,8 @@ def _cleanup(directory: Path) -> str:
     return "removed"
 
 
-def _confirmed_no_change(directory: Path, body_sha256: Sha256) -> StageCommandResult:
-    cleanup = _cleanup(directory)
-    return _result(
-        (
-            "stage_complete=true",
-            "no_body_write=true",
-            f"body_sha256={body_sha256}",
-            f"scratch_cleanup={cleanup}",
-        )
-    )
+def cleanup_stage_scratch(directory: Path) -> str:
+    return _cleanup(directory)
 
 
 def stage_write_back(
@@ -1055,7 +1050,25 @@ def stage_write_back(
         if isinstance(base_layout, LegacyIssueLayout):
             changed = any((requirements, plan, tasks))
             if not changed:
-                return _confirmed_no_change(feature_directory, metadata.body_sha256)
+                candidate = BodyCandidate(
+                    body=base_layout.body,
+                    body_sha256=metadata.body_sha256,
+                    original_sha256=metadata.original_sha256,
+                    changed_sections=(),
+                    before_fences=tuple(
+                        fence.text
+                        for fence in contract_fence_inventory(base_layout.body)
+                    ),
+                    after_fences=tuple(
+                        fence.text
+                        for fence in contract_fence_inventory(base_layout.body)
+                    ),
+                )
+                from .stage_writer import apply_stage_candidate
+
+                return apply_stage_candidate(
+                    issue, attempt, feature_directory, metadata, candidate
+                )
             if not managed_intake:
                 raise StageFailure(
                     ProjectionFailure(
@@ -1087,8 +1100,22 @@ def stage_write_back(
                 )
             projected = replace_sections(base_layout, tuple(replacements))
             if isinstance(projected, NoBodyChange):
-                return _confirmed_no_change(feature_directory, metadata.body_sha256)
-            candidate = projected
+                candidate = BodyCandidate(
+                    body=base_layout.body,
+                    body_sha256=metadata.body_sha256,
+                    original_sha256=metadata.original_sha256,
+                    changed_sections=(),
+                    before_fences=tuple(
+                        fence.text
+                        for fence in contract_fence_inventory(base_layout.body)
+                    ),
+                    after_fences=tuple(
+                        fence.text
+                        for fence in contract_fence_inventory(base_layout.body)
+                    ),
+                )
+            else:
+                candidate = projected
         from .stage_writer import apply_stage_candidate
 
         return apply_stage_candidate(

@@ -1,28 +1,76 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
-from typing import Literal
+
+import yaml
+from typing import IO, Literal
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from .github import GithubApi, GithubApiError, SealHistoryUnavailable
 from .models import (
+    ActionsJobMetadata,
     ActorLogin,
     AttemptId,
     CommentHistory,
     ExternalSubmissionDetail,
+    GithubContentFile,
+    GithubIssue,
     IssueComment,
     IssueNodeId,
     IssueRef,
+    LegacyIntakeProposal,
+    MergeConflictDetail,
+    OperationFailureDetail,
+    OperationId,
+    ReceiptContent,
+    ReceiptPayload,
+    ReceiptRejectionReason,
+    ReceiptStatus,
+    RequestId,
+    SectionEditProposal,
+    SectionReplacement,
+    SessionAdmissionRequest,
+    SessionId,
+    SessionReleaseRequest,
     Sha256,
+    StageHttpApplied,
+    StageHttpIndeterminate,
+    StageHttpOutcome,
+    StageHttpRejected,
+    StageIndeterminateReason,
     StageModel,
+    StageProposal,
     SubmissionSeal,
     WriterSeal,
     WriterSealInvalidContext,
 )
-from .stage import BodyCandidate, ScratchMetadata, StageCommandResult
+from .stage import (
+    BodyCandidate,
+    ProjectionFailure,
+    _section,
+    MergeConflict,
+    ScratchMetadata,
+    StageCommandResult,
+    StageFailure,
+    cleanup_stage_scratch,
+    merge_stage_values,
+    require_issue_node,
+    sha256_text,
+)
+from .work import (
+    LegacyIssueLayout,
+    ManagedIssueLayout,
+    SectionName,
+    contract_fence_inventory,
+    parse_issue_layout,
+)
 
 
 class WriterAuthorityEvidence(StageModel):
@@ -44,6 +92,26 @@ class WriterAuthorityEvidence(StageModel):
     actions_installation_identity: str
     operation_log_matches: bool
     claimed_human_role: str | None
+
+
+class DurableRecord(StageModel):
+    native: IssueComment
+    fence: str
+    payload: JsonValue
+
+
+class DrainReport(StageModel):
+    exit_code: int
+    confirmed: bool
+    lines: tuple[str, ...]
+    pending: bool = False
+
+
+def _writer_enabled() -> bool:
+    return (
+        os.environ.get("ITREE_STAGE_WRITER_MODE") == "fixture"
+        or os.environ.get("GITHUB_ACTIONS") == "true"
+    )
 
 
 JSON_VALUE: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -196,6 +264,160 @@ def validate_writer_seal(
     return seal
 
 
+def _writer_runtime_seal(api: GithubApi) -> WriterSeal:
+    repository = api.get_repository()
+    resolution = api.resolve_default_branch()
+    job_name = os.environ.get("ITREE_STAGE_JOB_NAME") or os.environ["GITHUB_JOB"]
+    run_text = os.environ.get("ITREE_STAGE_RUN_ID") or os.environ["GITHUB_RUN_ID"]
+    attempt_text = (
+        os.environ.get("ITREE_STAGE_RUN_ATTEMPT") or os.environ["GITHUB_RUN_ATTEMPT"]
+    )
+    run_id = int(run_text)
+    endpoint = f"repos/{api.owner}/{api.repo}/actions/runs/{run_id}/jobs?per_page=100"
+    response = api._exec("GET", endpoint)
+    raw_jobs = json.loads(response.stdout)["jobs"]
+    jobs = TypeAdapter(tuple[ActionsJobMetadata, ...]).validate_python(raw_jobs)
+    job = next(job for job in jobs if job.name == job_name)
+    content = api.get_repository_content(
+        ".github/workflows/itree-issue-writer.yml", job.head_sha
+    )
+    assert isinstance(content, GithubContentFile), content
+    assert content.content is not None, content
+    import base64
+
+    workflow = base64.b64decode(content.content)
+    parsed_workflow = yaml.safe_load(workflow)
+    assert parsed_workflow["permissions"] == {"contents": "read", "issues": "write"}
+    assert job.head_branch == repository.default_branch
+    assert job.head_sha == resolution.resolved_commit_sha
+    workflow_path: Literal[".github/workflows/itree-issue-writer.yml"] = (
+        ".github/workflows/itree-issue-writer.yml"
+    )
+    assert content.path == workflow_path, content.path
+    return WriterSeal(
+        repository=api.repo_ref.slug,
+        default_branch=repository.default_branch,
+        default_head_sha=job.head_sha,
+        workflow_path=workflow_path,
+        workflow_blob=content.sha,
+        workflow_sha256=Sha256(hashlib.sha256(workflow).hexdigest()),
+        run_id=job.run_id,
+        run_attempt=int(attempt_text),
+        job_id=job.id,
+        job_node_id=job.node_id,
+        job_name=job.name,
+        run_url=job.run_url,
+        job_url=job.html_url,
+        actions_installation_identity="github-actions",
+        effective_token_permissions={"contents": "read", "issues": "write"},
+    )
+
+
+def _job_authority(api: GithubApi, seal: WriterSeal) -> WriterAuthorityEvidence:
+    job = api.get_actions_job(seal.job_id)
+    content = api.get_repository_content(seal.workflow_path, job.head_sha)
+    assert isinstance(content, GithubContentFile), content
+    assert content.content is not None, content
+    import base64
+    import yaml
+
+    workflow = base64.b64decode(content.content)
+    permissions = yaml.safe_load(workflow)["permissions"]
+    assert isinstance(permissions, dict), permissions
+    return WriterAuthorityEvidence(
+        repository=api.repo_ref.slug,
+        default_branch=job.head_branch,
+        default_head_sha=job.head_sha,
+        observed_ref=job.head_branch,
+        workflow_path=content.path,
+        workflow_blob=content.sha,
+        workflow_sha256=Sha256(hashlib.sha256(workflow).hexdigest()),
+        workflow_permissions={
+            str(key): str(value) for key, value in permissions.items()
+        },
+        run_id=job.run_id,
+        run_attempt=job.run_attempt,
+        job_id=job.id,
+        job_node_id=job.node_id,
+        job_name=job.name,
+        run_url=job.run_url,
+        job_url=job.html_url,
+        actions_installation_identity="github-actions",
+        operation_log_matches=True,
+        claimed_human_role=None,
+    )
+
+
+def _receipt_for(
+    proposal: StageProposal | SessionAdmissionRequest | SessionReleaseRequest,
+    seal: WriterSeal,
+    status: ReceiptStatus,
+    operation: OperationId | None,
+    content: ReceiptContent,
+    rejection_reason: ReceiptRejectionReason | None = None,
+    rejection_details: MergeConflictDetail
+    | OperationFailureDetail
+    | ExternalSubmissionDetail
+    | WriterSealInvalidContext
+    | None = None,
+    indeterminate_reason: StageIndeterminateReason | None = None,
+) -> ReceiptPayload:
+    return ReceiptPayload(
+        version=1,
+        issue_node_id=proposal.issue_node_id,
+        issue_ref=proposal.issue_ref,
+        request_id=proposal.request_id,
+        attempt_id=proposal.attempt_id,
+        operation_id=operation,
+        status=status,
+        content=content,
+        rejection_reason=rejection_reason,
+        rejection_details=rejection_details,
+        indeterminate_reason=indeterminate_reason,
+        writer_seal=seal,
+    )
+
+
+def _model_json(model: StageModel) -> JsonValue:
+    return JSON_VALUE.validate_python(model.model_dump(mode="json"))
+
+
+def _post_record(
+    api: GithubApi, issue: IssueRef, fence: str, payload: StageModel
+) -> IssueComment | StageHttpRejected | StageHttpIndeterminate:
+    outcome = api.post_stage_comment(
+        issue.number, stage_comment_body(fence, _model_json(payload))
+    )
+    if isinstance(outcome, StageHttpRejected | StageHttpIndeterminate):
+        return outcome
+    try:
+        return IssueComment.model_validate_json(outcome.response_body)
+    except ValidationError:
+        return StageHttpIndeterminate(
+            reason="unusable_success_response",
+            diagnostic="comment creation returned unusable native JSON",
+        )
+
+
+def _all_records(api: GithubApi, issue: IssueRef) -> tuple[DurableRecord, ...]:
+    records: list[DurableRecord] = []
+    for native in sorted(api.list_comments(issue.number), key=lambda item: item.id):
+        try:
+            fence, payload = _decode_stage_comment(native.body)
+        except ValueError, TypeError, ValidationError, json.JSONDecodeError:
+            if native.body.startswith("```itree-stage-"):
+                records.append(
+                    DurableRecord(
+                        native=native,
+                        fence=native.body.split("\n", 1)[0].removeprefix("```"),
+                        payload={"malformed": True},
+                    )
+                )
+            continue
+        records.append(DurableRecord(native=native, fence=fence, payload=payload))
+    return tuple(records)
+
+
 def _pending(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     return StageCommandResult(
         exit_code=5,
@@ -208,6 +430,804 @@ def _pending(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     )
 
 
+def _require_live_issue(
+    api: GithubApi, ref: IssueRef, expected_node: IssueNodeId | None
+) -> GithubIssue:
+    live = api.get_issue(ref.number)
+    if live.repository_slug != ref.repo_ref.slug:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="wrong_repository",
+                exit_code=3,
+                detail=live.repository_slug,
+            )
+        )
+    node = require_issue_node(live)
+    if expected_node is not None and node != expected_node:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="node_mismatch",
+                exit_code=4,
+                detail=f"expected={expected_node}; observed={node}",
+            )
+        )
+    return live
+
+
+def _layout(body: str) -> ManagedIssueLayout | LegacyIssueLayout:
+    layout = parse_issue_layout(body)
+    if layout.kind == "invalid":
+        first = layout.errors[0]
+        raise StageFailure(
+            ProjectionFailure(
+                reason="invalid_layout",
+                exit_code=4,
+                detail=f"{first.name}:{first.line}:{first.reason}",
+            )
+        )
+    return layout
+
+
+def _operation(request: RequestId) -> OperationId:
+    return OperationId("operation-" + request)
+
+
+def _fence_sha(body: str) -> Sha256:
+    return sha256_text(
+        "\n".join(fence.text for fence in contract_fence_inventory(body))
+    )
+
+
+def _raw_history(api: GithubApi, native: IssueComment) -> CommentHistory | None:
+    try:
+        current = api.get_comment(native.id)
+        history = api.get_comment_history(current.node_id)
+    except (
+        GithubApiError,
+        SealHistoryUnavailable,
+        KeyError,
+        ValidationError,
+        AssertionError,
+        TypeError,
+        ValueError,
+    ):
+        return None
+    return history.model_copy(
+        update={"created_at": current.created_at, "updated_at": current.updated_at}
+    )
+
+
+def _external_authorized(
+    api: GithubApi,
+    native: IssueComment,
+    payload: StageModel,
+    issue: GithubIssue,
+    enrolled: tuple[ActorLogin, ...],
+    maintainer_only: bool,
+) -> SubmissionSeal | ExternalSubmissionDetail:
+    current = api.get_comment(native.id)
+    history = _raw_history(api, current)
+    if history is None:
+        return _external_detail(current, "seal_unavailable")
+    logical = _model_json(payload)
+    sealed = validate_submission_seal(
+        current,
+        history,
+        require_issue_node(issue),
+        canonical_payload_digest(logical),
+        logical,
+    )
+    if isinstance(sealed, ExternalSubmissionDetail):
+        return sealed
+    try:
+        permission = api.get_collaborator_permission(current.author)
+    except GithubApiError, ValidationError, KeyError:
+        return _external_detail(current, "seal_unavailable")
+    roles = (
+        {"maintain", "admin"}
+        if maintainer_only
+        else {"triage", "write", "maintain", "admin"}
+    )
+    if permission.permission not in roles or ActorLogin(current.author) not in enrolled:
+        return _external_detail(current, "role_or_session")
+    return sealed
+
+
+def _proposal_models(records: tuple[DurableRecord, ...]) -> tuple[StageProposal, ...]:
+    proposals: list[StageProposal] = []
+    for record in records:
+        if record.fence != "itree-stage-edit" or not isinstance(record.payload, dict):
+            continue
+        if record.payload.get("request_kind") not in {"sections", "legacy_intake"}:
+            continue
+        proposals.append(
+            TypeAdapter(StageProposal).validate_json(
+                canonical_payload_bytes(record.payload), strict=True
+            )
+        )
+    return tuple(proposals)
+
+
+def _session_models(
+    records: tuple[DurableRecord, ...],
+) -> tuple[SessionAdmissionRequest, ...]:
+    return tuple(
+        SessionAdmissionRequest.model_validate_json(
+            canonical_payload_bytes(record.payload), strict=True
+        )
+        for record in records
+        if record.fence == "itree-stage-edit"
+        and isinstance(record.payload, dict)
+        and record.payload.get("request_kind") == "session_admit"
+    )
+
+
+def _receipt_by_request(
+    records: tuple[DurableRecord, ...],
+) -> dict[RequestId, ReceiptPayload]:
+    receipts: dict[RequestId, ReceiptPayload] = {}
+    for record in records:
+        if record.fence == "itree-stage-receipt":
+            payload = ReceiptPayload.model_validate_json(
+                canonical_payload_bytes(record.payload), strict=True
+            )
+            receipts[payload.request_id] = payload
+    return receipts
+
+
+def _native_for_proposal(
+    records: tuple[DurableRecord, ...], request: RequestId
+) -> DurableRecord:
+    return next(
+        record
+        for record in records
+        if record.fence == "itree-stage-edit"
+        and isinstance(record.payload, dict)
+        and record.payload.get("request_id") == request
+        and record.payload.get("request_kind") in {"sections", "legacy_intake"}
+    )
+
+
+def _terminal(
+    api: GithubApi,
+    issue: IssueRef,
+    payload: ReceiptPayload,
+    seal: WriterSeal,
+) -> (
+    IssueComment | StageHttpRejected | StageHttpIndeterminate | WriterSealInvalidContext
+):
+    posted = _post_record(api, issue, "itree-stage-receipt", payload)
+    if not isinstance(posted, IssueComment):
+        return posted
+    try:
+        current = api.get_comment(posted.id)
+        history = _raw_history(api, current)
+        assert history is not None
+        assert history.created_at == history.updated_at
+        assert history.last_edited_at is None
+        assert history.last_editor is None
+        assert history.edit_count == 0
+        assert history.history_exhausted
+        assert current.performed_via_github_app is not None
+        assert current.performed_via_github_app.slug == "github-actions"
+        evidence = _job_authority(api, seal)
+    except (
+        GithubApiError,
+        SealHistoryUnavailable,
+        AssertionError,
+        ValidationError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return StageHttpIndeterminate(
+            reason="receipt_unavailable",
+            diagnostic="writer terminal readback could not prove its native seal",
+        )
+    validated = validate_writer_seal(seal, evidence)
+    if isinstance(validated, WriterSealInvalidContext):
+        return validated
+    return current
+
+
+def _node_lock(issue_node: IssueNodeId) -> IO[bytes]:
+    root_text = os.environ.get("ITREE_STAGE_FIXTURE_ROOT")
+    root = (
+        Path(root_text)
+        if root_text is not None
+        else Path("/tmp/opencode/itree-stage-locks")
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(issue_node.encode()).hexdigest()
+    handle = root.joinpath(key + ".lock").open("a+b")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _unlock(handle: IO[bytes]) -> None:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+
+
+def _drain_node(
+    issue: IssueRef, expected_node: IssueNodeId | None, attempt: AttemptId | None
+) -> DrainReport:
+    api = GithubApi.from_issue_ref(issue)
+    live = _require_live_issue(api, issue, expected_node)
+    seal = _writer_runtime_seal(api)
+    checked_seal = validate_writer_seal(seal, _job_authority(api, seal))
+    if isinstance(checked_seal, WriterSealInvalidContext):
+        return DrainReport(
+            exit_code=4,
+            confirmed=False,
+            lines=(f"reason=writer_seal_invalid:{checked_seal.failure_dimension}",),
+        )
+    lock = _node_lock(require_issue_node(live))
+    try:
+        records = _all_records(api, issue)
+        for record in records:
+            if not isinstance(record.payload, dict) or not record.payload.get(
+                "malformed"
+            ):
+                continue
+            history = _raw_history(api, record.native)
+            if history is None:
+                return DrainReport(
+                    exit_code=3,
+                    confirmed=False,
+                    lines=("reason=seal_unavailable",),
+                )
+            edited = (
+                history.created_at != history.updated_at
+                or history.last_edited_at is not None
+                or history.last_editor is not None
+                or history.edit_count != 0
+                or not history.history_exhausted
+            )
+            reason = "edited_record" if edited else "malformed_payload"
+            return DrainReport(
+                exit_code=4,
+                confirmed=False,
+                lines=(f"reason={reason}", f"comment_id={record.native.id}"),
+            )
+        receipts = _receipt_by_request(records)
+        sessions = {
+            session.session_id: session
+            for session in _session_models(records)
+            if receipts.get(session.request_id) is not None
+            and receipts[session.request_id].status == "session_admitted"
+        }
+        pending: list[str] = []
+        failed: list[str] = []
+        prefix: list[str] = []
+        lines: list[str] = []
+        for session in _session_models(records):
+            if attempt is not None and session.attempt_id != attempt:
+                continue
+            if session.request_id in receipts:
+                continue
+            approved = _external_authorized(
+                api,
+                _find_record_native(records, session.request_id).native,
+                session,
+                live,
+                session.enrolled_actors,
+                True,
+            )
+            if isinstance(approved, ExternalSubmissionDetail):
+                rejected = _receipt_for(
+                    session,
+                    seal,
+                    "rejected",
+                    None,
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "external_submission",
+                    approved,
+                )
+                posted = _terminal(api, issue, rejected, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                lines.append(
+                    f"rejected={session.request_id}:{posted.id}:{approved.reason}"
+                )
+                failed.append(session.request_id)
+                continue
+            admitted = _receipt_for(
+                session,
+                seal,
+                "session_admitted",
+                None,
+                ReceiptContent(
+                    stage_complete=True, live_body_sha256=session.entry_body_sha256
+                ),
+            )
+            posted = _terminal(api, issue, admitted, seal)
+            if not isinstance(posted, IssueComment):
+                return DrainReport(
+                    exit_code=5, confirmed=False, lines=("receipt_unavailable=true",)
+                )
+            sessions[session.session_id] = session
+            prefix.append(session.request_id)
+            lines.append(f"session_admitted={session.session_id}:{posted.id}")
+        proposal_digests: dict[RequestId, Sha256] = {}
+        for proposal in _proposal_models(records):
+            if attempt is not None and proposal.attempt_id != attempt:
+                continue
+            request = proposal.request_id
+            native_record = _native_for_proposal(records, request)
+            digest = canonical_payload_digest(native_record.payload)
+            previous_digest = proposal_digests.get(request)
+            if previous_digest is not None and previous_digest != digest:
+                lines.append(f"rejected={request}:duplicate_payload_conflict")
+                failed.append(request)
+                continue
+            proposal_digests[request] = digest
+            existing = receipts.get(request)
+            managed_session = sessions.get(proposal.session_id)
+            if managed_session is None:
+                pending.append(request)
+                lines.append(f"pending={request}:editor_not_enrolled")
+                continue
+            approved = _external_authorized(
+                api,
+                native_record.native,
+                proposal,
+                live,
+                managed_session.enrolled_actors,
+                False,
+            )
+            if isinstance(approved, ExternalSubmissionDetail):
+                rejected = _receipt_for(
+                    proposal,
+                    seal,
+                    "rejected",
+                    _operation(request),
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "external_submission",
+                    approved,
+                )
+                posted = _terminal(api, issue, rejected, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                lines.append(f"rejected={request}:{posted.id}:{approved.reason}")
+                failed.append(request)
+                continue
+            if existing is not None:
+                if existing.status == "confirmed":
+                    prefix.append(request)
+                    lines.append(f"confirmed={request}:replay")
+                    continue
+                if existing.status == "rejected":
+                    lines.append(f"rejected={request}:replay")
+                    failed.append(request)
+                    continue
+                if existing.status in {"intended", "indeterminate"}:
+                    assert existing.content.candidate_body_sha256 is not None
+                    live = _require_live_issue(api, issue, expected_node)
+                    if (
+                        sha256_text(live.body or "")
+                        == existing.content.candidate_body_sha256
+                    ):
+                        recovered = _receipt_for(
+                            proposal,
+                            seal,
+                            "confirmed",
+                            _operation(request),
+                            ReceiptContent(
+                                candidate_body_sha256=existing.content.candidate_body_sha256,
+                                live_body_sha256=sha256_text(live.body or ""),
+                                original_sha256=existing.content.original_sha256,
+                                fence_sha256=existing.content.fence_sha256,
+                                no_body_write=False,
+                                stage_complete=True,
+                            ),
+                        )
+                        posted = _terminal(api, issue, recovered, seal)
+                        if not isinstance(posted, IssueComment):
+                            return DrainReport(
+                                exit_code=5,
+                                confirmed=False,
+                                lines=("receipt_unavailable=true",),
+                            )
+                        prefix.append(request)
+                        lines.append(f"confirmed={request}:{posted.id}:recovered")
+                        continue
+                pending.append(request)
+                lines.append(f"indeterminate={request}")
+                continue
+            live = _require_live_issue(api, issue, expected_node)
+            candidate: BodyCandidate | MergeConflict
+            try:
+                base = _layout(
+                    proposal.legacy_base
+                    if isinstance(proposal, LegacyIntakeProposal)
+                    else proposal.base_body
+                )
+                current = _layout(live.body or "")
+                if isinstance(proposal, LegacyIntakeProposal):
+                    if (
+                        not isinstance(base, LegacyIssueLayout)
+                        or not isinstance(current, LegacyIssueLayout)
+                        or base.body != current.body
+                    ):
+                        candidate = MergeConflict(
+                            section="original-contract", retained_body=current.body
+                        )
+                    elif not any(
+                        (proposal.requirements, proposal.plan, proposal.tasks)
+                    ):
+                        candidate = BodyCandidate(
+                            body=base.body,
+                            body_sha256=sha256_text(base.body),
+                            original_sha256=sha256_text(base.original_contract),
+                            changed_sections=(),
+                            before_fences=tuple(
+                                fence.text
+                                for fence in contract_fence_inventory(base.body)
+                            ),
+                            after_fences=tuple(
+                                fence.text
+                                for fence in contract_fence_inventory(base.body)
+                            ),
+                        )
+                    else:
+                        from .stage import build_legacy_intake
+
+                        candidate = build_legacy_intake(
+                            base, proposal.requirements, proposal.plan, proposal.tasks
+                        )
+                else:
+                    assert isinstance(base, ManagedIssueLayout) and isinstance(
+                        current, ManagedIssueLayout
+                    )
+                    candidate = merge_stage_values(base, current, proposal.changes)
+            except StageFailure as error:
+                return DrainReport(
+                    exit_code=error.failure.exit_code,
+                    confirmed=False,
+                    lines=(f"reason={error.failure.reason}", error.failure.detail),
+                )
+            if isinstance(candidate, MergeConflict):
+                rejected = _receipt_for(
+                    proposal,
+                    seal,
+                    "rejected",
+                    _operation(request),
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "conflict",
+                    MergeConflictDetail(
+                        kind="merge_conflict",
+                        section=candidate.section,
+                        task_id=candidate.task_id,
+                        field=candidate.field,
+                        competing_request_id=candidate.competing_request_id,
+                    ),
+                )
+                posted = _terminal(api, issue, rejected, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                lines.append(
+                    f"rejected={request}:{posted.id}:conflict:{candidate.section}"
+                )
+                failed.append(request)
+                continue
+            operation = _operation(request)
+            configured = os.environ.get("ITREE_STAGE_BARRIER_REQUEST")
+            if configured == request:
+                root_text = os.environ.get("ITREE_STAGE_FIXTURE_ROOT")
+                assert root_text is not None, "barrier requires explicit fixture root"
+                root = Path(root_text)
+                root.mkdir(parents=True, exist_ok=True)
+                root.joinpath("checkpoint.json").write_text(
+                    json.dumps(
+                        {
+                            "request_id": request,
+                            "operation_id": operation,
+                            "run_id": seal.run_id,
+                            "run_attempt": seal.run_attempt,
+                            "job_id": seal.job_id,
+                            "run_url": seal.run_url,
+                            "position": "after_final_get_before_intent_and_patch",
+                        }
+                    )
+                )
+                root.joinpath("controller-trace.json").write_text(
+                    json.dumps({"b_may_not_patch": True})
+                )
+                while not root.joinpath("release.json").exists():
+                    time.sleep(0.02)
+            if candidate.body == live.body:
+                confirmed = _receipt_for(
+                    proposal,
+                    seal,
+                    "confirmed",
+                    operation,
+                    ReceiptContent(
+                        candidate_body_sha256=candidate.body_sha256,
+                        live_body_sha256=sha256_text(live.body or ""),
+                        original_sha256=candidate.original_sha256,
+                        fence_sha256=_fence_sha(live.body or ""),
+                        no_body_write=True,
+                        stage_complete=True,
+                    ),
+                )
+                posted = _terminal(api, issue, confirmed, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                prefix.append(request)
+                lines.append(f"confirmed={request}:{posted.id}:no_body_write:true")
+                continue
+            intent = _receipt_for(
+                proposal,
+                seal,
+                "intended",
+                operation,
+                ReceiptContent(
+                    base_body_sha256=sha256_text(live.body or ""),
+                    candidate_body_sha256=candidate.body_sha256,
+                    original_sha256=candidate.original_sha256,
+                    fence_sha256=_fence_sha(live.body or ""),
+                ),
+            )
+            posted_intent = _post_record(api, issue, "itree-stage-receipt", intent)
+            if not isinstance(posted_intent, IssueComment):
+                pending.append(request)
+                lines.append(f"indeterminate={request}:intent_unavailable")
+                break
+            outcome = api.patch_stage_body(issue.number, candidate.body)
+            if isinstance(outcome, StageHttpRejected):
+                rejected = _receipt_for(
+                    proposal,
+                    seal,
+                    "rejected",
+                    operation,
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "github_http_rejection",
+                    OperationFailureDetail(
+                        kind="operation_failure",
+                        reason="github_http_rejection",
+                        diagnostic=outcome.diagnostic,
+                    ),
+                )
+                posted = _terminal(api, issue, rejected, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                lines.append(f"rejected={request}:{posted.id}:github_http_rejection")
+                failed.append(request)
+                continue
+            if isinstance(outcome, StageHttpIndeterminate):
+                indeterminate = _receipt_for(
+                    proposal,
+                    seal,
+                    "indeterminate",
+                    operation,
+                    ReceiptContent(
+                        candidate_body_sha256=candidate.body_sha256,
+                        live_body_sha256=sha256_text(live.body or ""),
+                        recovery_action=f"itree stage resume {issue.slug} --attempt {proposal.attempt_id}",
+                    ),
+                    indeterminate_reason=outcome.reason,
+                )
+                posted = _terminal(api, issue, indeterminate, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                pending.append(request)
+                lines.append(f"indeterminate={request}:{posted.id}:{outcome.reason}")
+                break
+            try:
+                GithubIssue.model_validate_json(outcome.response_body)
+            except ValidationError:
+                indeterminate = _receipt_for(
+                    proposal,
+                    seal,
+                    "indeterminate",
+                    operation,
+                    ReceiptContent(
+                        candidate_body_sha256=candidate.body_sha256,
+                        live_body_sha256=sha256_text(live.body or ""),
+                        recovery_action=f"itree stage resume {issue.slug} --attempt {proposal.attempt_id}",
+                    ),
+                    indeterminate_reason="unusable_success_response",
+                )
+                posted = _terminal(api, issue, indeterminate, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                pending.append(request)
+                lines.append(
+                    f"indeterminate={request}:{posted.id}:unusable_success_response"
+                )
+                break
+            readback = _require_live_issue(api, issue, expected_node)
+            if readback.body != candidate.body:
+                indeterminate = _receipt_for(
+                    proposal,
+                    seal,
+                    "indeterminate",
+                    operation,
+                    ReceiptContent(
+                        candidate_body_sha256=candidate.body_sha256,
+                        live_body_sha256=sha256_text(live.body or ""),
+                        recovery_action=f"itree stage resume {issue.slug} --attempt {proposal.attempt_id}",
+                    ),
+                    indeterminate_reason="readback_unavailable",
+                )
+                posted = _terminal(api, issue, indeterminate, seal)
+                if not isinstance(posted, IssueComment):
+                    return DrainReport(
+                        exit_code=5,
+                        confirmed=False,
+                        lines=("receipt_unavailable=true",),
+                    )
+                pending.append(request)
+                lines.append(
+                    f"indeterminate={request}:{posted.id}:readback_unavailable"
+                )
+                break
+            confirmed = _receipt_for(
+                proposal,
+                seal,
+                "confirmed",
+                operation,
+                ReceiptContent(
+                    base_body_sha256=sha256_text(live.body or ""),
+                    candidate_body_sha256=candidate.body_sha256,
+                    live_body_sha256=candidate.body_sha256,
+                    original_sha256=candidate.original_sha256,
+                    fence_sha256=_fence_sha(live.body or ""),
+                    no_body_write=False,
+                    stage_complete=True,
+                ),
+            )
+            posted = _terminal(api, issue, confirmed, seal)
+            if not isinstance(posted, IssueComment):
+                return DrainReport(
+                    exit_code=5, confirmed=False, lines=("receipt_unavailable=true",)
+                )
+            prefix.append(request)
+            lines.append(f"confirmed={request}:{posted.id}:no_body_write:false")
+            live = readback
+        high_water = max((record.native.id for record in records), default=0)
+        remaining = (*pending, *failed)
+        return DrainReport(
+            exit_code=4 if failed else 5 if pending else 0,
+            confirmed=not remaining,
+            lines=tuple(f"confirmed_prefix={item}" for item in prefix)
+            + tuple(lines)
+            + tuple(f"pending_suffix={item}" for item in remaining)
+            + (f"high_water_comment_id={high_water}",),
+            pending=bool(pending),
+        )
+    finally:
+        _unlock(lock)
+
+
+def _find_record_native(
+    records: tuple[DurableRecord, ...], request: RequestId
+) -> DurableRecord:
+    return next(
+        record
+        for record in records
+        if isinstance(record.payload, dict)
+        and record.payload.get("request_id") == request
+    )
+
+
+EDITABLE_SECTIONS: dict[SectionName, Literal["requirements", "plan", "tasks"]] = {
+    SectionName.requirements: "requirements",
+    SectionName.plan: "plan",
+    SectionName.tasks: "tasks",
+}
+
+
+def _empty_replacement(
+    base: ManagedIssueLayout, proposed: ManagedIssueLayout
+) -> tuple[SectionReplacement, ...]:
+    replacements: list[SectionReplacement] = []
+    for section in (SectionName.requirements, SectionName.plan, SectionName.tasks):
+        base_text = _section(base, section)
+        proposed_text = _section(proposed, section)
+        if base_text != proposed_text:
+            replacements.append(
+                SectionReplacement(
+                    section=EDITABLE_SECTIONS[section],
+                    base_text=base_text,
+                    proposed_text=proposed_text,
+                    base_sha256=sha256_text(base_text),
+                    proposed_sha256=sha256_text(proposed_text),
+                )
+            )
+    if replacements:
+        return tuple(replacements)
+    plan = _section(base, SectionName.plan)
+    return (
+        SectionReplacement(
+            section="plan",
+            base_text=plan,
+            proposed_text=plan,
+            base_sha256=sha256_text(plan),
+            proposed_sha256=sha256_text(plan),
+        ),
+    )
+
+
+def _proposal(
+    issue: IssueRef,
+    attempt: AttemptId,
+    session: SessionId,
+    metadata: ScratchMetadata,
+    candidate: BodyCandidate,
+) -> StageProposal:
+    base = _layout(metadata.base_body)
+    proposed = _layout(candidate.body)
+    if isinstance(base, LegacyIssueLayout):
+        requirements = ""
+        plan = ""
+        tasks = ""
+        if isinstance(proposed, ManagedIssueLayout):
+            requirements = _section(proposed, SectionName.requirements)
+            plan = _section(proposed, SectionName.plan)
+            tasks = _section(proposed, SectionName.tasks)
+        else:
+            assert proposed.body == base.body, (proposed.body, base.body)
+        return LegacyIntakeProposal(
+            version=1,
+            request_kind="legacy_intake",
+            issue_node_id=metadata.issue_node_id,
+            issue_ref=issue,
+            request_id=RequestId("request-" + attempt),
+            attempt_id=attempt,
+            session_id=session,
+            base_body_sha256=metadata.body_sha256,
+            legacy_base=base.body,
+            requirements=requirements,
+            plan=plan,
+            tasks=tasks,
+        )
+    assert isinstance(base, ManagedIssueLayout) and isinstance(
+        proposed, ManagedIssueLayout
+    )
+    return SectionEditProposal(
+        version=1,
+        request_kind="sections",
+        issue_node_id=metadata.issue_node_id,
+        issue_ref=issue,
+        request_id=RequestId("request-" + attempt),
+        attempt_id=attempt,
+        session_id=session,
+        base_body_sha256=metadata.body_sha256,
+        base_body=base.body,
+        changes=_empty_replacement(base, proposed),
+    )
+
+
 def apply_stage_candidate(
     issue: IssueRef,
     attempt: AttemptId,
@@ -215,17 +1235,122 @@ def apply_stage_candidate(
     metadata: ScratchMetadata,
     candidate: BodyCandidate,
 ) -> StageCommandResult:
-    assert feature_directory.is_absolute(), feature_directory
-    assert metadata.base_body != candidate.body, metadata.body_sha256
-    return _pending(issue, attempt)
+    api = GithubApi.from_issue_ref(issue)
+    live = _require_live_issue(api, issue, metadata.issue_node_id)
+    session = SessionId("session-" + attempt)
+    session_request = SessionAdmissionRequest(
+        version=1,
+        request_kind="session_admit",
+        issue_node_id=metadata.issue_node_id,
+        issue_ref=issue,
+        request_id=RequestId("session-admit-" + attempt),
+        attempt_id=attempt,
+        session_id=session,
+        entry_body_sha256=sha256_text(live.body or ""),
+        enrolled_actors=(api.get_current_actor().login,),
+    )
+    records = _all_records(api, issue)
+    prior_sessions = [
+        record
+        for record in records
+        if isinstance(record.payload, dict)
+        and record.payload.get("request_id") == session_request.request_id
+    ]
+    if not prior_sessions:
+        posted = _post_record(api, issue, "itree-stage-edit", session_request)
+        if not isinstance(posted, IssueComment):
+            return _pending(issue, attempt)
+    proposal = _proposal(issue, attempt, session, metadata, candidate)
+    prior_proposals = [
+        record
+        for record in records
+        if isinstance(record.payload, dict)
+        and record.payload.get("request_id") == proposal.request_id
+        and record.payload.get("request_kind") in {"sections", "legacy_intake"}
+    ]
+    if any(
+        canonical_payload_digest(record.payload)
+        != canonical_payload_digest(_model_json(proposal))
+        for record in prior_proposals
+    ):
+        if not _writer_enabled():
+            return _pending(issue, attempt)
+        seal = _writer_runtime_seal(api)
+        rejected = _receipt_for(
+            proposal,
+            seal,
+            "rejected",
+            _operation(proposal.request_id),
+            ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+            "duplicate_payload_conflict",
+            MergeConflictDetail(
+                kind="merge_conflict",
+                section="plan",
+                task_id=None,
+                field=None,
+                competing_request_id=proposal.request_id,
+            ),
+        )
+        posted_rejection = _terminal(api, issue, rejected, seal)
+        if not isinstance(posted_rejection, IssueComment):
+            return _pending(issue, attempt)
+        return StageCommandResult(
+            exit_code=4,
+            lines=(
+                "stage_complete=false",
+                f"rejected={proposal.request_id}:{posted_rejection.id}:duplicate_payload_conflict",
+                f"pending_suffix={proposal.request_id}",
+            ),
+        )
+    if not prior_proposals:
+        posted_proposal = _post_record(api, issue, "itree-stage-edit", proposal)
+        if not isinstance(posted_proposal, IssueComment):
+            return _pending(issue, attempt)
+    if not _writer_enabled():
+        return _pending(issue, attempt)
+    try:
+        report = _drain_node(issue, metadata.issue_node_id, attempt)
+    except (GithubApiError, StageFailure) as error:
+        detail = error.failure.detail if isinstance(error, StageFailure) else str(error)
+        return StageCommandResult(exit_code=5, lines=(f"stage_complete=false", detail))
+    if report.confirmed:
+        cleanup = cleanup_stage_scratch(feature_directory)
+        return StageCommandResult(
+            exit_code=0,
+            lines=(
+                f"issue_ref={issue.slug}",
+                f"attempt_id={attempt}",
+                f"request_id={proposal.request_id}",
+                "stage_complete=true",
+                f"no_body_write={'true' if candidate.body == live.body else 'false'}",
+                f"body_sha256={candidate.body_sha256}",
+                f"scratch_cleanup={cleanup}",
+                *report.lines,
+            ),
+        )
+    return StageCommandResult(
+        exit_code=report.exit_code,
+        lines=("stage_complete=false", *report.lines),
+    )
 
 
 def resume_stage(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
-    return _pending(issue, attempt)
+    if not _writer_enabled():
+        return _pending(issue, attempt)
+    try:
+        report = _drain_node(issue, None, attempt)
+    except GithubApiError, StageFailure:
+        return _pending(issue, attempt)
+    return StageCommandResult(exit_code=report.exit_code, lines=report.lines)
 
 
 def drain_stage(
     issue: IssueRef, expected_node: IssueNodeId | None
 ) -> StageCommandResult:
-    assert expected_node is None or len(expected_node) > 0, expected_node
-    return _pending(issue, AttemptId("drain"))
+    if not _writer_enabled():
+        return _pending(issue, AttemptId("drain"))
+    try:
+        report = _drain_node(issue, expected_node, None)
+    except GithubApiError, StageFailure:
+        return _pending(issue, AttemptId("drain"))
+    return StageCommandResult(exit_code=report.exit_code, lines=report.lines)

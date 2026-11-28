@@ -95,7 +95,7 @@ def example_state(body: str) -> dict[str, JsonValue]:
             "repository": SLUG,
             "default_branch": "main",
             "default_head_sha": COMMIT_SHA,
-            "workflow_blob": "blob-workflow-v1",
+            "workflow_blob": COMMIT_SHA,
             "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
         },
         "job": {
@@ -134,13 +134,9 @@ class StageFixture:
     def load(self) -> None:
         self.state = json.loads(self.state_path.read_text())
 
-    def run(
-        self,
-        *arguments: str,
-        writer: bool = False,
-        environment: dict[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    def _environment(
+        self, writer: bool, environment: dict[str, str] | None
+    ) -> dict[str, str]:
         values = dict(os.environ)
         values.update(
             {
@@ -153,16 +149,42 @@ class StageFixture:
         )
         if writer:
             values["ITREE_STAGE_WRITER_MODE"] = "fixture"
+            values["ITREE_STAGE_RUN_ID"] = "101"
+            values["ITREE_STAGE_RUN_ATTEMPT"] = "1"
+            values["ITREE_STAGE_JOB_NAME"] = "write"
         if environment is not None:
             values.update(environment)
+        return values
+
+    def run(
+        self,
+        *arguments: str,
+        writer: bool = False,
+        environment: dict[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "itree", *arguments],
             text=True,
             capture_output=True,
             check=False,
             timeout=120,
-            env=values,
+            env=self._environment(writer, environment),
             cwd=cwd,
+        )
+
+    def spawn(
+        self,
+        *arguments: str,
+        writer: bool = False,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            [sys.executable, "-m", "itree", *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self._environment(writer, environment),
         )
 
     def calls(self) -> list[dict[str, JsonValue]]:
