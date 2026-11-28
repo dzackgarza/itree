@@ -48,11 +48,22 @@ def _controller_root(
     return root
 
 
-def _harness_only_selection(config: pytest.Config) -> bool:
-    harness_files = {"test_harness.py", "test_harness_acceptance.py"}
+def _lightweight_selection(config: pytest.Config) -> bool:
+    lightweight_files = {
+        "test_harness.py",
+        "test_harness_acceptance.py",
+        "test_stage.py",
+        "test_stage_types.py",
+        "test_stage_merge.py",
+        "test_stage_tasks.py",
+        "test_stage_artifacts.py",
+        "test_stage_writer.py",
+        "test_stage_recovery.py",
+        "test_gh_transport.py",
+    }
     selected = [argument.split("::", maxsplit=1)[0] for argument in config.args]
     return bool(selected) and all(
-        Path(argument).name in harness_files for argument in selected
+        Path(argument).name in lightweight_files for argument in selected
     )
 
 
@@ -74,7 +85,7 @@ def pytest_configure(config: pytest.Config) -> None:
     root.joinpath("owner.json").write_text(
         json.dumps({"root": str(root), "pid": os.getpid()}, sort_keys=True)
     )
-    if _harness_only_selection(config):
+    if _lightweight_selection(config):
         return
     if os.environ.get("ITREE_WORK_FIXTURE_STATE") is None:
         root.joinpath("creation-started").write_text(str(time.time()))
