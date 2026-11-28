@@ -48,11 +48,10 @@ jobs:
       if: inputs.after_final_read_barrier && hashFiles('.itree-stage-acceptance.json')
         != ''
       shell: bash
-      run: 'printf ''%s\n'' ''ITREE_STAGE_FIXTURE_ROOT=/tmp/opencode/itree-stage-writer''
-        >> "$GITHUB_ENV"
-
+      run: '{ printf ''%s\n'' ''ITREE_STAGE_FIXTURE_ROOT=/tmp/opencode/itree-stage-writer'';
         printf ''%s\n'' "ITREE_STAGE_BARRIER_REQUEST=${{ inputs.barrier_request_id
-        }}" >> "$GITHUB_ENV"'
+        }}"; printf ''%s\n'' "ITREE_STAGE_BARRIER_CONTROL_REPO=${{ github.repository
+        }}"; } >> "$GITHUB_ENV"'
     - name: Drain durable issue proposals
       shell: bash
       run: 'ISSUE_NODE_ID="${{ github.event.issue.node_id || inputs.issue_node_id

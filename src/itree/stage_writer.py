@@ -1092,6 +1092,64 @@ def _dispatch_pending(issue: IssueRef, attempt: AttemptId) -> StageCommandResult
     return _pending(issue, attempt)
 
 
+def _release_barrier(
+    api: GithubApi,
+    issue: IssueRef,
+    request: RequestId,
+    operation: OperationId,
+    seal: WriterSeal,
+    root: Path,
+) -> None:
+    checkpoint = {
+        "kind": "itree-stage-barrier-checkpoint",
+        "request_id": request,
+        "operation_id": operation,
+        "run_id": seal.run_id,
+        "run_attempt": seal.run_attempt,
+        "job_id": seal.job_id,
+        "job_node_id": seal.job_node_id,
+        "run_url": seal.run_url,
+        "position": "after_final_get_before_intent_and_patch",
+    }
+    root.joinpath("checkpoint.json").write_text(json.dumps(checkpoint))
+    root.joinpath("controller-trace.json").write_text(
+        json.dumps({"b_may_not_patch": True})
+    )
+    control_repo = os.environ.get("ITREE_STAGE_BARRIER_CONTROL_REPO")
+    if control_repo is None:
+        while not root.joinpath("release.json").exists():
+            time.sleep(0.02)
+        return
+    assert control_repo == issue.repo_ref.slug, (control_repo, issue.repo_ref.slug)
+    api.add_comment(issue.number, json.dumps(checkpoint, sort_keys=True))
+    while True:
+        for comment in api.list_comments(issue.number):
+            if not comment.body.startswith("{"):
+                continue
+            try:
+                control = json.loads(comment.body)
+            except json.JSONDecodeError:
+                continue
+            if (
+                not isinstance(control, dict)
+                or control.get("kind") != "itree-stage-barrier-release"
+            ):
+                continue
+            if control.get("request_id") != request:
+                continue
+            records = _all_records(api, issue)
+            has_durable_b = any(
+                isinstance(record.payload, dict)
+                and record.payload.get("request_id") == control.get("b_request_id")
+                and record.native.id == control.get("b_comment_id")
+                for record in records
+            )
+            if has_durable_b:
+                root.joinpath("release.json").write_text(comment.body)
+                return
+        time.sleep(0.1)
+
+
 def _drain_node(
     issue: IssueRef, expected_node: IssueNodeId | None, attempt: AttemptId | None
 ) -> DrainReport:
@@ -1480,24 +1538,7 @@ def _drain_node(
                 assert root_text is not None, "barrier requires explicit fixture root"
                 root = Path(root_text)
                 root.mkdir(parents=True, exist_ok=True)
-                root.joinpath("checkpoint.json").write_text(
-                    json.dumps(
-                        {
-                            "request_id": request,
-                            "operation_id": operation,
-                            "run_id": seal.run_id,
-                            "run_attempt": seal.run_attempt,
-                            "job_id": seal.job_id,
-                            "run_url": seal.run_url,
-                            "position": "after_final_get_before_intent_and_patch",
-                        }
-                    )
-                )
-                root.joinpath("controller-trace.json").write_text(
-                    json.dumps({"b_may_not_patch": True})
-                )
-                while not root.joinpath("release.json").exists():
-                    time.sleep(0.02)
+                _release_barrier(api, issue, request, operation, seal, root)
             final_approved = _external_authorized(
                 api,
                 native_record.native,
