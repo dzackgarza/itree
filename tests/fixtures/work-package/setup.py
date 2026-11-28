@@ -200,8 +200,8 @@ def add_comment_phase(
         else:
             results[label] = live
     batch_serial = len(family_records)
-    for offset in range(0, len(missing), 5):
-        batch = missing[offset : offset + 5]
+    for offset in range(0, len(missing), 8):
+        batch = missing[offset : offset + 8]
         operation_id = f"{operation_prefix}-{batch_serial:03d}"
         assert operation_id not in completed
         batch_serial += 1
@@ -882,7 +882,7 @@ def add_ordered_comments(
                 )
         if live is not None:
             records_by_index[index] = live
-    batch_size = min(5, len(bodies))
+    batch_size = min(8, len(bodies))
     for offset in range(0, len(bodies), batch_size):
         missing = [
             index
