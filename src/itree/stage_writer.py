@@ -1088,7 +1088,19 @@ def _merge_task_field_proposal(
 def _dispatch_pending(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     api = GithubApi.from_issue_ref(issue)
     live = api.get_issue(issue.number)
-    api.dispatch_stage_drain(require_issue_node(live), issue.number)
+    try:
+        api.dispatch_stage_drain(require_issue_node(live), issue.number)
+    except GithubApiError as error:
+        return StageCommandResult(
+            exit_code=5,
+            lines=(
+                f"issue_ref={issue.slug}",
+                f"attempt_id={attempt}",
+                "stage_complete=false",
+                f"dispatch_outcome=unconfirmed:{error.status}",
+                f"recovery=itree stage resume {issue.slug} --attempt {attempt}",
+            ),
+        )
     return _pending(issue, attempt)
 
 
