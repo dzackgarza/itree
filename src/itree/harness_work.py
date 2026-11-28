@@ -723,7 +723,7 @@ def prepare_invocation(
         "package_sha256": source.package_sha256.root,
         "byte_count": len(source.markdown),
         "chunk_count": len(chunks),
-        "process": outcome.model_dump(mode="json"),
+        "process": outcome.model_dump(mode="json", exclude={"stdout", "stderr"}),
     }
     return CommandResult(
         exit_code=0,
