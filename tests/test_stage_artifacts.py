@@ -17,6 +17,7 @@ from itree.models import (
     SectionEditProposal,
     SectionReplacement,
     SessionAdmissionRequest,
+    SessionReleaseRequest,
     StageModel,
     UploadContent,
     UploadRejected,
@@ -535,3 +536,95 @@ def test_artifact_manifest_recovers_and_indexes_only_after_final_part(
     replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
     assert replay.returncode == 0, replay.stdout + replay.stderr
     assert len(fixture.patches()) == 1
+
+
+def test_rejected_only_upload_queue_replays_and_releases(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-multipart")
+    first = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-multipart",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    body = fixture.issue_body()
+    proposal = ArtifactProposal(
+        version=1,
+        request_kind="artifacts",
+        issue_node_id=ISSUE_NODE_ID,
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id="wrong-order-artifacts",
+        attempt_id="A-multipart",
+        session_id="session-A-multipart",
+        base_body_sha256=sha256_text(body),
+        base_body=body,
+        artifacts=(
+            ArtifactDraft(
+                key="ordered-research", kind="research", content="Ordered research\n"
+            ),
+            ArtifactDraft(
+                key="ordered-evidence", kind="evidence", content="Ordered evidence\n"
+            ),
+        ),
+    )
+    contents = artifact_upload_contents(proposal)
+    manifest = build_upload_manifest(proposal, contents)
+    ordered_parts = make_upload_parts(manifest, contents)
+    wrong_order = (ordered_parts[1], ordered_parts[0], *ordered_parts[2:])
+    _post_record(fixture, "itree-stage-upload-manifest", manifest)
+    for part in wrong_order:
+        _post_record(fixture, "itree-stage-upload-part", part)
+
+    rejected = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert rejected.returncode == 4
+    assert "wrong_order" in rejected.stdout
+    assert "rejected=wrong-order-artifacts" in rejected.stdout
+    assert fixture.patches() == []
+    fixture.load()
+    rejected_records = [
+        comment
+        for comment in fixture.state["comments"]
+        if comment["body"].startswith("```itree-stage-receipt")
+        and '"status":"rejected"' in comment["body"]
+        and "wrong-order-artifacts" in comment["body"]
+    ]
+    assert len(rejected_records) == 1
+    receipt = rejected_records[0]
+    payload = json.loads(receipt["body"].splitlines()[1])
+    assert payload["rejection_reason"] == "conflict"
+
+    replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert "wrong_order" not in replay.stdout
+    fixture.load()
+    assert (
+        len(
+            [
+                comment
+                for comment in fixture.state["comments"]
+                if comment["body"] == receipt["body"]
+            ]
+        )
+        == 1
+    )
+
+    expected_id = max(comment["id"] for comment in fixture.state["comments"]) + 1
+    release = SessionReleaseRequest(
+        version=1,
+        request_kind="session_release",
+        issue_node_id=ISSUE_NODE_ID,
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id="release-after-rejected",
+        attempt_id="A-multipart",
+        session_id="session-A-multipart",
+        expected_last_scanned_comment_id=expected_id,
+    )
+    _post_record(fixture, "itree-stage-edit", release)
+    released = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert released.returncode == 0, released.stdout + released.stderr
+    assert "session_released=session-A-multipart" in released.stdout

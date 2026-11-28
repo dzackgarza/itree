@@ -568,6 +568,7 @@ class UploadDrain(StageModel):
     proposals: tuple[StageProposal, ...]
     pending: tuple[str, ...]
     failed: tuple[str, ...]
+    rejections: tuple[ReceiptPayload, ...]
 
 
 def _upload_models(records: tuple[DurableRecord, ...]) -> tuple[UploadManifest, ...]:
@@ -614,10 +615,13 @@ def _upload_proposals(
     records: tuple[DurableRecord, ...],
     live: GithubIssue,
     sessions: dict[SessionId, SessionAdmissionRequest],
+    receipts: dict[RequestId, ReceiptPayload],
+    seal: WriterSeal,
 ) -> UploadDrain:
     proposals: list[StageProposal] = []
     pending: list[str] = []
     failed: list[str] = []
+    rejections: list[ReceiptPayload] = []
     manifests = _upload_models(records)
     for manifest in manifests:
         session = sessions.get(manifest.session_id)
@@ -634,8 +638,24 @@ def _upload_proposals(
         approved = _external_authorized(
             api, native, manifest, live, session.enrolled_actors, False
         )
+        if (
+            receipts.get(manifest.request_id) is not None
+            and receipts[manifest.request_id].status == "rejected"
+        ):
+            continue
         if isinstance(approved, ExternalSubmissionDetail):
             failed.append(f"{manifest.request_id}:{approved.reason}")
+            rejections.append(
+                _receipt_for(
+                    manifest,
+                    seal,
+                    "rejected",
+                    _operation(manifest.request_id),
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "external_submission",
+                    approved,
+                )
+            )
             continue
         sealed_parts: list[UploadPart] = []
         invalid: ExternalSubmissionDetail | None = None
@@ -650,6 +670,17 @@ def _upload_proposals(
             sealed_parts.append(part)
         if invalid is not None:
             failed.append(f"{manifest.request_id}:{invalid.reason}")
+            rejections.append(
+                _receipt_for(
+                    manifest,
+                    seal,
+                    "rejected",
+                    _operation(manifest.request_id),
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "external_submission",
+                    invalid,
+                )
+            )
             continue
         state = finalize_upload(manifest, tuple(sealed_parts))
         if isinstance(state, PendingUpload):
@@ -660,6 +691,23 @@ def _upload_proposals(
             continue
         if isinstance(state, UploadRejected):
             failed.append(f"{manifest.request_id}:{state.reason}")
+            rejections.append(
+                _receipt_for(
+                    manifest,
+                    seal,
+                    "rejected",
+                    _operation(manifest.request_id),
+                    ReceiptContent(live_body_sha256=sha256_text(live.body or "")),
+                    "conflict",
+                    MergeConflictDetail(
+                        kind="merge_conflict",
+                        section="tasks",
+                        task_id=None,
+                        field=None,
+                        competing_request_id=manifest.request_id,
+                    ),
+                )
+            )
             continue
         assert isinstance(state, FinalizedProposal)
         if manifest.request_kind in {"session_admit", "session_release"}:
@@ -681,6 +729,7 @@ def _upload_proposals(
         proposals=tuple(proposals),
         pending=tuple(pending),
         failed=tuple(failed),
+        rejections=tuple(rejections),
     )
 
 
@@ -1293,7 +1342,17 @@ def _drain_node(
             sessions[session.session_id] = session
             prefix.append(session.request_id)
             lines.append(f"session_admitted={session.session_id}:{posted.id}")
-        upload_drain = _upload_proposals(api, issue, records, live, sessions)
+        upload_drain = _upload_proposals(
+            api, issue, records, live, sessions, receipts, seal
+        )
+        for rejection in upload_drain.rejections:
+            posted = _terminal(api, issue, rejection, seal)
+            if not isinstance(posted, IssueComment):
+                return DrainReport(
+                    exit_code=5, confirmed=False, lines=("receipt_unavailable=true",)
+                )
+            receipts[rejection.request_id] = rejection
+            lines.append(f"rejected={rejection.request_id}:{posted.id}:conflict")
         pending.extend(upload_drain.pending)
         failed.extend(upload_drain.failed)
         proposal_digests: dict[RequestId, Sha256] = {}
