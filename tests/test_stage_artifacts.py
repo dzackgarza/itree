@@ -613,6 +613,23 @@ def test_rejected_only_upload_queue_replays_and_releases(tmp_path: Path) -> None
         == 1
     )
 
+    next_proposal = proposal.model_copy(update={"request_id": "next-ordered-artifact"})
+    next_manifest = build_upload_manifest(
+        next_proposal, artifact_upload_contents(next_proposal)
+    )
+    next_contents = artifact_upload_contents(next_proposal)
+    next_parts = make_upload_parts(next_manifest, next_contents)
+    _post_record(fixture, "itree-stage-upload-manifest", next_manifest)
+    for part in next_parts:
+        _post_record(fixture, "itree-stage-upload-part", part)
+
+    admitted_after_rejection = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert admitted_after_rejection.returncode == 0, (
+        admitted_after_rejection.stdout + admitted_after_rejection.stderr
+    )
+    assert "confirmed=next-ordered-artifact" in admitted_after_rejection.stdout
+    assert len(fixture.patches()) == 1
+
     expected_id = max(comment["id"] for comment in fixture.state["comments"]) + 1
     release = SessionReleaseRequest(
         version=1,

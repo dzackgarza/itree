@@ -656,7 +656,7 @@ def _upload_proposals(
                     approved,
                 )
             )
-            continue
+            break
         sealed_parts: list[UploadPart] = []
         invalid: ExternalSubmissionDetail | None = None
         for part in _upload_part_models(records, manifest):
@@ -681,14 +681,14 @@ def _upload_proposals(
                     invalid,
                 )
             )
-            continue
+            break
         state = finalize_upload(manifest, tuple(sealed_parts))
         if isinstance(state, PendingUpload):
             missing = ",".join(
                 f"{part.role}:{part.ordinal}" for part in state.missing_parts
             )
             pending.append(f"{manifest.request_id}:pending_upload:{missing}")
-            continue
+            break
         if isinstance(state, UploadRejected):
             failed.append(f"{manifest.request_id}:{state.reason}")
             rejections.append(
@@ -708,7 +708,7 @@ def _upload_proposals(
                     ),
                 )
             )
-            continue
+            break
         assert isinstance(state, FinalizedProposal)
         if manifest.request_kind in {"session_admit", "session_release"}:
             continue
