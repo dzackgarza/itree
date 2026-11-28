@@ -63,7 +63,6 @@ class NativeRun:
     native_session: str | None
     output: Path
     provider_requests: tuple[Path, ...]
-    processes: tuple[WatchdogOutcome, ...]
 
 
 class PreparedObservation(BaseModel):
@@ -450,7 +449,6 @@ def _run_native(
     native_record = evidence / "emission" / "native.jsonl"
     native_record.parent.mkdir(parents=True, exist_ok=True)
     session = requested
-    processes: list[WatchdogOutcome] = []
     initial_prompt = "Reply OK and do not load any issue or perform other work."
     started = time.perf_counter()
     initial_outcome, initial_stdout, initial_stderr = external_watchdog(
@@ -459,7 +457,6 @@ def _run_native(
         environment,
         180_000,
     )
-    processes.append(initial_outcome)
     native_record.write_text(
         json.dumps(
             {
@@ -476,15 +473,11 @@ def _run_native(
         or initial_outcome.leader_returncode != 0
     ):
         proxy.close()
-        return NativeRun(
-            harness, requested, native_record, proxy.artifacts, tuple(processes)
-        )
+        return NativeRun(harness, requested, native_record, proxy.artifacts)
     session = _session_id(harness, requested, initial_stdout)
     if session is None:
         proxy.close()
-        return NativeRun(
-            harness, None, native_record, proxy.artifacts, tuple(processes)
-        )
+        return NativeRun(harness, None, native_record, proxy.artifacts)
     for label, number in (("A", fixture.small), ("B", fixture.large)):
         prompt_name = (
             "/speckit-itree-work"
@@ -498,7 +491,6 @@ def _run_native(
             environment,
             1_800_000,
         )
-        processes.append(outcome)
         with native_record.open("a") as stream:
             stream.write(
                 json.dumps(
@@ -513,9 +505,7 @@ def _run_native(
             )
         if outcome.status != WatchdogStatus.exited or outcome.leader_returncode != 0:
             proxy.close()
-            return NativeRun(
-                harness, session, native_record, proxy.artifacts, tuple(processes)
-            )
+            return NativeRun(harness, session, native_record, proxy.artifacts)
     changed = f"NATIVE-CHANGED-A-{time.time_ns()}-終\n"
     _comment(fixture, fixture.small, changed)
     prompt_name = (
@@ -535,7 +525,6 @@ def _run_native(
         environment,
         1_800_000,
     )
-    processes.append(outcome)
     with native_record.open("a") as stream:
         stream.write(
             json.dumps(
@@ -558,7 +547,7 @@ def _run_native(
         + "\n"
     )
     proxy.close()
-    return NativeRun(harness, session, native_record, proxy.artifacts, tuple(processes))
+    return NativeRun(harness, session, native_record, proxy.artifacts)
 
 
 def _descriptor(
@@ -587,6 +576,14 @@ def _model_identity(run: NativeRun) -> str:
             if isinstance(document, dict) and isinstance(document.get("model"), str):
                 return str(document["model"])
     return "unavailable"
+
+
+def _watchdog_outcomes(path: Path) -> tuple[WatchdogOutcome, ...]:
+    outcomes: list[WatchdogOutcome] = []
+    for document in _json_documents(path.read_text(errors="replace")):
+        if isinstance(document, dict) and "outcome" in document:
+            outcomes.append(WatchdogOutcome.model_validate(document["outcome"]))
+    return tuple(outcomes)
 
 
 def _persist_run(
@@ -754,7 +751,7 @@ def _persist_run(
         artifacts=tuple(artifacts),
         comparisons=tuple(comparisons),
         install_outcome=None,
-        processes=tuple(run.processes),
+        processes=_watchdog_outcomes(run.output),
         evidence_level=level,
         acceptance=acceptance,
         manifest_sha256=Sha256("0" * 64),
