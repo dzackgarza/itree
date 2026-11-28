@@ -40,16 +40,31 @@ def _controller_root(
     | pytest.Item
     | pytest.TestReport,
 ) -> Path:
-    return Path(os.environ["ITREE_TEST_CONTROLLER_ROOT"])
+    configured = os.environ.get("ITREE_WORK_CONTROLLER_ROOT")
+    assert configured is not None, "the parent must provide one controller namespace"
+    root = Path(configured)
+    assert root.is_absolute(), root
+    return root
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    root = Path(
-        tempfile.mkdtemp(prefix="itree-parallel-controller-", dir="/tmp/opencode")
-    )
-    os.environ["ITREE_TEST_CONTROLLER_ROOT"] = str(root)
     if _worker(config):
+        root = _controller_root(config)
+        owner = json.loads(root.joinpath("owner.json").read_text())
+        assert root.is_dir() and owner["root"] == str(root), owner
         return
+    configured = os.environ.get("ITREE_WORK_CONTROLLER_ROOT")
+    if configured is not None:
+        root = Path(configured)
+        root.mkdir(parents=True, exist_ok=False)
+    else:
+        root = Path(
+            tempfile.mkdtemp(prefix="itree-work-controller-", dir="/tmp/opencode")
+        )
+    os.environ["ITREE_WORK_CONTROLLER_ROOT"] = str(root)
+    root.joinpath("owner.json").write_text(
+        json.dumps({"root": str(root), "pid": os.getpid()}, sort_keys=True)
+    )
     if os.environ.get("ITREE_WORK_FIXTURE_STATE") is None:
         root.joinpath("creation-started").write_text(str(time.time()))
         started = time.perf_counter()
@@ -93,9 +108,23 @@ def pytest_collection_modifyitems(
     root = _controller_root(config)
     readonly = sum(item.get_closest_marker("serial") is None for item in items)
     serial = len(items) - readonly
-    root.joinpath("expected-readonly").write_text(str(readonly))
-    root.joinpath("expected-serial").write_text(str(serial))
-    root.joinpath("expected-cases").write_text(str(len(items)))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "controller")
+    record = {
+        "worker": worker,
+        "pid": os.getpid(),
+        "root": str(root),
+        "expected_cases": len(items),
+        "expected_readonly": readonly,
+        "expected_serial": serial,
+    }
+    with _exclusive(root / "collection.lock"):
+        root.joinpath("collection").mkdir(exist_ok=True)
+        root.joinpath("collection", f"{worker}.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n"
+        )
+        root.joinpath("expected-readonly").write_text(str(readonly))
+        root.joinpath("expected-serial").write_text(str(serial))
+        root.joinpath("expected-cases").write_text(str(len(items)))
 
 
 @contextmanager
@@ -150,13 +179,33 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Generator[None, None, None]:
     if _worker(item.config):
-        _stamp(
-            _controller_root(item.config),
-            "case-started",
-            str(time.time()),
-        )
-    if _worker(item.config) and item.get_closest_marker("serial"):
         root: Path = _controller_root(item.config)
+        _stamp(root, "case-started", str(time.time()))
+        worker = os.environ["PYTEST_XDIST_WORKER"]
+        readiness = root / "worker-ready" / f"{worker}.json"
+        with _exclusive(readiness.with_suffix(".lock")):
+            readiness.write_text(
+                json.dumps(
+                    {
+                        "worker": worker,
+                        "pid": os.getpid(),
+                        "root": str(root),
+                    },
+                    sort_keys=True,
+                )
+            )
+        expected_workers = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
+        started = time.perf_counter()
+        while _record(root, "worker-ready") != expected_workers:
+            if time.perf_counter() - started > 120:
+                root.joinpath("worker-start-timeout").write_text(item.nodeid)
+                raise RuntimeError(
+                    "real worker readiness failed before case execution: "
+                    f"{_record(root, 'worker-ready')}/{expected_workers}"
+                )
+            time.sleep(0.025)
+        _stamp(root, "workers-ready", str(time.time()))
+    if _worker(item.config) and item.get_closest_marker("serial"):
         expected = int(root.joinpath("expected-readonly").read_text())
         if _record(root, "failures"):
             raise RuntimeError(
@@ -197,6 +246,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         actual_serial = _record(root, "done-serial")
         actual_readonly = _record(root, "done-readonly")
         expected_readonly = int(root.joinpath("expected-readonly").read_text())
+        expected_workers = int(session.config.option.numprocesses or 0)
         case_checks = {
             "exitstatus": exitstatus,
             "expected_cases": expected_cases,
@@ -205,6 +255,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             "expected_readonly": expected_readonly,
             "actual_readonly": actual_readonly,
             "workers": _record(root, "workers"),
+            "expected_workers": expected_workers,
+            "ready_workers": _record(root, "worker-ready"),
+            "controller_root": str(root),
             "journal": str(_journal_path(state.root)),
         }
         root.joinpath("verification.json").write_text(json.dumps(case_checks, indent=2))
@@ -213,6 +266,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             or actual_serial + actual_readonly != expected_cases
             or actual_serial != expected_serial
             or actual_readonly != expected_readonly
+            or _record(root, "workers") != expected_workers
+            or _record(root, "worker-ready") != expected_workers
             or _record(root, "failures") != 0
         ):
             _emit(root, "incomplete-cleanup", json.dumps(case_checks))
