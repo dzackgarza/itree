@@ -130,7 +130,13 @@ def example_state(body: str) -> dict[str, JsonValue]:
                     "number": 6,
                     "status": "completed",
                     "conclusion": "success",
-                }
+                },
+                {
+                    "name": "Drain durable issue proposals",
+                    "number": 7,
+                    "status": "pending",
+                    "conclusion": None,
+                },
             ],
         },
     }

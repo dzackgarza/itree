@@ -1808,7 +1808,7 @@ class ActionsStepMetadata(StageModel):
 
     name: str = Field(min_length=1)
     number: int = Field(gt=0)
-    status: Literal["queued", "in_progress", "completed"]
+    status: Literal["queued", "pending", "in_progress", "completed"]
     conclusion: Literal["success", "failure", "cancelled", "skipped"] | None
 
 
