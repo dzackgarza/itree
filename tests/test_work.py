@@ -279,6 +279,7 @@ def invoke_work(
         "DECOY-SPECIFICATION\n", encoding="utf-8"
     )
     environment = os.environ.copy()
+    worker_name = os.environ.get("PYTEST_XDIST_WORKER", "serial")
     if path_gh is not None:
         bin_directory = invocation_directory / "transport-bin"
         bin_directory.mkdir(exist_ok=True)
@@ -305,13 +306,13 @@ def invoke_work(
     elapsed = time.perf_counter() - started
     log_directory = state.root / "logs"
     log_directory.mkdir(exist_ok=True)
-    log_directory.joinpath(f"{name}.stdout.md").write_text(
+    log_directory.joinpath(f"{name}-{worker_name}.stdout.md").write_text(
         result.stdout, encoding="utf-8"
     )
-    log_directory.joinpath(f"{name}.stderr.txt").write_text(
+    log_directory.joinpath(f"{name}-{worker_name}.stderr.txt").write_text(
         result.stderr, encoding="utf-8"
     )
-    log_directory.joinpath(f"{name}.json").write_text(
+    log_directory.joinpath(f"{name}-{worker_name}.json").write_text(
         json.dumps(
             {
                 "command": command,
@@ -353,6 +354,8 @@ def test_public_command_recovers_the_selected_live_contract(
     assert "ROADMAP-COMMENT-DECISION-EXACT" in result.stdout
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_all_comment_pages_preserve_every_body_and_identifier_in_order(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
@@ -702,6 +705,8 @@ def test_every_unsupported_or_failed_source_has_a_typed_outcome(
     assert "reason=bare_reference" in output
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_citation_resolution_is_limited_to_selected_issue_one_hop(
     selected_package: subprocess.CompletedProcess[str], fixture_state: FixtureState
 ) -> None:
@@ -739,6 +744,9 @@ def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
+@pytest.mark.fresh
 def test_fresh_process_sees_new_live_comment_with_identical_original_body(
     fixture_state: FixtureState,
 ) -> None:
@@ -1012,6 +1020,8 @@ def test_links_inside_fetched_sources_are_not_recursed(
         ("owner", "malformed_owner", "", "invalid"),
     ),
 )
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_citation_transport_and_parse_failures_have_typed_outcomes(
     fixture_state: FixtureState,
     tmp_path: Path,
@@ -1221,6 +1231,8 @@ class _TruncatedHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_incomplete_external_body_is_inaccessible(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
@@ -1248,6 +1260,8 @@ def test_incomplete_external_body_is_inaccessible(
     )
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_empty_query_and_fragment_delimiters_remain_distinct(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:
@@ -1281,6 +1295,8 @@ def test_empty_query_and_fragment_delimiters_remain_distinct(
     assert urls[2].endswith("#")
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_non_commit_tag_targets_are_typed_unsupported(
     selected_package: subprocess.CompletedProcess[str],
     fixture_state: FixtureState,
@@ -1359,6 +1375,8 @@ def test_malformed_governing_base64_exits_three(
     assert "Work package complete" not in result.stderr
 
 
+@pytest.mark.xdist_group("mutable")
+@pytest.mark.serial
 def test_missing_full_sha_commit_is_not_found_and_noncommit_is_unsupported(
     fixture_state: FixtureState, tmp_path: Path
 ) -> None:

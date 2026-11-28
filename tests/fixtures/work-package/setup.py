@@ -1828,7 +1828,7 @@ def complete_fixture_objects(
     pagination = issue(
         slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
     )
-    executor = ThreadPoolExecutor(max_workers=2)
+    executor = ThreadPoolExecutor(max_workers=1)
     ordered_future = _comment_task(
         executor,
         lambda: add_ordered_comments(

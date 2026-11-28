@@ -18,7 +18,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-test = ["pytest>=9.0"]
+test = [
+    "pytest>=9.0",
+    "pytest-xdist>=3.8.0",
+]
 typing = ["types-networkx>=3.6.0"]
 
 [project.scripts]
@@ -29,3 +32,9 @@ packages = ["src/itree"]
 
 [tool.uv.sources]
 specify-cli = { git = "https://github.com/github/spec-kit", rev = "a4d571229e164e440f8950cac034607bae7b7518" }
+
+[tool.pytest.ini_options]
+markers = [
+    "serial: run after all read-only cases and under the mutation lock",
+    "fresh: include the fresh live-comment mutation in parallel timing samples",
+]
