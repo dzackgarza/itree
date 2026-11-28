@@ -454,7 +454,11 @@ def test_artifact_families_publish_link_materialize_and_invalidate_on_edit(
             "updatedAt": current["updated_at"],
             "lastEditedAt": current["updated_at"],
             "editor": {"login": "other"},
-            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "late-edit"}]},
+            "userContentEdits": {
+                "totalCount": 1,
+                "nodes": [{"id": "late-edit"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
     )
     fixture.save()
@@ -645,3 +649,92 @@ def test_rejected_only_upload_queue_replays_and_releases(tmp_path: Path) -> None
     released = fixture.run("stage", "drain", ISSUE_REF, writer=True)
     assert released.returncode == 0, released.stdout + released.stderr
     assert "session_released=session-A-multipart" in released.stdout
+
+
+def test_live_issue_reconstruction_matches_manifest_without_scratch(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-regenerate")
+    admitted = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-regenerate",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+    proposal = _section_proposal().model_copy(
+        update={"attempt_id": "A-regenerate", "session_id": "session-A-regenerate"}
+    )
+    contents = section_upload_contents(proposal)
+    manifest = build_upload_manifest(proposal, contents)
+    parts = make_upload_parts(manifest, contents)
+    _post_record(fixture, "itree-stage-upload-manifest", manifest)
+    for part in parts[:-1]:
+        _post_record(fixture, "itree-stage-upload-part", part)
+    pending = fixture.run(
+        "stage", "resume", ISSUE_REF, "--attempt", "A-regenerate", writer=True
+    )
+    assert pending.returncode == 5
+    assert "pending_upload" in pending.stdout
+    assert fixture.patches() == []
+    fixture.load()
+    fixture.state["issue"]["body"] = fixture.issue_body().replace(
+        "Plan zero α", "Plan finalized β"
+    )
+    fixture.save()
+
+    recovered = fixture.run(
+        "stage", "resume", ISSUE_REF, "--attempt", "A-regenerate", writer=True
+    )
+
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    assert len(fixture.patches()) == 0
+    assert "Plan finalized β" in fixture.issue_body()
+    assert "no_body_write:true" in recovered.stdout
+
+
+def test_live_issue_mismatch_requires_a_new_unconfirmed_attempt(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-no-regenerate")
+    admitted = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-no-regenerate",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+    proposal = _section_proposal().model_copy(
+        update={
+            "attempt_id": "A-no-regenerate",
+            "session_id": "session-A-no-regenerate",
+        }
+    )
+    contents = section_upload_contents(proposal)
+    manifest = build_upload_manifest(proposal, contents)
+    parts = make_upload_parts(manifest, contents)
+    _post_record(fixture, "itree-stage-upload-manifest", manifest)
+    for part in parts[:-1]:
+        _post_record(fixture, "itree-stage-upload-part", part)
+    pending = fixture.run(
+        "stage", "resume", ISSUE_REF, "--attempt", "A-no-regenerate", writer=True
+    )
+    assert pending.returncode == 5
+    assert "pending_upload" in pending.stdout
+
+    blocked = fixture.run(
+        "stage", "resume", ISSUE_REF, "--attempt", "A-no-regenerate", writer=True
+    )
+
+    assert blocked.returncode == 5
+    assert "pending_upload" in blocked.stdout or "new_attempt" in blocked.stdout
+    assert fixture.patches() == []
+    assert "Plan finalized β" not in fixture.issue_body()
