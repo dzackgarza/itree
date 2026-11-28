@@ -48,7 +48,6 @@ from .models import (
     ActionsJobMetadata,
     CollaboratorPermission,
     CommentHistory,
-    CommentNodeId,
     CommitSha,
     GithubActor,
     GithubBlob,
@@ -139,6 +138,7 @@ query WorkPackageIssueFamily($owner: String!, $name: String!, $number: Int!, $en
           author { login }
           createdAt
           updatedAt
+          lastEditedAt
           url
         }
         pageInfo { hasNextPage endCursor }
@@ -1151,6 +1151,7 @@ class GithubApi(BaseModel):
                             "updated_at": _string(
                                 node["updatedAt"], "comment update time"
                             ),
+                            "last_edited_at": node["lastEditedAt"],
                             "html_url": _string(node["url"], "comment URL"),
                         }
                     )
@@ -1438,38 +1439,11 @@ class GithubApi(BaseModel):
         )
         return next(job for job in jobs if job.node_id == job_node_id)
 
-    def get_comment_history(self, comment_node_id: CommentNodeId) -> CommentHistory:
-        query = (
-            "query StageCommentMetadata($id: ID!) {"
-            "node(id: $id) { ... on IssueComment {"
-            "id createdAt updatedAt lastEditedAt"
-            "} }"
-        )
-        command = [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={query}",
-            "-F",
-            f"id={comment_node_id}",
-        ]
-        result = self._run_api_command(command, "graphql", timeout=120)
-        documents = _graphql_pages(result.stdout)
-        if len(documents) != 1:
-            raise SealHistoryUnavailable(str(comment_node_id))
-        document = documents[0]
-        data = _graphql_data(document, str(comment_node_id))
-        raw_node = data["node"]
-        if raw_node is None:
-            raise SealHistoryUnavailable(str(comment_node_id))
-        node = _object(raw_node, "comment history node")
-        raw_last_edited = node["lastEditedAt"]
-        assert raw_last_edited is None or isinstance(raw_last_edited, str)
+    def get_comment_history(self, native: IssueComment) -> CommentHistory:
         return CommentHistory(
-            created_at=_string(node["createdAt"], "comment createdAt"),
-            updated_at=_string(node["updatedAt"], "comment updatedAt"),
-            last_edited_at=raw_last_edited,
+            created_at=native.created_at,
+            updated_at=native.updated_at,
+            last_edited_at=native.last_edited_at,
         )
 
     @staticmethod

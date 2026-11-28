@@ -39,6 +39,7 @@ def _native(body: str = "```itree-stage-edit\n{}\n```\n") -> IssueComment:
         user={"login": "maintainer"},
         created_at="2026-11-28T00:00:00Z",
         updated_at="2026-11-28T00:00:00Z",
+        last_edited_at=None,
         html_url=f"https://github.com/{SLUG}/issues/71#issuecomment-101",
     )
 

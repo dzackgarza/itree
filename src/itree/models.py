@@ -971,6 +971,7 @@ class IssueComment(BaseModel):
     author: str = Field(alias="user")
     created_at: str
     updated_at: str
+    last_edited_at: str | None
     html_url: str
     performed_via_github_app: GithubInstallation | None = None
 

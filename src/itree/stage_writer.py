@@ -512,7 +512,7 @@ def _fence_sha(body: str) -> Sha256:
 def _raw_history(api: GithubApi, native: IssueComment) -> CommentHistory | None:
     try:
         current = api.get_comment(native.id)
-        history = api.get_comment_history(current.node_id)
+        history = api.get_comment_history(current)
     except (
         GithubApiError,
         SealHistoryUnavailable,
