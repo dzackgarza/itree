@@ -426,10 +426,11 @@ def _utc_now() -> str:
 
 def _discard_process_group(process: subprocess.Popen[bytes]) -> CleanupOutcome:
     terminate_started = time.perf_counter()
-    os.killpg(process.pid, signal.SIGTERM)
-    terminate_seconds = time.perf_counter() - terminate_started
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
     try:
         process.communicate(timeout=1)
+        terminate_seconds = time.perf_counter() - terminate_started
         cleanup = CleanupOutcome(
             terminate_requested=True,
             terminate_wait_seconds=terminate_seconds,
@@ -440,6 +441,7 @@ def _discard_process_group(process: subprocess.Popen[bytes]) -> CleanupOutcome:
         )
         return cleanup
     except subprocess.TimeoutExpired:
+        terminate_seconds = time.perf_counter() - terminate_started
         kill_started = time.perf_counter()
         os.killpg(process.pid, signal.SIGKILL)
         process.communicate()
@@ -453,11 +455,16 @@ def _discard_process_group(process: subprocess.Popen[bytes]) -> CleanupOutcome:
         )
 
 
+def _children_cpu_seconds() -> float:
+    usage = os.times()
+    return usage.children_user + usage.children_system
+
+
 def supervise(
     argv: tuple[str, ...], deadline_ms: DeadlineMilliseconds
 ) -> TerminalProcessOutcome:
     started_wall = time.perf_counter()
-    started_cpu = time.process_time()
+    started_cpu = _children_cpu_seconds()
     started_utc = _utc_now()
     try:
         process = subprocess.Popen(
@@ -480,7 +487,7 @@ def supervise(
             started_utc=started_utc,
             started_monotonic=started_wall,
             wall_seconds=time.perf_counter() - started_wall,
-            cpu_seconds=time.process_time() - started_cpu,
+            cpu_seconds=_children_cpu_seconds() - started_cpu,
             returncode=int(process.returncode),
             stdout=stdout,
             stderr=stderr,
@@ -493,7 +500,7 @@ def supervise(
             started_utc=started_utc,
             started_monotonic=started_wall,
             wall_seconds=time.perf_counter() - started_wall,
-            cpu_seconds=time.process_time() - started_cpu,
+            cpu_seconds=_children_cpu_seconds() - started_cpu,
             deadline_ms=deadline_ms,
             partial_stdout=stdout,
             partial_stderr=stderr,
@@ -507,7 +514,7 @@ def supervise(
             started_utc=started_utc,
             started_monotonic=started_wall,
             wall_seconds=time.perf_counter() - started_wall,
-            cpu_seconds=time.process_time() - started_cpu,
+            cpu_seconds=_children_cpu_seconds() - started_cpu,
             signal_number=int(signal.SIGINT),
             partial_stdout=stdout,
             partial_stderr=stderr,
@@ -726,9 +733,13 @@ def prepare_invocation(
 
 
 def prepare_command(issue: str, deadline_ms: int) -> CommandResult:
+    if deadline_ms <= 0:
+        failure = UsageFailure(diagnostic="deadline_ms must be positive")
+        return CommandResult(
+            exit_code=2, stdout=b"", stderr=(failure.model_dump_json() + "\n").encode()
+        )
     try:
         issue_ref = IssueRef.parse(issue)
-        assert deadline_ms > 0, {"deadline_ms": deadline_ms, "required": "positive"}
     except ValueError as error:
         failure = UsageFailure(diagnostic=str(error))
         return CommandResult(
@@ -773,6 +784,14 @@ def next_command(raw_invocation_id: str) -> CommandResult:
     preparation = _read_manifest(directory)
     if isinstance(preparation, StreamFailure):
         return _failure_result(preparation)
+    if preparation.invocation_id != invocation_id:
+        return _failure_result(
+            StreamFailure(
+                kind="integrity_failure",
+                invocation_id=invocation_id,
+                diagnostic="directory and manifest invocation identities differ",
+            )
+        )
     cursor = _read_cursor(directory)
     if isinstance(cursor, StreamFailure):
         return _failure_result(cursor)
@@ -833,6 +852,14 @@ def finish_command(raw_invocation_id: str) -> CommandResult:
     preparation = _read_manifest(directory)
     if isinstance(preparation, StreamFailure):
         return _failure_result(preparation)
+    if preparation.invocation_id != invocation_id:
+        return _failure_result(
+            StreamFailure(
+                kind="integrity_failure",
+                invocation_id=invocation_id,
+                diagnostic="directory and manifest invocation identities differ",
+            )
+        )
     if isinstance(preparation, PendingPartial):
         return _failure_result(
             StreamFailure(
@@ -855,7 +882,16 @@ def finish_command(raw_invocation_id: str) -> CommandResult:
         verified = _verified_chunk(preparation, directory, index)
         if isinstance(verified, StreamFailure):
             return _failure_result(verified)
-    source_bytes = (directory / "source.md").read_bytes()
+    try:
+        source_bytes = (directory / "source.md").read_bytes()
+    except OSError as error:
+        return _failure_result(
+            StreamFailure(
+                kind="missing_chunk",
+                invocation_id=invocation_id,
+                diagnostic=str(error),
+            )
+        )
     if Sha256.of(source_bytes) != preparation.source.package_sha256:
         return _failure_result(
             StreamFailure(
