@@ -1,0 +1,25 @@
+name: itree issue writer fixture
+'on':
+  workflow_dispatch:
+    inputs:
+      issue_node_id:
+        required: true
+        type: string
+      issue_number:
+        required: true
+        type: string
+      after_final_read_barrier:
+        required: false
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: itree-issue-writer-${{ inputs.issue_node_id }}
+  cancel-in-progress: false
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+    - run: itree stage drain "$ISSUE_REF" --expected-node "$ISSUE_NODE_ID"

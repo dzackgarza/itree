@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import base64
+import fcntl
+import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+state_path = Path(os.environ["ITREE_FIXTURE_STATE"])
+log_path = Path(os.environ["ITREE_FIXTURE_LOG"])
+lock_path = state_path.with_suffix(".lock")
+stdin = sys.stdin.read() if "--input" in args else None
+with lock_path.open("a+b") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    state = json.loads(state_path.read_text())
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(json.dumps({"argv": args, "stdin": stdin}) + "\n")
+    if args[:1] == ["workflow"]:
+        sys.exit(0)
+    if args[:1] != ["api"]:
+        sys.exit(2)
+    path = next((value for value in args if value.startswith("repos/")), "")
+    bare_path = path.split("?", 1)[0]
+    method = args[args.index("-X") + 1] if "-X" in args else "GET"
+    issue = state["issue"]
+    repository = state["repository"]
+    owner, repo = repository.split("/", 1)
+    if "graphql" in args:
+        history = state["histories"].get(issue["node_id"] + ":comment")
+        query = next((value[6:] for value in args if value.startswith("query=")), "")
+        node_id = next((value[5:] for value in args if value.startswith("node=")), "")
+        history = state["histories"].get(node_id)
+        if state.get("history_outcome") == "missing" or history is None:
+            response = {"data": {"node": None}}
+        elif state.get("history_outcome") == "malformed":
+            response = {"data": {"node": {"id": node_id}}}
+        elif state.get("history_outcome") == "denied":
+            sys.stderr.write("HTTP 403: history denied\n")
+            sys.exit(1)
+        elif state.get("history_outcome") == "later_page" and any(
+            value.startswith("after=") for value in args
+        ):
+            sys.stderr.write("HTTP 502: later history page failed\n")
+            sys.exit(1)
+        else:
+            pageInfo = {"hasNextPage": state.get("history_outcome") == "later_page", "endCursor": "next"}
+            response = {"data": {"node": {**history, "userContentEdits": {**history["userContentEdits"], "pageInfo": pageInfo}}}}
+        sys.stdout.write(json.dumps(response))
+        sys.exit(0)
+    if bare_path == f"repos/{repository}/issues/{issue['number']}" and method == "GET":
+        sys.stdout.write(json.dumps(issue))
+        sys.exit(0)
+    if bare_path == f"repos/{repository}/issues/{issue['number']}" and method == "PATCH":
+        outcome = state.get("patch_outcome", "success")
+        if outcome != "http_reject":
+            issue["body"] = json.loads(stdin)["body"]
+            state_path.write_text(json.dumps(state))
+        if outcome == "http_reject":
+            sys.stdout.write("HTTP/2.0 422 Unprocessable Entity\n\n" + json.dumps({"message": "rejected"}))
+            sys.exit(1)
+        if outcome == "timeout":
+            sys.exit(124)
+        if outcome == "html":
+            sys.stdout.write("<html>temporary failure</html>")
+            sys.exit(0)
+        if outcome == "malformed_success":
+            sys.stdout.write("HTTP/2.0 200 OK\n\nnot-json")
+            sys.exit(0)
+        if outcome == "nonzero":
+            sys.stderr.write("transport closed\n")
+            sys.exit(1)
+        sys.stdout.write("HTTP/2.0 200 OK\n\n" + json.dumps(issue))
+        sys.exit(0)
+    if bare_path == f"repos/{repository}/issues/{issue['number']}/comments" and method == "GET":
+        comments = sorted(state["comments"], key=lambda value: value["id"])
+        pages = [comments[index:index + 100] for index in range(0, len(comments), 100)] or [[]]
+        sys.stdout.write("\n".join(json.dumps(page) for page in pages))
+        sys.exit(0)
+    if bare_path == f"repos/{repository}/issues/{issue['number']}/comments" and method == "POST":
+        comment_id = max([100] + [comment["id"] for comment in state["comments"]]) + 1
+        node_id = "IC_stage_" + str(comment_id)
+        timestamp = f"2026-11-28T00:{comment_id // 60:02d}:{comment_id % 60:02d}Z"
+        comment = {
+            "id": comment_id,
+            "node_id": node_id,
+            "body": json.loads(stdin)["body"],
+            "user": {"login": state["actor"]},
+            "author_association": "OWNER",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "html_url": issue["html_url"] + "#issuecomment-" + str(comment_id),
+        }
+        state["comments"].append(comment)
+        state["histories"][node_id] = {
+            "id": node_id,
+            "createdAt": timestamp,
+            "updatedAt": timestamp,
+            "lastEditedAt": None,
+            "editor": None,
+            "userContentEdits": {"totalCount": 0, "nodes": []},
+        }
+        state_path.write_text(json.dumps(state))
+        sys.stdout.write(json.dumps(comment))
+        sys.exit(0)
+    if bare_path.startswith(f"repos/{repository}/issues/comments/") and method == "GET":
+        comment_id = int(bare_path.rsplit("/", 1)[1])
+        comment = next((value for value in state["comments"] if value["id"] == comment_id), None)
+        if comment is None:
+            sys.stderr.write("HTTP 404: comment missing\n")
+            sys.exit(1)
+        sys.stdout.write(json.dumps(comment))
+        sys.exit(0)
+    if bare_path == "user" and method == "GET":
+        sys.stdout.write(json.dumps({"login": state["actor"]}))
+        sys.exit(0)
+    if "/collaborators/" in bare_path and bare_path.endswith("/permission"):
+        login = bare_path.split("/")[-2]
+        role = state["permissions"].get(login)
+        if role is None:
+            sys.stderr.write("HTTP 404: collaborator missing\n")
+            sys.exit(1)
+        sys.stdout.write(json.dumps({"permission": role, "role_name": role}))
+        sys.exit(0)
+    if bare_path == f"repos/{repository}" and method == "GET":
+        sys.stdout.write(json.dumps({"default_branch": state["default_branch"], "node_id": "R_stage"}))
+        sys.exit(0)
+    if bare_path.endswith("/git/ref/heads/" + state["default_branch"]):
+        sys.stdout.write(json.dumps({"ref": "refs/heads/" + state["default_branch"], "object": {"sha": state["writer"]["default_head_sha"]}}))
+        sys.exit(0)
+    if "/contents/.github/workflows/itree-issue-writer.yml" in bare_path:
+        content = Path(os.environ["ITREE_WORKFLOW_SOURCE"]).read_bytes()
+        sys.stdout.write(json.dumps({"type": "file", "path": ".github/workflows/itree-issue-writer.yml", "encoding": "base64", "content": base64.b64encode(content).decode(), "sha": state["writer"]["workflow_blob"]}))
+        sys.exit(0)
+    if "/actions/jobs/" in bare_path:
+        sys.stdout.write(json.dumps(state["job"]))
+        sys.exit(0)
+    if "/actions/runs/" in bare_path and bare_path.endswith("/jobs"):
+        sys.stdout.write(json.dumps({"jobs": [state["job"]]}))
+        sys.exit(0)
+    sys.stderr.write("unhandled fixture request: " + method + " " + path + "\n")
+    sys.exit(3)
