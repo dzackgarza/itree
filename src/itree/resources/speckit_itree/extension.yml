@@ -1,0 +1,32 @@
+schema_version: "1.0"
+extension:
+  id: itree
+  name: "itree live work packages"
+  version: "1.0.0"
+  description: "Load an exact live GitHub issue work package through the installed itree distribution"
+  author: dzackgarza
+  repository: https://github.com/dzackgarza/itree
+  license: MIT
+requires:
+  speckit_version: ">=1.4.4.dev0"
+  tools:
+    - name: itree
+      required: true
+    - name: gh
+      required: true
+provides:
+  commands:
+    - name: speckit.itree.work
+      file: commands/work.md
+      description: "Load one live OWNER/REPO#N work package in exact ordered chunks"
+    - name: speckit.itree.initialize
+      file: commands/initialize.md
+      description: "Check itree prerequisites without selecting an issue"
+events:
+  session_start:
+    command: speckit.itree.initialize
+    timeout: 30
+tags:
+  - itree
+  - github
+  - work-package

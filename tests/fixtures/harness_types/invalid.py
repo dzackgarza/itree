@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from itree.harness_work import (
-    ChunkStore,
     HarnessWorkBoundary,
     InvocationId,
     ItreeDistribution,
@@ -13,7 +12,6 @@ from itree.harness_work import (
     Sha256,
     Spawned,
     model_context_verified,
-    next_chunk,
 )
 
 module_only = ItreeDistribution(
@@ -28,8 +26,8 @@ module_only = ItreeDistribution(
 )
 
 
-def missing_invocation(store: ChunkStore) -> None:
-    next_chunk(store=store)
+def missing_invocation(boundary: HarnessWorkBoundary) -> None:
+    boundary.next()
 
 
 def pending_finish(boundary: HarnessWorkBoundary, pending: PendingPackage) -> None:

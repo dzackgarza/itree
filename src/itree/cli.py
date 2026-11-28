@@ -27,6 +27,13 @@ if __package__ in (None, ""):
 
 from cyclopts import App, Parameter
 
+from .harness_work import (
+    CommandResult,
+    finish_command,
+    initialize_command,
+    next_command,
+    prepare_command,
+)
 from .github import (
     GithubApi,
     JsonObject,
@@ -111,6 +118,50 @@ app = App(
     help_epilogue="""Use `itree help model` for the full organization guide.
 Use `itree doctor --explain CODE` for detailed remediation of a diagnostic.""",
 )
+harness_work_app = App(name="harness-work", help="Transport one live work package.")
+app.command(harness_work_app)
+
+
+def _harness_work_result(result: CommandResult) -> None:
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    if result.exit_code != 0:
+        raise SystemExit(result.exit_code)
+
+
+@harness_work_app.command
+def prepare(
+    issue: Annotated[str, Parameter(help="Work-unit issue as OWNER/REPO#N")],
+    *,
+    deadline_ms: Annotated[
+        int,
+        Parameter(name="--deadline-ms", help="Positive child deadline in milliseconds"),
+    ],
+) -> None:
+    """Prepare one exact package through the installed console launcher."""
+    _harness_work_result(prepare_command(issue, deadline_ms))
+
+
+@harness_work_app.command(name="next")
+def next_chunk_command(
+    invocation_id: Annotated[str, Parameter(help="Opaque ID returned by prepare")],
+) -> None:
+    """Emit the next exact chunk for one invocation."""
+    _harness_work_result(next_command(invocation_id))
+
+
+@harness_work_app.command
+def finish(
+    invocation_id: Annotated[str, Parameter(help="Opaque ID returned by prepare")],
+) -> None:
+    """Finish a fully emitted full package and remove its scratch state."""
+    _harness_work_result(finish_command(invocation_id))
+
+
+@harness_work_app.command
+def initialize() -> None:
+    """Check prerequisites without selecting or loading an issue."""
+    _harness_work_result(initialize_command())
 
 
 help_app = App(name="help", help="Organization guide and model explanation.")

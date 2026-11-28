@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ TYPE_FIXTURE = SOURCE / "tests" / "fixtures" / "harness_types" / "invalid.py"
 SMALL_SIZE = 300 * 1024
 LARGE_SIZE = 2_300_000
 CHUNK_SIZE = 8192
+SPEC_PIN = "a4d571229e164e440f8950cac034607bae7b7518"
 
 
 @dataclass(frozen=True)
@@ -230,6 +232,233 @@ def fixture() -> Iterator[HarnessFixture]:
         journal.open("a", encoding="utf-8").write(
             json.dumps({"case_seconds": time.perf_counter() - started}) + "\n"
         )
+
+
+@pytest.fixture(scope="session")
+def clean_wheel_target(fixture: HarnessFixture) -> Path:
+    root = fixture.root / "clean-wheel-target"
+    distribution = root / "dist"
+    target = root / "venv"
+    _execute(
+        fixture,
+        "wheel-build",
+        ["uv", "build", "--out-dir", str(distribution)],
+        cwd=SOURCE,
+        timeout=600,
+    )
+    wheel = next(distribution.glob("itree-*.whl"))
+    _execute(
+        fixture,
+        "wheel-venv",
+        ["uv", "venv", "--python", sys.executable, str(target)],
+        timeout=300,
+    )
+    _execute(
+        fixture,
+        "wheel-install",
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(target / "bin" / "python"),
+            str(wheel),
+            f"specify-cli @ git+https://github.com/github/spec-kit@{SPEC_PIN}",
+        ],
+        timeout=600,
+    )
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+        expected = {
+            "itree/resources/speckit_itree/extension.yml",
+            "itree/resources/speckit_itree/commands/work.md",
+            "itree/resources/speckit_itree/commands/initialize.md",
+            "itree/resources/speckit_itree/scripts/python/work_loader.py",
+            "itree/resources/speckit_itree/scripts/python/initialize.py",
+        }
+        assert expected <= names
+        launcher_info = archive.getinfo(
+            "itree/resources/speckit_itree/scripts/python/work_loader.py"
+        )
+        assert launcher_info.external_attr >> 16 & 0o111
+    return target
+
+
+def test_rendered_wheel_uses_its_console_launcher_without_source_imports(
+    fixture: HarnessFixture, clean_wheel_target: Path
+) -> None:
+    project = fixture.root / "unrelated-rendered-project"
+    project.joinpath(".specify").mkdir(parents=True)
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = ""
+    environment["PATH"] = (
+        f"{clean_wheel_target / 'bin'}{os.pathsep}{environment['PATH']}"
+    )
+    environment["ITREE_HARNESS_WORK_ROOT"] = str(fixture.root / "unrelated-state")
+    specify = clean_wheel_target / "bin" / "specify"
+    installed = subprocess.run(
+        [str(specify), "integration", "install", "codex"],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    rendered = subprocess.run(
+        [
+            str(specify),
+            "extension",
+            "add",
+            str(SOURCE / "src" / "itree" / "resources" / "speckit_itree"),
+            "--dev",
+        ],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=180,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    module = subprocess.run(
+        [
+            str(clean_wheel_target / "bin" / "python"),
+            "-c",
+            "import itree; print(itree.__file__)",
+        ],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert module.returncode == 0
+    assert str(clean_wheel_target) in module.stdout
+    assert str(SOURCE) not in module.stdout
+    helper = (
+        project
+        / ".specify"
+        / "extensions"
+        / "itree"
+        / "scripts"
+        / "python"
+        / "work_loader.py"
+    )
+    result = subprocess.run(
+        [str(helper), "prepare", fixture.ref(fixture.small), "--deadline-ms", "180000"],
+        cwd=project,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=240,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    prepared = json.loads(result.stdout)
+    launcher = clean_wheel_target / "bin" / "itree"
+    assert prepared["process"]["argv"] == [
+        str(launcher),
+        "work",
+        fixture.ref(fixture.small),
+    ]
+    binding = json.loads(
+        (
+            fixture.root
+            / "unrelated-state"
+            / prepared["invocation_id"]
+            / "distribution.json"
+        ).read_text()
+    )
+    assert binding["launcher_abspath"] == str(launcher)
+    assert binding["entrypoint_value"] == "itree.cli:app"
+    for script in (
+        next(clean_wheel_target.glob("lib/python*/site-packages/itree/cli.py")),
+        next(clean_wheel_target.glob("lib/python*/site-packages/itree/__main__.py")),
+    ):
+        warmup = subprocess.run(
+            ["uv", "run", "--script", str(script), "--help"],
+            cwd=project,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=240,
+        )
+        assert warmup.returncode == 0, warmup.stdout + warmup.stderr
+    commands = (
+        [str(launcher), "work", fixture.ref(fixture.small)],
+        [
+            str(clean_wheel_target / "bin" / "python"),
+            "-m",
+            "itree",
+            "work",
+            fixture.ref(fixture.small),
+        ],
+        [
+            "uv",
+            "run",
+            "--script",
+            str(
+                next(clean_wheel_target.glob("lib/python*/site-packages/itree/cli.py"))
+            ),
+            "work",
+            fixture.ref(fixture.small),
+        ],
+        [
+            "uv",
+            "run",
+            "--script",
+            str(
+                next(
+                    clean_wheel_target.glob(
+                        "lib/python*/site-packages/itree/__main__.py"
+                    )
+                )
+            ),
+            "work",
+            fixture.ref(fixture.small),
+        ],
+    )
+    outputs = [
+        subprocess.run(
+            command,
+            cwd=project,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=240,
+        )
+        for command in commands
+    ]
+    assert all(result.returncode == 0 for result in outputs), [
+        (result.stdout, result.stderr) for result in outputs
+    ]
+    assert len({result.stdout for result in outputs}) == 1
+    assert len({result.stderr for result in outputs}) == 1
+    empty = fixture.root / "module-only-venv"
+    _execute(
+        fixture,
+        "module-only-venv",
+        ["uv", "venv", "--python", sys.executable, str(empty)],
+    )
+    rejected = subprocess.run(
+        [str(helper), "initialize"],
+        cwd=project,
+        env={
+            **environment,
+            "PATH": f"{empty / 'bin'}{os.pathsep}{environment['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert rejected.returncode == 5
+    assert json.loads(rejected.stderr)["kind"] == "distribution-failure"
 
 
 def _invoke(
