@@ -16,13 +16,15 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
@@ -32,13 +34,47 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from itree.models import FixtureState
 
 PIN = "0e80c9679e6f6bfd55e13cbcf193d297c5207117"
+MUTATION_ALIAS_LIMIT = 5
 
 type JsonValue = (
     str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 )
 last_mutation_at = 0.0
-last_api_seconds = 0.0
-last_pacing_seconds = 0.0
+_mutation_gate = threading.Lock()
+_phase_registry_lock = threading.RLock()
+_phase_operation_ids: dict[tuple[Path, str], int] = {}
+_request_local = threading.local()
+_stop_requested = threading.Event()
+
+
+class RequestTiming(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    api_seconds: float = Field(ge=0)
+    pacing_seconds: float = Field(ge=0)
+
+
+def _timing() -> RequestTiming:
+    value = getattr(_request_local, "timing", None)
+    assert isinstance(value, RequestTiming), "timing is only available after a mutation"
+    return value
+
+
+def _begin_mutation(command: list[str]) -> float:
+    global last_mutation_at
+    if _stop_requested.is_set():
+        raise FixtureRecoveryError("another comment family failed; no new mutation")
+    with _mutation_gate:
+        if _stop_requested.is_set():
+            raise FixtureRecoveryError("another comment family failed; no new mutation")
+        started = time.perf_counter()
+        remaining = max(1.0, 0.75 * _content_units(command)) - (
+            time.perf_counter() - last_mutation_at
+        )
+        if remaining > 0 and last_mutation_at != 0.0:
+            time.sleep(remaining)
+        last_mutation_at = time.perf_counter()
+        return time.perf_counter() - started
 
 
 class FixtureCommandError(RuntimeError):
@@ -88,25 +124,16 @@ def _content_units(command: list[str]) -> int:
 def run(
     command: list[str], *, cwd: Path | None = None, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    global last_mutation_at, last_api_seconds, last_pacing_seconds
-    mutates = _is_mutation(command)
-    pace_started = time.perf_counter()
-    if mutates:
-        interval = max(1.0, 0.75 * _content_units(command))
-        remaining = interval - (time.perf_counter() - last_mutation_at)
-        if remaining > 0 and last_mutation_at != 0.0:
-            time.sleep(remaining)
-    pace_seconds = time.perf_counter() - pace_started
-    if mutates:
-        last_mutation_at = time.perf_counter()
+    pace_seconds = _begin_mutation(command) if _is_mutation(command) else 0.0
     started = time.perf_counter()
     result = subprocess.run(
         command, cwd=cwd, input=input_text, text=True, capture_output=True, check=False
     )
     elapsed = time.perf_counter() - started
-    last_api_seconds = elapsed
-    if mutates:
-        last_pacing_seconds = pace_seconds
+    if _is_mutation(command):
+        _request_local.timing = RequestTiming(
+            api_seconds=elapsed, pacing_seconds=pace_seconds
+        )
     print(
         f"FIXTURE-STEP seconds={elapsed:.6f} pacing_seconds={pace_seconds:.6f} exit={result.returncode} command={json.dumps(command)}",
         flush=True,
@@ -148,6 +175,50 @@ class FamilyRecord(BaseModel):
     api_seconds: float = Field(gt=0)
     pacing_seconds: float = Field(ge=0)
     written_at: float
+
+
+_Result = TypeVar("_Result")
+
+
+def _run_comment_job(job: Callable[[], _Result], family: str) -> _Result:
+    if _stop_requested.is_set():
+        raise FixtureRecoveryError(
+            f"{family} was not started because another comment family failed"
+        )
+    try:
+        return job()
+    except BaseException:
+        _stop_requested.set()
+        raise
+
+
+def _comment_task(
+    executor: ThreadPoolExecutor, job: Callable[[], _Result], family: str
+) -> Future[_Result]:
+    if _stop_requested.is_set():
+        raise FixtureRecoveryError(
+            f"{family} was not submitted because another comment family failed"
+        )
+    try:
+        return executor.submit(_run_comment_job, job, family)
+    except BaseException as error:
+        _stop_requested.set()
+        raise FixtureRecoveryError(
+            f"{family} could not be submitted; recovery is preserved"
+        ) from error
+
+
+def _comment_result(
+    executor: ThreadPoolExecutor, future: Future[_Result], family: str
+) -> _Result:
+    try:
+        return future.result()
+    except BaseException as error:
+        _stop_requested.set()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise FixtureRecoveryError(
+            f"{family} failed; independent family results have settled and recovery is preserved"
+        ) from error
 
 
 def comments(
@@ -199,12 +270,9 @@ def add_comment_phase(
             missing.append((label, number, body))
         else:
             results[label] = live
-    batch_serial = len(family_records)
-    for offset in range(0, len(missing), 8):
-        batch = missing[offset : offset + 8]
-        operation_id = f"{operation_prefix}-{batch_serial:03d}"
-        assert operation_id not in completed
-        batch_serial += 1
+    for offset in range(0, len(missing), 5):
+        batch = missing[offset : offset + 5]
+        operation_id = _phase_operation_id(root, operation_prefix)
         fields = [
             f"c{index:03d}:addComment(input:{{subjectId:{json.dumps(str(_live_issue(slug, number, root)['id']))},body:{json.dumps(body)}}}){{commentEdge{{node{{databaseId id url body}}}}}}"
             for index, (_label, number, body) in enumerate(batch)
@@ -213,7 +281,7 @@ def add_comment_phase(
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
         response = _graphql_response(query)
-        elapsed = last_api_seconds
+        elapsed = _timing().api_seconds
         created = _record_family_response(
             root,
             "addComment",
@@ -240,6 +308,23 @@ class FixtureRecoveryError(RuntimeError):
     pass
 
 
+def _phase_operation_id(
+    root: Path,
+    prefix: str,
+    family: Literal["addComment", "createIssue", "createRef"] = "addComment",
+) -> str:
+    with _phase_registry_lock:
+        key = (root, prefix)
+        serial = _phase_operation_ids.get(key)
+        if serial is None:
+            serial = sum(
+                record.family == family and record.operation_id.startswith(prefix)
+                for record in _completed(root).values()
+            )
+        _phase_operation_ids[key] = serial + 1
+        return f"{prefix}-{serial:03d}"
+
+
 def _journal_path(root: Path) -> Path:
     if root.name != "acceptance":
         return root / "family-journal.jsonl"
@@ -251,10 +336,11 @@ def _records(root: Path) -> list[FamilyRecord]:
     if not path.exists():
         return []
     try:
-        return [
-            FamilyRecord.model_validate_json(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-        ]
+        with _phase_registry_lock:
+            return [
+                FamilyRecord.model_validate_json(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
     except ValueError as error:
         raise FixtureRecoveryError(
             f"recovery requires schema_version=1 native-ID request records in {path}; "
@@ -315,7 +401,7 @@ def _remember(
     )
     path = _journal_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as journal:
+    with _phase_registry_lock, path.open("a", encoding="utf-8") as journal:
         journal.write(
             json.dumps(
                 record.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
@@ -366,7 +452,9 @@ def _record_family_response(
             continue
         created[key] = result
     if created:
-        _remember(root, family, operation_id, created, api_seconds, last_pacing_seconds)
+        _remember(
+            root, family, operation_id, created, api_seconds, _timing().pacing_seconds
+        )
     if len(created) != len(aliases) or response.get("errors"):
         raise FixtureRecoveryError(
             f"mutation {operation_id} returned failed or invalid aliases; "
@@ -461,7 +549,7 @@ def _batch_graphql(
     alias = "m000"
     query = f"mutation WorkPackageFamily {{{alias}:{family}(input:{{{arguments}}}){{{result_selection}}}}}"
     response = _graphql_response(query)
-    elapsed = last_api_seconds
+    elapsed = _timing().api_seconds
     assert "errors" not in response and isinstance(response.get("data"), dict), response
     data = response["data"]
     assert isinstance(data, dict), response
@@ -473,7 +561,7 @@ def _batch_graphql(
             "operation": family,
             "result": result,
         }
-    _remember(root, family, key, {"m000": result}, elapsed, last_pacing_seconds)
+    _remember(root, family, key, {"m000": result}, elapsed, _timing().pacing_seconds)
     return result
 
 
@@ -638,31 +726,38 @@ def create_issue_family(
             )
     if not missing:
         return
-    if family_records:
-        operation_id = f"{operation_id}-recovery-{len(family_records)}"
-    assert operation_id not in completed
-    repository_id = _repository_id(slug)
-    fields = [
-        f"i{index:03d}:createIssue(input:{{repositoryId:{json.dumps(repository_id)},title:{json.dumps(title)},body:{json.dumps(body)}}}){{issue{{number id body title url}}}}"
-        for index, (title, body) in enumerate(missing)
-    ]
-    query = "mutation WorkPackageIssueFamily {" + " ".join(fields) + "}"
-    assert len(fields) * 2 <= 500_000
-    assert len(query.encode("utf-8")) < 120_000
-    response = _graphql_response(query)
-    elapsed = last_api_seconds
-    created = _record_family_response(
-        root,
-        "createIssue",
-        operation_id,
-        response,
-        {f"i{index:03d}": title for index, (title, _body) in enumerate(missing)},
-        {f"i{index:03d}": body for index, (_title, body) in enumerate(missing)},
-        elapsed,
+    base_operation_id = (
+        operation_id
+        if not family_records
+        else f"{operation_id}-recovery-{len(family_records)}"
     )
-    live.extend(created.values())
-    for result in created.values():
-        _comment_catalogs.setdefault((slug, root, _number(result["number"])), [])
+    repository_id = _repository_id(slug)
+    for offset in range(0, len(missing), MUTATION_ALIAS_LIMIT):
+        batch = missing[offset : offset + MUTATION_ALIAS_LIMIT]
+        assert len(batch) <= MUTATION_ALIAS_LIMIT
+        operation_id = _phase_operation_id(root, base_operation_id, "createIssue")
+        fields = [
+            f"i{index:03d}:createIssue(input:{{repositoryId:{json.dumps(repository_id)},title:{json.dumps(title)},body:{json.dumps(body)}}}){{issue{{number id body title url}}}}"
+            for index, (title, body) in enumerate(batch)
+        ]
+        query = "mutation WorkPackageIssueFamily {" + " ".join(fields) + "}"
+        assert len(fields) <= MUTATION_ALIAS_LIMIT
+        assert len(fields) * 2 <= 500_000
+        assert len(query.encode("utf-8")) < 120_000
+        response = _graphql_response(query)
+        elapsed = _timing().api_seconds
+        created = _record_family_response(
+            root,
+            "createIssue",
+            operation_id,
+            response,
+            {f"i{index:03d}": title for index, (title, _body) in enumerate(batch)},
+            {f"i{index:03d}": body for index, (_title, body) in enumerate(batch)},
+            elapsed,
+        )
+        live.extend(created.values())
+        for result in created.values():
+            _comment_catalogs.setdefault((slug, root, _number(result["number"])), [])
 
 
 def create_pull_request(slug: str, root: Path) -> tuple[int, str]:
@@ -882,7 +977,7 @@ def add_ordered_comments(
                 )
         if live is not None:
             records_by_index[index] = live
-    batch_size = min(8, len(bodies))
+    batch_size = min(5, len(bodies))
     for offset in range(0, len(bodies), batch_size):
         missing = [
             index
@@ -904,7 +999,7 @@ def add_ordered_comments(
         assert len(fields) * 3 <= 500_000
         assert len(query.encode("utf-8")) < 120_000
         response = _graphql_response(query)
-        elapsed = last_api_seconds
+        elapsed = _timing().api_seconds
         created = _record_family_response(
             root,
             "addComment",
@@ -1078,8 +1173,8 @@ def _publish_annotated_tag(
                 "type": target_type,
             }
         },
-        last_api_seconds,
-        last_pacing_seconds,
+        _timing().api_seconds,
+        _timing().pacing_seconds,
     )
 
 
@@ -1093,50 +1188,60 @@ def _create_missing_refs(slug: str, root: Path, missing: list[tuple[str, str]]) 
             for record in completed.values()
         ):
             raise FixtureRecoveryError(f"journaled ref is absent from GitHub: {name}")
-    serial = sum(record.family == "createRef" for record in completed.values())
-    operation_id = f"createRef:required-refs-v1-{serial:03d}"
     repository_id = _repository_id(slug)
-    fields = [
-        f"r{index:03d}:createRef(input:{{repositoryId:{json.dumps(repository_id)},name:{json.dumps(name)},oid:{json.dumps(sha)}}}){{ref{{prefix name id target{{oid}}}}}}"
-        for index, (name, sha) in enumerate(missing)
-    ]
-    query = "mutation WorkPackageRefs {" + " ".join(fields) + "}"
-    assert len(fields) * 2 <= 500_000
-    assert len(query.encode("utf-8")) < 120_000
-    response = _graphql_response(query)
-    elapsed = last_api_seconds
-    created: dict[str, JsonObject] = {}
-    data = response.get("data")
-    for index, (name, sha) in enumerate(missing):
-        if not isinstance(data, dict):
-            break
-        payload = data.get(f"r{index:03d}")
-        if not isinstance(payload, dict):
-            continue
-        if "ref" not in payload or payload["ref"] is None:
-            continue
-        result = payload["ref"]
-        assert isinstance(result, dict)
-        target = result.get("target")
-        if (
-            not isinstance(result.get("id"), str)
-            or not isinstance(target, dict)
-            or target.get("oid") != sha
-            or result.get("prefix") is None
-            or result.get("name") is None
-            or f"{result['prefix']}{result['name']}" != name
-        ):
-            continue
-        created[name] = result
-    if created:
-        _remember(
-            root, "createRef", operation_id, created, elapsed, last_pacing_seconds
+    for offset in range(0, len(missing), MUTATION_ALIAS_LIMIT):
+        batch = missing[offset : offset + MUTATION_ALIAS_LIMIT]
+        assert len(batch) <= MUTATION_ALIAS_LIMIT
+        operation_id = _phase_operation_id(
+            root, "createRef:required-refs-v1", "createRef"
         )
-    if len(created) != len(missing) or response.get("errors"):
-        raise FixtureRecoveryError(
-            f"ref creation returned failed or invalid aliases; "
-            f"persisted {len(created)} valid IDs: {response}"
-        )
+        fields = [
+            f"r{index:03d}:createRef(input:{{repositoryId:{json.dumps(repository_id)},name:{json.dumps(name)},oid:{json.dumps(sha)}}}){{ref{{prefix name id target{{oid}}}}}}"
+            for index, (name, sha) in enumerate(batch)
+        ]
+        query = "mutation WorkPackageRefs {" + " ".join(fields) + "}"
+        assert len(fields) <= MUTATION_ALIAS_LIMIT
+        assert len(fields) * 2 <= 500_000
+        assert len(query.encode("utf-8")) < 120_000
+        response = _graphql_response(query)
+        elapsed = _timing().api_seconds
+        created: dict[str, JsonObject] = {}
+        data = response.get("data")
+        for index, (name, sha) in enumerate(batch):
+            if not isinstance(data, dict):
+                break
+            payload = data.get(f"r{index:03d}")
+            if not isinstance(payload, dict):
+                continue
+            if "ref" not in payload or payload["ref"] is None:
+                continue
+            result = payload["ref"]
+            assert isinstance(result, dict)
+            target = result.get("target")
+            if (
+                not isinstance(result.get("id"), str)
+                or not isinstance(target, dict)
+                or target.get("oid") != sha
+                or result.get("prefix") is None
+                or result.get("name") is None
+                or f"{result['prefix']}{result['name']}" != name
+            ):
+                continue
+            created[name] = result
+        if created:
+            _remember(
+                root,
+                "createRef",
+                operation_id,
+                created,
+                elapsed,
+                _timing().pacing_seconds,
+            )
+        if len(created) != len(batch) or response.get("errors"):
+            raise FixtureRecoveryError(
+                f"ref creation returned failed or invalid aliases; "
+                f"persisted {len(created)} valid IDs: {response}"
+            )
 
 
 def _verify_required_refs(slug: str, checkout: Path, root: Path) -> None:
@@ -1331,7 +1436,7 @@ def attach_pairs(slug: str, root: Path, specifications: list[tuple[int, int]]) -
         query = "mutation WorkPackageParents {" + " ".join(fields) + "}"
         assert len(fields) * 2 <= 500_000
         response = _graphql_response(query)
-        elapsed = last_api_seconds
+        elapsed = _timing().api_seconds
         data = response.get("data")
         created: dict[str, JsonObject] = {}
         for index, (label, parent, child) in enumerate(batch):
@@ -1345,7 +1450,12 @@ def attach_pairs(slug: str, root: Path, specifications: list[tuple[int, int]]) -
                 created[label] = result
         if created:
             _remember(
-                root, "addSubIssue", operation_id, created, elapsed, last_pacing_seconds
+                root,
+                "addSubIssue",
+                operation_id,
+                created,
+                elapsed,
+                _timing().pacing_seconds,
             )
         if len(created) != len(batch) or response.get("errors"):
             raise FixtureRecoveryError(
@@ -1715,22 +1825,41 @@ def complete_fixture_objects(
     cycle_b = issue(slug, "Cycle B", cycle_b_body, root)
     attach_pairs(slug, root, [(roadmap, selected), (cycle_b, cycle_a)])
     cited = issue(slug, "Cited issue source", "CITED-ISSUE-BODY-EXACT\n", root)
-    phase = add_comment_phase(
-        slug,
-        root,
-        "addComment:fixture-intro-v1",
-        [
-            (roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n"),
-            (roadmap, f"Ancestor-only citation: {recursive_url}\n"),
-            (selected, "BINDING-PRIOR-DECISION-EXACT\n"),
-            (
-                selected,
-                "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
-            ),
-            (selected, "OPEN-VERIFICATION-FINDING-EXACT\n"),
-            (cited, "CITED-COMMENT-BODY-EXACT\n"),
-        ],
+    pagination = issue(
+        slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
     )
+    executor = ThreadPoolExecutor(max_workers=2)
+    ordered_future = _comment_task(
+        executor,
+        lambda: add_ordered_comments(
+            slug,
+            pagination,
+            [f"COMMENT-{index:03d}-BODY-EXACT\n" for index in range(101)],
+            root,
+        ),
+        "ordered pagination comments",
+    )
+    phase_future = _comment_task(
+        executor,
+        lambda: add_comment_phase(
+            slug,
+            root,
+            "addComment:fixture-intro-v1",
+            [
+                (roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n"),
+                (roadmap, f"Ancestor-only citation: {recursive_url}\n"),
+                (selected, "BINDING-PRIOR-DECISION-EXACT\n"),
+                (
+                    selected,
+                    "CORRECTIVE-DECISION-EXACT; the binding comment remains binding history.\n",
+                ),
+                (selected, "OPEN-VERIFICATION-FINDING-EXACT\n"),
+                (cited, "CITED-COMMENT-BODY-EXACT\n"),
+            ],
+        ),
+        "independent subject comments",
+    )
+    phase = _comment_result(executor, phase_future, "independent subject comments")
     roadmap_comment = _phase_comment(phase, roadmap, "ROADMAP-COMMENT-DECISION-EXACT\n")
     roadmap_comment_id = _number(roadmap_comment["databaseId"])
     roadmap_comment_url = str(roadmap_comment["url"])
@@ -1849,15 +1978,6 @@ def complete_fixture_objects(
     ]
     tail_comments = [(selected, "\n\n".join(citation_lines) + "\n")]
 
-    pagination = issue(
-        slug, "Pagination acceptance", "LEGACY-PAGINATION-BODY-EXACT\n", root
-    )
-    pagination_comments, pagination_ids = add_ordered_comments(
-        slug,
-        pagination,
-        [f"COMMENT-{index:03d}-BODY-EXACT\n" for index in range(101)],
-        root,
-    )
     tail_comments.append((selected, f"Bare sibling reference: #{pagination}\n"))
 
     malformed: dict[str, int] = {}
@@ -1884,7 +2004,18 @@ def complete_fixture_objects(
             (cycle_b, "CYCLE-B-READABLE-COMMENT\n"),
         )
     )
-    add_comment_phase(slug, root, "addComment:fixture-tail-v1", tail_comments)
+    tail_future = _comment_task(
+        executor,
+        lambda: add_comment_phase(
+            slug, root, "addComment:fixture-tail-v1", tail_comments
+        ),
+        "independent tail comments",
+    )
+    pagination_comments, pagination_ids = _comment_result(
+        executor, ordered_future, "ordered pagination comments"
+    )
+    _comment_result(executor, tail_future, "independent tail comments")
+    executor.shutdown(wait=True, cancel_futures=True)
 
     real_gh = shutil.which("gh")
     assert real_gh is not None
