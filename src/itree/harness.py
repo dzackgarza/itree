@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import subprocess
@@ -273,6 +274,143 @@ class ProviderInputPort(Protocol):
 
 
 JsonDocument = dict[str, JsonValue]
+
+
+def canonical_manifest_bytes(manifest: EvidenceManifest) -> bytes:
+    document: dict[str, JsonValue] = manifest.model_dump(mode="json")
+    document.pop("manifest_sha256")
+    return (
+        json.dumps(document, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+
+
+def seal_manifest(manifest: EvidenceManifest) -> EvidenceManifest:
+    digest = hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+    return manifest.model_copy(update={"manifest_sha256": Sha256(digest)})
+
+
+def write_sealed_manifest(run_directory: Path, manifest: EvidenceManifest) -> Path:
+    sealed = seal_manifest(manifest)
+    destination = run_directory / "manifest.json"
+    destination.write_bytes((sealed.model_dump_json(indent=2) + "\n").encode("utf-8"))
+    sidecar = run_directory / "manifest.sha256"
+    sidecar.write_text(sealed.manifest_sha256.root + "\n", encoding="ascii")
+    canonical = sealed.model_dump(mode="json")
+    canonical.pop("manifest_sha256")
+    expected = (
+        json.dumps(canonical, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    assert hashlib.sha256(expected).hexdigest() == sidecar.read_text().strip(), {
+        "manifest": destination,
+        "sidecar": sidecar,
+    }
+    return destination
+
+
+def verify_manifest_directory(run_directory: Path) -> EvidenceManifest:
+    manifest = EvidenceManifest.model_validate_json(
+        (run_directory / "manifest.json").read_bytes()
+    )
+    assert manifest.run_id == run_directory.name, {"run_directory": run_directory}
+    sidecar = (run_directory / "manifest.sha256").read_text(encoding="ascii")
+    assert sidecar == manifest.manifest_sha256.root + "\n", {"sidecar": sidecar}
+    assert (
+        hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+        == manifest.manifest_sha256.root
+    ), {"manifest": run_directory / "manifest.json"}
+    recorded = {descriptor.path for descriptor in manifest.artifacts}
+    assert len(recorded) == len(manifest.artifacts), {
+        "duplicate_artifact_paths": recorded
+    }
+    for descriptor in manifest.artifacts:
+        relative = descriptor.path
+        assert not relative.is_absolute() and ".." not in relative.parts, {
+            "path": relative
+        }
+        content = (run_directory / relative).read_bytes()
+        assert len(content) == descriptor.byte_count, {
+            "path": relative,
+            "bytes": len(content),
+        }
+        assert Sha256.of(content) == descriptor.sha256, {"path": relative}
+    actual = {
+        path.relative_to(run_directory)
+        for path in run_directory.rglob("*")
+        if path.is_file() and path.name not in {"manifest.json", "manifest.sha256"}
+    }
+    assert actual == recorded, {
+        "unrecorded": actual - recorded,
+        "missing": recorded - actual,
+    }
+    return manifest
+
+
+def verify_manifest_commit(
+    commit: str, run_id: str, repository: Path
+) -> EvidenceManifest:
+    prefix = f"evidence/harness/{run_id}/"
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{prefix}manifest.json"],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, {
+        "commit": commit,
+        "path": prefix,
+        "stderr": result.stderr,
+    }
+    manifest = EvidenceManifest.model_validate_json(result.stdout)
+    sidecar = subprocess.run(
+        ["git", "show", f"{commit}:{prefix}manifest.sha256"],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert sidecar.returncode == 0
+    assert sidecar.stdout.decode("ascii") == manifest.manifest_sha256.root + "\n"
+    assert (
+        hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest()
+        == manifest.manifest_sha256.root
+    )
+    listing = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+            "--",
+            f"evidence/harness/{run_id}",
+        ],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    assert listing.returncode == 0
+    actual = {
+        Path(name).relative_to(prefix) for name in listing.stdout.decode().splitlines()
+    }
+    recorded = {descriptor.path for descriptor in manifest.artifacts}
+    assert len(recorded) == len(manifest.artifacts)
+    assert actual - recorded == {Path("manifest.json"), Path("manifest.sha256")}
+    assert recorded - actual == set()
+    for descriptor in manifest.artifacts:
+        content = subprocess.run(
+            ["git", "show", f"{commit}:{prefix}{descriptor.path.as_posix()}"],
+            cwd=repository,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        assert content.returncode == 0, {"commit": commit, "path": descriptor.path}
+        assert len(content.stdout) == descriptor.byte_count
+        assert Sha256.of(content.stdout) == descriptor.sha256
+    return manifest
+
 
 SPECIFY_REVISION = "a4d571229e164e440f8950cac034607bae7b7518"
 INSTALL_OPERATIONS = (

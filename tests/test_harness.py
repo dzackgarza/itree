@@ -5,6 +5,7 @@ import hashlib
 import http.server
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1010,6 +1011,57 @@ def test_packaged_extension_has_one_shared_upstream_surface() -> None:
     assert "emission-only" in work
     initialization = (resource / "scripts" / "python" / "initialize.py").read_text()
     assert "work_loader" not in initialization
+
+
+def test_canonical_manifest_hash_omits_self_and_verifies_artifacts() -> None:
+    from itree.harness import (
+        EvidenceManifest,
+        canonical_manifest_bytes,
+        seal_manifest,
+        verify_manifest_directory,
+    )
+
+    root = SOURCE / "tests" / "fixtures" / "harness_types" / "evidence_run"
+    manifest = EvidenceManifest.model_validate_json(
+        (root.parent / "golden_manifest.json").read_bytes()
+    )
+    expected = (root.parent / "canonical_manifest.json").read_bytes()
+
+    assert canonical_manifest_bytes(manifest) == expected
+    assert (
+        hashlib.sha256(expected).hexdigest()
+        == (root / "manifest.sha256").read_text().strip()
+    )
+    assert (
+        seal_manifest(manifest).manifest_sha256.root
+        == (root / "manifest.sha256").read_text().strip()
+    )
+    assert verify_manifest_directory(root) == manifest
+
+
+def test_external_watchdog_kills_nested_process_group_and_reaps() -> None:
+    from itree.harness_work import WatchdogStatus
+    from tests.test_harness_acceptance import external_watchdog
+
+    outcome, stdout, stderr = external_watchdog(
+        [
+            sys.executable,
+            str(
+                SOURCE / "tests" / "fixtures" / "harness_types" / "stubborn_process.py"
+            ),
+        ],
+        SOURCE,
+        os.environ.copy(),
+        100,
+    )
+
+    assert outcome.status == WatchdogStatus.forced_termination, stdout + stderr
+    assert int(signal.SIGTERM) in outcome.signals
+    assert int(signal.SIGKILL) in outcome.signals
+    assert outcome.reaped is True
+    assert outcome.remaining_children == ()
+    assert outcome.external_elapsed_seconds < 10
+    assert outcome.leader_returncode != 0
 
 
 def test_illegal_work_and_evidence_states_are_static_errors() -> None:

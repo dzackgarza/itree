@@ -1,0 +1,53 @@
+{
+  "acceptance": "emission-only",
+  "artifacts": [
+    {
+      "byte_count": 17,
+      "invocation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "kind": "source-chunk",
+      "media_type": "text/markdown",
+      "ordinal": 0,
+      "path": "source-chunks/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/000000.md",
+      "sha256": "621f69ca37d3906074a39186fc15d04a57b928d3f5f70f0ac3a9c771a73cdcb2"
+    }
+  ],
+  "code_revision": "1111111111111111111111111111111111111111",
+  "comparisons": [],
+  "environment": {
+    "live_harness_enabled": true,
+    "node": "v25.8.2",
+    "operating_system": "Linux-test",
+    "provider_capture_enabled": true,
+    "python": "3.14-test",
+    "pythonpath": null,
+    "uv": "uv-test"
+  },
+  "evidence_level": "emission-only",
+  "harness": {
+    "cli_version": "claude-test",
+    "executable": "claude",
+    "model_provider": "golden-model",
+    "name": "claude",
+    "native_session_ids": [
+      "golden-session"
+    ]
+  },
+  "install_outcome": null,
+  "invocations": [
+    {
+      "distribution_launcher": "/opt/itree/bin/itree",
+      "first_chunk_index": 0,
+      "invocation_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "issue_ref": "owner/repo#68",
+      "last_chunk_index": 0,
+      "package_bytes": 17,
+      "package_sha256": "621f69ca37d3906074a39186fc15d04a57b928d3f5f70f0ac3a9c771a73cdcb2",
+      "process_outcome": "exited",
+      "wall_seconds": 1.25
+    }
+  ],
+  "processes": [],
+  "run_id": "evidence_run",
+  "schema_version": 1,
+  "upstream_revision": "a4d571229e164e440f8950cac034607bae7b7518"
+}
