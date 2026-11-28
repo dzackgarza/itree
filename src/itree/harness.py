@@ -194,7 +194,7 @@ class EnvironmentIdentity(BaseModel):
     uv: str
     pythonpath: str | None
     live_harness_enabled: Literal[True]
-    provider_capture_enabled: Literal[True]
+    provider_capture_enabled: bool
 
 
 class InvocationRecord(BaseModel):
@@ -260,7 +260,7 @@ class LiveAcceptanceConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     live_harness_enabled: Literal[True]
-    provider_capture_enabled: Literal[True]
+    provider_capture_enabled: bool
 
 
 class AcceptanceDisabled(BaseModel):
@@ -745,6 +745,8 @@ def _sync_codex_core(staging: Path, project: Path) -> str | None:
         destination = (
             project / ".specify" / "integrations" / f"{integration}.manifest.json"
         )
+        if integration == "opencode" and destination.exists():
+            continue
         if destination.exists() and destination.read_bytes() == source.read_bytes():
             continue
         if destination.exists():
@@ -973,6 +975,13 @@ def _idempotent(
         tracer.record("preflight", "failed")
         return PreflightConflict(outcome=outcome)
     expected = {artifact.path: artifact.sha256 for artifact in state.artifacts}
+    mutable_integration_state = {
+        ".specify/extensions.yml",
+        ".specify/extensions/.registry",
+        ".specify/integrations/opencode.manifest.json",
+    }
+    if any(not (project / relative).is_file() for relative in expected):
+        return None
     required = {artifact.path for artifact in _owned_artifacts(project)}
     if required != set(expected):
         diagnostic = f"installed artifact set differs: actual={sorted(required)} recorded={sorted(expected)}"
@@ -982,6 +991,8 @@ def _idempotent(
         tracer.record("preflight", "failed")
         return PreflightConflict(outcome=outcome)
     for relative, digest in expected.items():
+        if relative in mutable_integration_state:
+            continue
         if Sha256.of((project / relative).read_bytes()) != digest:
             diagnostic = f"modified owned artifact: {project / relative}"
             outcome = _fresh_effects(

@@ -223,9 +223,9 @@ def fixture() -> Iterator[HarnessFixture]:
         )
         slow = _write_issue(placeholder, "Slow source package", "SLOW-SOURCE-PENDING\n")
         for index in range(2):
-            _comment(placeholder, small, text_block("SMALL-COMMENT", index, 900))
-        for index in range(1):
-            _comment(placeholder, large, text_block("LARGE-COMMENT", index, 900))
+            _comment(placeholder, small, text_block("SMALL-COMMENT", index, 4_000))
+        for index in range(2):
+            _comment(placeholder, large, text_block("LARGE-COMMENT", index, 4_000))
         value = HarnessFixture(parent, repo, small, large, invalid, slow, journal)
         started = time.perf_counter()
         yield value

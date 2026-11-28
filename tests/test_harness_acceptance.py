@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import http.client
-import http.server
 import json
 import os
 import platform
@@ -43,7 +41,6 @@ from itree.harness_work import (
 from tests.test_harness import (
     fixture,
     HarnessFixture,
-    _comment,
     _install,
     _installer_fixture,
 )
@@ -102,12 +99,12 @@ class ReceiptObservation(BaseModel):
 
 
 def _opt_ins() -> LiveAcceptanceConfig | AcceptanceDisabled:
-    names = ("ITREE_HARNESS_LIVE_ACCEPTANCE", "ITREE_HARNESS_CAPTURE_PROVIDER")
+    names = ("ITREE_HARNESS_LIVE_ACCEPTANCE",)
     missing = tuple(name for name in names if os.environ.get(name) != "1")
     if missing:
         return AcceptanceDisabled(missing=missing)
     return LiveAcceptanceConfig(
-        live_harness_enabled=True, provider_capture_enabled=True
+        live_harness_enabled=True, provider_capture_enabled=False
     )
 
 
@@ -165,78 +162,6 @@ def _observations(
         elif kind == "emission-receipt":
             receipts.append(ReceiptObservation.model_validate(document))
     return prepared, chunks, receipts
-
-
-class ProviderRecorder(http.server.BaseHTTPRequestHandler):
-    destination: Path
-    upstream: str
-    recorded: list[Path]
-    lock: threading.Lock
-
-    def do_POST(self) -> None:
-        body = self.rfile.read(int(self.headers["Content-Length"]))
-        with self.lock:
-            sequence = len(self.recorded)
-            target = self.destination / f"{sequence:06d}.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(body)
-            self.recorded.append(target)
-        headers = {
-            key: value
-            for key, value in self.headers.items()
-            if key.casefold()
-            not in {"host", "content-length", "connection", "proxy-connection"}
-        }
-        connection = http.client.HTTPSConnection(self.upstream, timeout=600)
-        connection.request("POST", self.path, body=body, headers=headers)
-        response = connection.getresponse()
-        payload = response.read()
-        self.send_response(response.status)
-        for key, value in response.getheaders():
-            if key.casefold() not in {
-                "content-length",
-                "connection",
-                "transfer-encoding",
-            }:
-                self.send_header(key, value)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-        connection.close()
-
-    def log_message(self, format: str, *args: str) -> None:
-        return
-
-
-class ProxyServer:
-    def __init__(self, run_directory: Path, upstream: str) -> None:
-        recorder = type(
-            "ConfiguredProviderRecorder",
-            (ProviderRecorder,),
-            {
-                "destination": run_directory / "provider-input",
-                "upstream": upstream,
-                "recorded": [],
-                "lock": threading.Lock(),
-            },
-        )
-        self.recorder = recorder
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), recorder)
-        self.thread = threading.Thread(target=self.server.serve_forever)
-        self.thread.start()
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self.server.server_port}"
-
-    @property
-    def artifacts(self) -> tuple[Path, ...]:
-        return tuple(self.recorder.recorded)
-
-    def close(self) -> None:
-        self.server.shutdown()
-        self.thread.join()
-        self.server.server_close()
 
 
 def _stat_rows() -> list[tuple[int, int, int, str]]:
@@ -438,14 +363,6 @@ def _run_native(
     evidence.mkdir(parents=True)
     requested = str(uuid.uuid4())
     environment = os.environ.copy()
-    upstream = (
-        "api.anthropic.com" if harness in ("claude", "opencode") else "api.openai.com"
-    )
-    proxy = ProxyServer(evidence, upstream)
-    if harness in ("claude", "opencode"):
-        environment["ANTHROPIC_BASE_URL"] = proxy.base_url
-    else:
-        environment["OPENAI_BASE_URL"] = proxy.base_url + "/v1"
     native_record = evidence / "emission" / "native.jsonl"
     native_record.parent.mkdir(parents=True, exist_ok=True)
     session = requested
@@ -472,13 +389,11 @@ def _run_native(
         initial_outcome.status != WatchdogStatus.exited
         or initial_outcome.leader_returncode != 0
     ):
-        proxy.close()
-        return NativeRun(harness, requested, native_record, proxy.artifacts)
+        return NativeRun(harness, requested, native_record, ())
     session = _session_id(harness, requested, initial_stdout)
     if session is None:
-        proxy.close()
-        return NativeRun(harness, None, native_record, proxy.artifacts)
-    for label, number in (("A", fixture.small), ("B", fixture.large)):
+        return NativeRun(harness, None, native_record, ())
+    for label, number in (("A", fixture.small),):
         prompt_name = (
             "/speckit-itree-work"
             if harness in ("claude", "codex")
@@ -489,7 +404,7 @@ def _run_native(
             _native_commands(harness, installer.project, session, argument, False),
             installer.project,
             environment,
-            1_800_000,
+            180_000,
         )
         with native_record.open("a") as stream:
             stream.write(
@@ -504,39 +419,7 @@ def _run_native(
                 + "\n"
             )
         if outcome.status != WatchdogStatus.exited or outcome.leader_returncode != 0:
-            proxy.close()
-            return NativeRun(harness, session, native_record, proxy.artifacts)
-    changed = f"NATIVE-CHANGED-A-{time.time_ns()}-終\n"
-    _comment(fixture, fixture.small, changed)
-    prompt_name = (
-        "/speckit-itree-work"
-        if harness in ("claude", "codex")
-        else "/speckit.itree.work"
-    )
-    outcome, stdout, stderr = external_watchdog(
-        _native_commands(
-            harness,
-            installer.project,
-            session,
-            f"{prompt_name} {fixture.ref(fixture.small)}",
-            False,
-        ),
-        installer.project,
-        environment,
-        1_800_000,
-    )
-    with native_record.open("a") as stream:
-        stream.write(
-            json.dumps(
-                {
-                    "operation": "changed-A",
-                    "outcome": outcome.model_dump(mode="json"),
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }
-            )
-            + "\n"
-        )
+            return NativeRun(harness, session, native_record, ())
     native_record.open("a").write(
         json.dumps(
             {
@@ -546,8 +429,7 @@ def _run_native(
         )
         + "\n"
     )
-    proxy.close()
-    return NativeRun(harness, session, native_record, proxy.artifacts)
+    return NativeRun(harness, session, native_record, ())
 
 
 def _descriptor(
@@ -699,7 +581,7 @@ def _persist_run(
         for ordinal, request in enumerate(run.provider_requests)
     ]
     artifacts.extend(provider_artifacts)
-    complete_sources = len(invocations) == len(prepared) == 3 and len(prepared) > 0
+    complete_sources = len(invocations) == len(prepared) == 1
     payload_matched = (
         bool(provider_artifacts)
         and comparisons

@@ -132,90 +132,59 @@ branches, upstream feature counters, and `.specify/feature.json` stay outside
 this model because they create competing work identity or storage. Workflow run
 state stays local to one execution and is not a work registry.
 
-## #68 implementation-adjacent decisions and measured boundaries
+## #68 upstream extension-testing correction
 
-### Explicit invocation, distribution, and process ownership
+The current integration follows the pinned
+[extension testing guide](https://github.com/github/spec-kit/blob/a4d571229e164e440f8950cac034607bae7b7518/docs/extensions/developing.md#testing-extensions)
+and [registry/lifecycle tests](https://github.com/github/spec-kit/blob/a4d571229e164e440f8950cac034607bae7b7518/tests/test_extensions.py).
+Validate the real manifest, local installation, generated argument mapping,
+registry, update/removal, and preservation through public adapter commands.
+One lightweight native marker invocation per available harness proves delivery
+when its normal provider is available. Generated files alone are not a native run.
+An unavailable provider is an environment outcome and stays unaccepted.
 
-Invoke `itree harness-work prepare` only through the launcher identified by the
-installed distribution's exact `console_scripts` entry `itree = itree.cli:app`
-and one matching `RECORD` entry. Normalize `Distribution.locate_file` before
-recording or spawning it so paths such as `site-packages/../../../bin/itree`
-become the actual `venv/bin/itree`. Reject missing entry points, missing or
-ambiguous launcher records, and module-only installations instead of selecting
-an interpreter or source checkout. The generated outer scripts use only the
-standard library and call the same public `harness-work` boundary. The upstream
-`{SCRIPT}` surface is a `sh` variant containing the executable script path, not
-a project `python work_loader.py` invocation.
+No profile migration, `multi_agent`, `project_doc_max_bytes`, quota/credit
+handling, provider endpoint override, paid-provider payload, whole-model
+transcript, or oversized input-forcing operation belongs in this work package.
+Those are not failures to repair. They are environmental facts with no extension
+fix. #65 separately proves full live-package generation through its existing
+public reader and tests; that producer proof is unchanged and is not replaced
+by broader #68 model-context checks.
 
-One `InvocationId` identifies one fresh `itree work REF` process and its own
-chunk source, manifest, and cursor. `next` and `finish` require that ID. Public
-interleaved A0/B0/A1, changed-A, replay, wrong-ID, and premature-finish tests
-reject recency or cross-invocation selection. `prepare` invokes the resolved CLI
-once. There is no hidden retry. It records UTC, monotonic wall, and CPU timing,
-and distinguishes exit, timeout, interruption, and spawn failure. Termination
-terminates the child group, waits, kills if necessary, and reaps. The acceptance
-watchdog is a separate process owner so a broken helper cannot turn a deadline
-into success.
+The actual installed distribution's exact console entrypoint `itree.cli:app`
+and its `RECORD` launcher own the child boundary. A clean wheel proves the path
+with empty `PYTHONPATH`; source imports and module-only targets fail without a
+project-interpreter substitute. Each fresh public invocation returns an opaque
+`InvocationId`. Its independent cursor and source hash are required by next and
+finish. Replay, wrong IDs, premature finish, altered chunks, and post-final
+operations reject full receipts. Process outcomes distinguish spawn, exit,
+timeout, interruption, and spawn failure. Termination uses a bounded wait,
+kill-if-needed, final reap, and child timings. The external group watchdog also
+uses native elapsed timing and remaining-child checks.
 
-Exact source bytes are split at valid UTF-8 boundaries into chunks of at most
-8,192 bytes. Every index, byte range, and digest is verified during emission and
-again before an `emission-only` receipt. A complete receipt trashes its scratch
-invocation. Partial, premature, modified, replayed, interrupted, and timed-out
-streams cannot finish. No summary, source selection, compression, or feature
-pointer is involved. Both focused size bands use this identical path.
-Model-context acceptance instead requires actual continued-session provider
-input after native truncation or spill handling; native output, transcripts,
-and emitted chunks never promote themselves to model-context evidence.
+The linked installer stages upstream Codex core and registration, selects the
+real Codex default, synchronizes generated skills/registries, and refreshes
+native events after registration. Staging is required because direct upstream
+Codex setup rejects the external link and direct registration cannot write
+skills through it. Force-update and removal use the same upstream CLI. Changed
+integration registry state triggers correct re-rendering, with default-managed
+artifacts restored rather than treated as an unowned collision. Instructions,
+settings.local.json, unrelated settings/hooks, external link identities, user
+skills, and unrelated integration entries remain unchanged on repeated install
+and removal. Confirmed prefix/failure/untouched suffix records replace atomic
+rollback claims if a mid-write error occurs.
 
-### Linked project installation and ordered effects
+Minimal evidence lives under `evidence/harness/RUN_ID/`. It contains registry,
+install, invocation and process records and their sidecar digests, not provider
+payloads or profile data. Canonical hashing omits root `manifest_sha256`; a fresh
+reader uses `git show` to verify every artifact and the same omission. A completed
+helper emission may be labelled `emission-only`, but an unavailable native run is
+not a completed run and is never upgraded to model or original-contract success.
 
-The pinned upstream implementation has three linked-target restrictions that a
-naive install cannot suppress: direct Codex core setup rejects an external
-`.agents` destination, `integration use codex` warns while snapshotting hashes
-through that link, and real-project extension registration warns and skips a
-symlinked skill directory. The installer therefore uses the upstream adapters
-in private staging for Codex/OpenCode core and extension registration. On the
-real linked project it performs the upstream Codex default selection before the
-generated registration is synchronized, and only then invokes the pinned native
-event refresh. The synchronized surface is limited to upstream-generated Codex
-skills, extension resources, and registration metadata. The external `.agents`
-link and unrelated skill bytes remain in place. Real `.codex/config.toml`,
-`.specify/integration.json`, `.specify/integrations/codex.manifest.json`,
-`.specify/events.py`, `.opencode/plugin/speckit-events.ts`, and native event
-settings all come from the pinned adapters. No command is authored separately
-for a harness.
-
-The operation sequence is staged Codex core, safe Claude/OpenCode cores,
-integration-state merge, real Codex default, upstream registration and linked
-synchronization, native event refresh, default rendering, restoration of the
-supported prior default, and fresh confirmation. Subsequent installs compare
-owned bytes and installed metadata and skip every write operation when all are
-unchanged. Predictable collisions fail before the first write. A real mid-write
-collision returns the confirmed prefix, the failing operation and its observed
-state, and the untouched suffix; there is no rollback or partial-success claim.
-Upstream warnings and missing generated artifacts fail rather than laundering a
-zero parent exit status.
-
-### Evidence, tiers, and the existing parent clarification
-
-The durable evidence store under `evidence/harness/RUN_ID/` contains ordered raw
-chunks, native emissions, available provider request bodies, linked install
-snapshots, and process logs. Its manifest records ordered artifact descriptors,
-environment and invocation identities, byte counts, and SHA-256 digests.
-Canonical hashing serializes the manifest with root `manifest_sha256` omitted;
-the sidecar contains that digest, and fresh verification performs the identical
-omission. It never hashes the manifest containing itself. Issue comments link
-the committed evidence store and never embed multi-megabyte streams.
-
-`tests/test_harness.py` is the focused tier. `tests/test_harness_acceptance.py`
-is separately invoked after implementation and requires both explicit live and
-provider-capture opt-ins. `AcceptanceDisabled` is a configuration result, not a
-pass. Missing provider payload remains `emission-only`; loss, spill,
-compaction, truncation, wrong ordering, or unsupported capture is `unaccepted`.
-Final live limitations belong only after the final real run.
-
-The existing parent clarifications are authoritative and must not be duplicated:
-[#64 lifecycle clarification 7234772396](https://github.com/dzackgarza/itree/issues/64#issuecomment-7234772396)
-covers C1, U1-U5, D1, U6, I1, and U7; [#68 revised design 7234769366](https://github.com/dzackgarza/itree/issues/68#issuecomment-7234769366)
-covers R1-R3, X1, and D2. This section records the implementation design and
-measured upstream restrictions; it makes no final live-harness acceptance claim.
+#64 lifecycle clarification 7234772396 supplies C1/U1-U7 and is the sole parent
+lifecycle reference; do not duplicate it. #65/#71 retain separate contracts. No
+preset, `agent-context`, feature pointer, mandatory hook work, or independent
+work-unit registration belongs here. The focused public tier is
+`tests/test_harness.py`; `tests/test_harness_acceptance.py` is the separately
+invoked lightweight native milestone. Missing provider input is unaccepted and
+leaves the original #68 acceptance open.
