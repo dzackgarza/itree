@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, NewType, Self
 
 from pydantic import (
     BaseModel,
@@ -1038,3 +1038,631 @@ class GithubCommit(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     sha: CommitSha
+
+
+IssueNodeId = NewType("IssueNodeId", Annotated[str, Field(min_length=1)])
+RequestId = NewType("RequestId", Annotated[str, Field(min_length=1)])
+AttemptId = NewType("AttemptId", Annotated[str, Field(min_length=1)])
+OperationId = NewType("OperationId", Annotated[str, Field(min_length=1)])
+SessionId = NewType("SessionId", Annotated[str, Field(min_length=1)])
+TaskId = NewType("TaskId", Annotated[str, Field(pattern=r"^T[0-9]+$")])
+DeclaredOrder = NewType("DeclaredOrder", Annotated[int, Field(ge=0)])
+RequirementId = NewType("RequirementId", Annotated[str, Field(min_length=1)])
+GoalId = NewType("GoalId", Annotated[str, Field(min_length=1)])
+ArtifactKey = NewType("ArtifactKey", Annotated[str, Field(min_length=1)])
+Sha256 = NewType("Sha256", Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")])
+CommentNodeId = NewType("CommentNodeId", Annotated[str, Field(min_length=1)])
+ActorLogin = NewType("ActorLogin", Annotated[str, Field(min_length=1)])
+RepoSlug = Annotated[str, Field(pattern=r"^[^/\s]+/[^/\s]+$")]
+
+
+class StageModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class TaskField(StrEnum):
+    state = "state"
+    prerequisites = "prerequisites"
+    requirements = "requirements"
+    evidence = "evidence"
+    goals = "goals"
+    description = "description"
+    acceptance = "acceptance"
+    order = "order"
+    opaque = "opaque"
+
+
+TaskParseFailure = Literal[
+    "duplicate_id",
+    "missing_id",
+    "missing_field",
+    "malformed_ref",
+    "ambiguous_span",
+    "unsupported_field",
+    "invalid_order",
+    "unknown_evidence_kind",
+    "unsupported_task_wire",
+]
+
+
+class IssueCommentEvidence(StageModel):
+    kind: Literal["issue_comment"]
+    repository: RepoSlug
+    issue_number: IssueNumber
+    comment_id: IssueCommentId
+    comment_node_id: CommentNodeId
+    sha256: Sha256
+    url: str
+
+    @model_validator(mode="after")
+    def _matches_issue_comment_url(self) -> Self:
+        expected = (
+            f"https://github.com/{self.repository}/issues/{self.issue_number}"
+            f"#issuecomment-{self.comment_id}"
+        )
+        assert self.url == expected, (self.url, expected)
+        return self
+
+
+class CommitEvidence(StageModel):
+    kind: Literal["commit"]
+    repository: RepoSlug
+    sha: CommitSha
+    url: str
+
+    @model_validator(mode="after")
+    def _matches_commit_url(self) -> Self:
+        expected = f"https://github.com/{self.repository}/commit/{self.sha}"
+        assert self.url == expected, (self.url, expected)
+        return self
+
+
+class PullRequestEvidence(StageModel):
+    kind: Literal["pull_request"]
+    repository: RepoSlug
+    number: IssueNumber
+    head_sha: CommitSha
+    url: str
+
+    @model_validator(mode="after")
+    def _matches_pull_request_url(self) -> Self:
+        expected = f"https://github.com/{self.repository}/pull/{self.number}"
+        assert self.url == expected, (self.url, expected)
+        return self
+
+
+class DocumentedTestReport(StageModel):
+    repository: RepoSlug
+    issue_number: IssueNumber
+    attempt_id: AttemptId
+    report_id: str = Field(min_length=1)
+
+
+class DocumentedTestEvidence(StageModel):
+    kind: Literal["documented_test"]
+    command: str = Field(min_length=1)
+    report: DocumentedTestReport
+
+
+EvidenceRef = Annotated[
+    IssueCommentEvidence
+    | CommitEvidence
+    | PullRequestEvidence
+    | DocumentedTestEvidence,
+    Field(discriminator="kind"),
+]
+
+
+class PendingEvidence(StageModel):
+    pending: str = Field(min_length=1)
+
+
+class ResolvedEvidence(StageModel):
+    resolved: tuple[EvidenceRef, ...] = Field(min_length=1)
+
+
+Evidence = PendingEvidence | ResolvedEvidence
+
+
+class GoalContribution(StageModel):
+    id: GoalId
+    rationale: str = Field(min_length=1)
+
+
+class LocalTaskRef(StageModel):
+    task_id: TaskId
+
+
+class QualifiedTaskRef(StageModel):
+    issue_ref: IssueRef
+    task_id: TaskId
+
+
+TaskPrerequisite = LocalTaskRef | QualifiedTaskRef
+TaskState = Literal["unfinished", "complete"]
+
+
+class SourceSpan(StageModel):
+    character_start: int = Field(ge=0)
+    character_end: int = Field(ge=0)
+    byte_start: int = Field(ge=0)
+    byte_end: int = Field(ge=0)
+
+
+class OpaqueSpan(StageModel):
+    source: str
+    span: SourceSpan
+
+
+class TaskRecord(StageModel):
+    id: TaskId
+    order: DeclaredOrder
+    state: TaskState
+    prerequisites: tuple[TaskPrerequisite, ...]
+    requirements: tuple[RequirementId, ...]
+    evidence: Evidence
+    goals: tuple[GoalContribution, ...]
+    description: str
+    acceptance: str
+    source: str
+    field_spans: dict[str, SourceSpan]
+    state_span: SourceSpan
+
+
+class TaskDocument(StageModel):
+    source: str
+    wrapped: bool
+    tasks: tuple[TaskRecord, ...]
+    opaque: tuple[OpaqueSpan, ...]
+
+
+class WriterSealInvalidContext(StageModel):
+    kind: Literal["writer_seal_invalid"]
+    repository: RepoSlug
+    expected_default_branch: str = Field(min_length=1)
+    observed_ref: str | None
+    expected_workflow_head: CommitSha | None
+    observed_workflow_head: str | None
+    workflow_blob: str | None
+    run_id: int | None = Field(default=None, gt=0)
+    expected_run_attempt: int | None = Field(default=None, gt=0)
+    observed_run_attempt: int | None = Field(default=None, gt=0)
+    job_id: int | None = Field(default=None, gt=0)
+    job_node_id: str | None
+    failure_dimension: Literal[
+        "fake_human_authority",
+        "wrong_ref",
+        "stale_workflow",
+        "mismatched_run_attempt",
+        "writer_identity_unavailable",
+        "writer_permission_insufficient",
+    ]
+
+
+class ExternalSubmissionDetail(StageModel):
+    kind: Literal["external_submission"]
+    actor: ActorLogin | None
+    reason: Literal["seal_unavailable", "edited_record", "role_or_session"]
+
+
+class MergeConflictDetail(StageModel):
+    kind: Literal["merge_conflict"]
+    section: Literal["original-contract", "requirements", "plan", "tasks"]
+    task_id: TaskId | None
+    field: TaskField | None
+    competing_request_id: RequestId | None
+
+
+class OperationFailureDetail(StageModel):
+    kind: Literal["operation_failure"]
+    reason: Literal[
+        "github_http_rejection",
+        "layout_invalid",
+        "fence_changed",
+        "candidate_changed",
+        "readback_mismatch",
+        "authorization_revoked",
+        "node_changed",
+    ]
+    diagnostic: str = Field(min_length=1)
+
+
+AdmissionRejectionDetails = Annotated[
+    WriterSealInvalidContext | ExternalSubmissionDetail | MergeConflictDetail,
+    Field(discriminator="kind"),
+]
+OperationRejectionDetails = AdmissionRejectionDetails | OperationFailureDetail
+
+
+class CommentHistory(StageModel):
+    created_at: str = Field(min_length=1)
+    updated_at: str = Field(min_length=1)
+    last_edited_at: str | None
+    last_editor: str | None
+    edit_count: int = Field(ge=0)
+    history_exhausted: bool
+
+
+class SubmissionSeal(StageModel):
+    native_issue_comment: IssueComment
+    logical_payload_sha256: Sha256
+    exact_wire_body_sha256: Sha256
+    history: CommentHistory
+    target_issue_node: IssueNodeId
+
+
+class WriterSeal(StageModel):
+    repository: RepoSlug
+    default_branch: str = Field(min_length=1)
+    default_head_sha: CommitSha
+    workflow_path: Literal[".github/workflows/itree-issue-writer.yml"]
+    workflow_blob: str = Field(min_length=1)
+    workflow_sha256: Sha256
+    run_id: int = Field(gt=0)
+    run_attempt: int = Field(gt=0)
+    job_id: int = Field(gt=0)
+    job_node_id: str = Field(min_length=1)
+    job_name: str = Field(min_length=1)
+    run_url: str = Field(min_length=1)
+    job_url: str = Field(min_length=1)
+    actions_installation_identity: str = Field(min_length=1)
+    effective_token_permissions: dict[str, Literal["read", "write"]]
+
+    @model_validator(mode="after")
+    def _least_permissions(self) -> Self:
+        assert self.effective_token_permissions == {
+            "contents": "read",
+            "issues": "write",
+        }, self.effective_token_permissions
+        return self
+
+
+class SealedPayload(StageModel):
+    submission_seal: SubmissionSeal
+    logical_payload_sha256: Sha256
+    external_actor_permission: Literal[
+        "admin", "maintain", "write", "triage", "read", "none", "custom"
+    ]
+
+
+class WriterRecord(StageModel):
+    writer_seal: WriterSeal
+    logical_payload_sha256: Sha256
+    native_issue_comment: IssueComment
+    zero_edit_history: CommentHistory
+
+
+class RequestIdentity(StageModel):
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+
+
+class ArtifactIndexEntry(StageModel):
+    key: ArtifactKey
+    kind: Literal[
+        "research",
+        "data-model",
+        "contract",
+        "quickstart",
+        "clarification",
+        "finding",
+        "evidence",
+        "checkpoint",
+        "plan-history",
+        "task-history",
+    ]
+    comment_id: IssueCommentId
+    comment_node_id: CommentNodeId
+    url: str = Field(min_length=1)
+    content_sha256: Sha256
+    attempt_id: AttemptId
+
+
+class ReceiptContent(StageModel):
+    base_body_sha256: Sha256 | None = None
+    candidate_body_sha256: Sha256 | None = None
+    live_body_sha256: Sha256 | None = None
+    original_sha256: Sha256 | None = None
+    fence_sha256: Sha256 | None = None
+    no_body_write: bool = False
+    stage_complete: bool = False
+    recovery_action: str | None = None
+    high_water_comment_id: IssueCommentId | None = None
+    artifacts: tuple[ArtifactIndexEntry, ...] = ()
+
+
+class ReceiptPayload(StageModel):
+    version: Literal[1]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    operation_id: OperationId | None
+    status: Literal[
+        "intended",
+        "confirmed",
+        "rejected",
+        "indeterminate",
+        "session_admitted",
+        "session_released",
+        "drain_scanned",
+        "seal_invalidated",
+    ]
+    content: ReceiptContent
+    rejection_reason: (
+        Literal[
+            "duplicate_payload_conflict",
+            "github_http_rejection",
+            "conflict",
+            "writer_seal_invalid",
+            "layout_invalid",
+            "fence_changed",
+            "candidate_changed",
+            "readback_mismatch",
+            "authorization_revoked",
+            "node_changed",
+            "external_submission",
+        ]
+        | None
+    ) = None
+    rejection_details: OperationRejectionDetails | None = None
+    indeterminate_reason: (
+        Literal[
+            "timeout_after_invocation",
+            "interrupted_after_invocation",
+            "no_usable_http_response",
+            "nonzero_without_rejection",
+            "unusable_success_response",
+            "readback_unavailable",
+            "receipt_unavailable",
+        ]
+        | None
+    ) = None
+    writer_seal: WriterSeal
+
+
+class ReceiptEnvelope(StageModel):
+    native_issue_comment: IssueComment
+    payload: ReceiptPayload
+    writer_seal: WriterSeal
+
+
+class Confirmed(StageModel):
+    kind: Literal["confirmed"] = "confirmed"
+    receipt_id: IssueCommentId
+    live_body_sha256: Sha256
+    original_sha256: Sha256
+    fence_sha256: Sha256
+    artifacts: tuple[ArtifactIndexEntry, ...]
+    no_body_write: bool
+    stage_complete: Literal[True] = True
+
+
+class Rejected(StageModel):
+    kind: Literal["rejected"] = "rejected"
+    receipt_id: IssueCommentId
+    rejection_reason: Literal[
+        "duplicate_payload_conflict",
+        "github_http_rejection",
+        "conflict",
+        "writer_seal_invalid",
+        "layout_invalid",
+        "fence_changed",
+        "candidate_changed",
+        "readback_mismatch",
+        "authorization_revoked",
+        "node_changed",
+        "external_submission",
+    ]
+    retained_live_sha256: Sha256
+    rejection_details: OperationRejectionDetails
+    competing_request_id: RequestId | None = None
+    stage_complete: Literal[False] = False
+
+
+class Indeterminate(StageModel):
+    kind: Literal["indeterminate"] = "indeterminate"
+    receipt_id: IssueCommentId
+    indeterminate_reason: Literal[
+        "timeout_after_invocation",
+        "interrupted_after_invocation",
+        "no_usable_http_response",
+        "nonzero_without_rejection",
+        "unusable_success_response",
+        "readback_unavailable",
+        "receipt_unavailable",
+    ]
+    operation_id: OperationId
+    last_observed_body_sha256: Sha256 | None
+    recovery_action: str = Field(min_length=1)
+    stage_complete: Literal[False] = False
+
+
+OperationOutcome = Confirmed | Rejected | Indeterminate
+
+
+class PartDescriptor(StageModel):
+    role: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    payload_sha256: Sha256
+
+
+class UploadManifest(StageModel):
+    version: Literal[1]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    request_kind: Literal[
+        "sections",
+        "task_field",
+        "legacy_intake",
+        "artifacts",
+        "session_admit",
+        "session_release",
+    ]
+    targets: tuple[str, ...]
+    base_roles: tuple[str, ...]
+    proposed_roles: tuple[str, ...]
+    expected_part_count: int = Field(gt=0)
+    parts: tuple[PartDescriptor, ...] = Field(min_length=1)
+    finalized_proposal_sha256: Sha256
+
+    @model_validator(mode="after")
+    def _counts_and_ordinals(self) -> Self:
+        assert self.expected_part_count == len(self.parts), self.expected_part_count
+        identities = [(part.role, part.ordinal) for part in self.parts]
+        assert len(identities) == len(set(identities)), identities
+        return self
+
+
+class UploadPart(StageModel):
+    version: Literal[1]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    manifest_request_id: RequestId
+    manifest_payload_sha256: Sha256
+    role: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    payload: str
+    payload_sha256: Sha256
+
+
+class MissingPart(StageModel):
+    role: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    expected_payload_sha256: Sha256
+
+
+class PendingUpload(StageModel):
+    kind: Literal["pending_upload"] = "pending_upload"
+    validated_manifest: UploadManifest
+    present_sealed_parts: tuple[UploadPart, ...]
+    missing_parts: tuple[MissingPart, ...] = Field(min_length=1)
+
+
+class FinalizedProposal(StageModel):
+    kind: Literal["finalized"] = "finalized"
+    manifest: UploadManifest
+    parts: tuple[UploadPart, ...] = Field(min_length=1)
+    logical_payload_sha256: Sha256
+
+
+UploadResolution = PendingUpload | FinalizedProposal
+
+
+class AdmissionRejected(StageModel):
+    kind: Literal["rejected"] = "rejected"
+    request: RequestIdentity
+    reason: Literal[
+        "missing_node",
+        "node_mismatch",
+        "wrong_repository",
+        "issue_unavailable",
+        "missing_permission",
+        "actor_not_enrolled",
+        "role_insufficient",
+        "writer_seal_invalid",
+        "seal_unavailable",
+        "edited_record",
+        "seal_invalidated",
+        "malformed_payload",
+        "changed_payload",
+        "invalid_base",
+        "invalid_layout",
+        "original_contract_target",
+        "external_mutation",
+    ]
+    live_body_sha256: Sha256
+    rejection_details: AdmissionRejectionDetails
+
+
+class PendingManagedSession(StageModel):
+    kind: Literal["pending_managed_session"] = "pending_managed_session"
+    reason: Literal[
+        "direct_edits_unsettled",
+        "editor_not_enrolled",
+        "previous_operation_indeterminate",
+    ]
+    required_action: str = Field(min_length=1)
+
+
+class SectionReplacement(StageModel):
+    section: Literal["requirements", "plan", "tasks"]
+    base_text: str
+    proposed_text: str
+    base_sha256: Sha256
+    proposed_sha256: Sha256
+
+
+class SectionEditProposal(StageModel):
+    version: Literal[1]
+    request_kind: Literal["sections"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    base_body_sha256: Sha256
+    changes: tuple[SectionReplacement, ...] = Field(min_length=1)
+
+
+class TaskFieldProposal(StageModel):
+    version: Literal[1]
+    request_kind: Literal["task_field"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    base_body_sha256: Sha256
+    task_id: TaskId
+    field: TaskField
+    full_task_base_sha256: Sha256
+    base_value: str
+    proposed_value: str
+
+
+class ArtifactDraft(StageModel):
+    key: ArtifactKey
+    kind: Literal[
+        "research",
+        "data-model",
+        "contract",
+        "quickstart",
+        "clarification",
+        "finding",
+        "evidence",
+        "checkpoint",
+        "plan-history",
+        "task-history",
+    ]
+    content: str
+
+
+class ArtifactPayload(StageModel):
+    version: Literal[1]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    key: ArtifactKey
+    kind: Literal[
+        "research",
+        "data-model",
+        "contract",
+        "quickstart",
+        "clarification",
+        "finding",
+        "evidence",
+        "checkpoint",
+        "plan-history",
+        "task-history",
+    ]
+    payload_sha256: Sha256
+    content: str
+    writer_seal: WriterSeal
