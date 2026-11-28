@@ -1077,7 +1077,10 @@ class GithubApi(BaseModel):
         proc = self._exec(
             "GET", f"repos/{self.owner}/{self.repo}/issues/comments/{comment_id}"
         )
-        return IssueComment.model_validate_json(proc.stdout)
+        payload = json.loads(proc.stdout)
+        if "last_edited_at" not in payload:
+            raise SealHistoryUnavailable(str(comment_id))
+        return IssueComment.model_validate(payload)
 
     def get_issue_family(self, number: int) -> GithubIssueFamily:
         issue: GithubIssue | None = None
