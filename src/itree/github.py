@@ -45,7 +45,12 @@ def _integer(value: JsonValue, context: str) -> int:
 
 
 from .models import (
+    ActionsJobMetadata,
+    CollaboratorPermission,
+    CommentHistory,
+    CommentNodeId,
     CommitSha,
+    GithubActor,
     GithubBlob,
     GithubCommit,
     GithubContentFile,
@@ -72,6 +77,11 @@ from .models import (
     RepoRef,
     RoutedOwnerResolution,
     RoutedOwnerState,
+    StageHttpApplied,
+    StageHttpIndeterminate,
+    StageHttpOutcome,
+    StageIndeterminateReason,
+    StageHttpRejected,
 )
 
 REPO_GRAPH_QUERY = """
@@ -80,6 +90,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
     issues(states: [OPEN, CLOSED], first: 100, after: $endCursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
+        id
         number
         databaseId
         title
@@ -88,7 +99,7 @@ query($owner: String!, $name: String!, $endCursor: String) {
         body
         url
         milestone { title }
-        labels(first: 100) { nodes { name } }  # GitHub single-page max; one issue never exceeds this
+        labels(first: 100) { nodes { name } }
         subIssues(first: 100) {
           totalCount
           nodes { number repository { nameWithOwner } }
@@ -109,6 +120,7 @@ ISSUE_FAMILY_QUERY = """
 query WorkPackageIssueFamily($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
+      id
       number
       databaseId
       title
@@ -121,6 +133,7 @@ query WorkPackageIssueFamily($owner: String!, $name: String!, $number: Int!, $en
       parent { number repository { nameWithOwner } }
       comments(first: 100, after: $endCursor) {
         nodes {
+          id
           databaseId
           body
           author { login }
@@ -151,6 +164,10 @@ class GithubApiError(RuntimeError):
     def __init__(self, diagnostic: str, status: int | None) -> None:
         self.status = status
         super().__init__(diagnostic)
+
+
+class SealHistoryUnavailable(RuntimeError):
+    pass
 
 
 class GitRefLookupError(RuntimeError):
@@ -1123,6 +1140,7 @@ class GithubApi(BaseModel):
                     IssueComment.model_validate(
                         {
                             "id": _integer(node["databaseId"], "comment database ID"),
+                            "node_id": _string(node["id"], "comment node ID"),
                             "body": _string(node["body"], "comment body"),
                             "user": {
                                 "login": _string(author["login"], "comment author")
@@ -1162,7 +1180,7 @@ class GithubApi(BaseModel):
     def get_issue(self, number: int) -> GithubIssue:
         """Fetch a single GitHub issue by number."""
         proc = self._exec("GET", f"repos/{self.owner}/{self.repo}/issues/{number}")
-        return GithubIssue.model_validate(json.loads(proc.stdout))
+        return GithubIssue.model_validate_json(proc.stdout)
 
     def list_subissues(self, number: int) -> tuple[GithubIssue, ...]:
         """List ALL sub-issues of a parent issue, following REST pagination."""
@@ -1359,13 +1377,14 @@ class GithubApi(BaseModel):
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
 
-    def add_comment(self, number: int, body: str) -> None:
+    def add_comment(self, number: int, body: str) -> IssueComment:
         """Post a comment on an issue."""
-        self._exec(
+        proc = self._exec(
             "POST",
             f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
             json_body={"body": body},
         )
+        return IssueComment.model_validate_json(proc.stdout)
 
     def close_issue(
         self,
@@ -1392,6 +1411,174 @@ class GithubApi(BaseModel):
             json_body={"body": body},
         )
         return GithubIssue.model_validate(json.loads(proc.stdout))
+
+    def get_current_actor(self) -> GithubActor:
+        proc = self._exec("GET", "user")
+        return GithubActor.model_validate_json(proc.stdout)
+
+    def get_collaborator_permission(self, login: str) -> CollaboratorPermission:
+        assert login, login
+        path = f"repos/{self.owner}/{self.repo}/collaborators/{login}/permission"
+        proc = self._exec("GET", path)
+        return CollaboratorPermission.model_validate_json(proc.stdout)
+
+    def get_actions_job(self, job_id: int) -> ActionsJobMetadata:
+        assert job_id > 0, job_id
+        path = f"repos/{self.owner}/{self.repo}/actions/jobs/{job_id}"
+        proc = self._exec("GET", path)
+        return ActionsJobMetadata.model_validate_json(proc.stdout)
+
+    def get_actions_run_job(self, run_id: int, job_node_id: str) -> ActionsJobMetadata:
+        assert run_id > 0 and job_node_id, (run_id, job_node_id)
+        path = f"repos/{self.owner}/{self.repo}/actions/runs/{run_id}/jobs?per_page=100"
+        proc = self._exec("GET", path)
+        payload = _object(json.loads(proc.stdout), "Actions run jobs")
+        jobs = TypeAdapter(tuple[ActionsJobMetadata, ...]).validate_python(
+            payload["jobs"]
+        )
+        return next(job for job in jobs if job.node_id == job_node_id)
+
+    def get_comment_history(self, comment_node_id: CommentNodeId) -> CommentHistory:
+        cursor: str | None = None
+        created_at: str | None = None
+        updated_at: str | None = None
+        last_edited_at: str | None = None
+        last_editor: str | None = None
+        edit_count: int | None = None
+        exhausted = False
+        while True:
+            query = (
+                "query StageCommentHistory($id: ID!, $after: String) {"
+                "node(id: $id) { ... on IssueComment {"
+                "id createdAt updatedAt lastEditedAt editor { login }"
+                "userContentEdits(first: 100, after: $after) {"
+                "totalCount nodes { id } pageInfo { hasNextPage endCursor }"
+                "} } }"
+            )
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"id={comment_node_id}",
+            ]
+            if cursor is not None:
+                command.extend(["-F", f"after={cursor}"])
+            result = self._run_api_command(command, "graphql", timeout=120)
+            documents = _graphql_pages(result.stdout)
+            if len(documents) != 1:
+                raise SealHistoryUnavailable(str(comment_node_id))
+            document = documents[0]
+            data = _graphql_data(document, str(comment_node_id))
+            raw_node = data["node"]
+            if raw_node is None:
+                raise SealHistoryUnavailable(str(comment_node_id))
+            node = _object(raw_node, "comment history node")
+            created_at = _string(node["createdAt"], "comment createdAt")
+            updated_at = _string(node["updatedAt"], "comment updatedAt")
+            raw_last_edited = node["lastEditedAt"]
+            assert raw_last_edited is None or isinstance(raw_last_edited, str)
+            last_edited_at = raw_last_edited
+            raw_editor = node["editor"]
+            if raw_editor is None:
+                last_editor = None
+            else:
+                editor = _object(raw_editor, "comment editor")
+                last_editor = _string(editor["login"], "comment editor login")
+            edits = _object(node["userContentEdits"], "comment edit history")
+            edit_count = _integer(edits["totalCount"], "comment edit count")
+            page_info = _object(edits["pageInfo"], "comment history page info")
+            has_next = page_info["hasNextPage"]
+            assert isinstance(has_next, bool), has_next
+            next_cursor = page_info["endCursor"]
+            assert next_cursor is None or isinstance(next_cursor, str)
+            if not has_next:
+                exhausted = True
+                break
+            if not next_cursor or next_cursor == cursor:
+                raise SealHistoryUnavailable(str(comment_node_id))
+            cursor = next_cursor
+        assert (
+            created_at is not None
+            and updated_at is not None
+            and edit_count is not None
+            and exhausted
+        )
+        return CommentHistory(
+            created_at=created_at,
+            updated_at=updated_at,
+            last_edited_at=last_edited_at,
+            last_editor=last_editor,
+            edit_count=edit_count,
+            history_exhausted=exhausted,
+        )
+
+    @staticmethod
+    def _stage_outcome(response: str, exit_code: int, stderr: str) -> StageHttpOutcome:
+        headers, separator, body = response.partition("\n\n")
+        status_line = headers.splitlines()[0] if headers else ""
+        matched = re.fullmatch(r"HTTP/\S+ (?P<status>[1-5]\d{2})(?: .*)?", status_line)
+        if not separator or matched is None:
+            reason: StageIndeterminateReason = (
+                "nonzero_without_rejection"
+                if exit_code != 0
+                else "no_usable_http_response"
+            )
+            return StageHttpIndeterminate(
+                reason=reason,
+                diagnostic=f"exit={exit_code}; stderr={stderr.strip()!r}; response={response[:200]!r}",
+            )
+        status = int(matched["status"])
+        if status >= 400:
+            return StageHttpRejected(
+                status=status,
+                diagnostic=f"HTTP {status}; exit={exit_code}; response={body[:1000]!r}",
+            )
+        if exit_code != 0 or status < 200 or status >= 300:
+            return StageHttpIndeterminate(
+                reason="nonzero_without_rejection",
+                diagnostic=f"HTTP {status}; exit={exit_code}; stderr={stderr.strip()!r}",
+            )
+        return StageHttpApplied(response_body=body)
+
+    def _run_stage_mutation(
+        self, method: str, path: str, payload: JsonObject
+    ) -> StageHttpOutcome:
+        command = ["gh", "api", "--include", "-X", method, path, "--input", "-"]
+        try:
+            result = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+                input=json.dumps(payload),
+            )
+        except subprocess.TimeoutExpired:
+            return StageHttpIndeterminate(
+                reason="timeout_after_invocation",
+                diagnostic=f"{method} {path} timed out after invocation",
+            )
+        except KeyboardInterrupt:
+            return StageHttpIndeterminate(
+                reason="interrupted_after_invocation",
+                diagnostic=f"{method} {path} was interrupted after invocation",
+            )
+        return self._stage_outcome(result.stdout, result.returncode, result.stderr)
+
+    def post_stage_comment(self, number: int, body: str) -> StageHttpOutcome:
+        return self._run_stage_mutation(
+            "POST",
+            f"repos/{self.owner}/{self.repo}/issues/{number}/comments",
+            {"body": body},
+        )
+
+    def patch_stage_body(self, number: int, body: str) -> StageHttpOutcome:
+        return self._run_stage_mutation(
+            "PATCH", f"repos/{self.owner}/{self.repo}/issues/{number}", {"body": body}
+        )
 
 
 def settle_parent(

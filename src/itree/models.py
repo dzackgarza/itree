@@ -543,8 +543,12 @@ class GithubIssue(BaseModel):
         assert body is None or isinstance(body, str)
         milestone_title = None if milestone is None else milestone["title"]
         assert milestone_title is None or isinstance(milestone_title, str)
+        raw_node_id = node.get("id")
+        assert raw_node_id is None or isinstance(raw_node_id, str)
+        node_id = IssueNodeId(raw_node_id) if raw_node_id else None
         return cls(
             id=database_id,
+            node_id=node_id,
             number=number,
             title=title,
             state=IssueState(state.lower()),
@@ -954,6 +958,7 @@ class IssueComment(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     id: IssueCommentId
+    node_id: CommentNodeId
     body: str
     author: str = Field(alias="user")
     created_at: str
@@ -1643,6 +1648,66 @@ class ArtifactDraft(StageModel):
         "task-history",
     ]
     content: str
+
+
+class GithubActor(StageModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    login: ActorLogin
+
+
+class CollaboratorPermission(StageModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    permission: Literal[
+        "admin", "maintain", "write", "triage", "read", "none", "custom"
+    ]
+    role_name: str = Field(min_length=1)
+
+
+class ActionsJobMetadata(StageModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    id: int = Field(gt=0)
+    node_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    run_id: int = Field(gt=0)
+    run_attempt: int = Field(gt=0)
+    head_sha: CommitSha
+    head_branch: str = Field(min_length=1)
+    html_url: str = Field(min_length=1)
+    run_url: str = Field(min_length=1)
+
+
+class StageHttpApplied(StageModel):
+    kind: Literal["applied"] = "applied"
+    response_body: str
+
+
+class StageHttpRejected(StageModel):
+    kind: Literal["http_rejected"] = "http_rejected"
+    status: int = Field(ge=400, le=599)
+    diagnostic: str = Field(min_length=1)
+
+
+StageIndeterminateReason = Literal[
+    "timeout_after_invocation",
+    "interrupted_after_invocation",
+    "no_usable_http_response",
+    "nonzero_without_rejection",
+    "unusable_success_response",
+    "readback_unavailable",
+    "receipt_unavailable",
+]
+
+
+class StageHttpIndeterminate(StageModel):
+    kind: Literal["indeterminate"] = "indeterminate"
+    reason: StageIndeterminateReason
+    diagnostic: str = Field(min_length=1)
+
+
+StageHttpOutcome = StageHttpApplied | StageHttpRejected | StageHttpIndeterminate
 
 
 class ArtifactPayload(StageModel):
