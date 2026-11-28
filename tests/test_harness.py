@@ -1149,6 +1149,79 @@ def test_packaged_extension_has_one_shared_upstream_surface() -> None:
     assert "work_loader" not in initialization
 
 
+def test_provider_comparison_requires_every_chunk_in_order() -> None:
+    from itree.harness_work import (
+        InvocationId,
+        ModelInputMatch,
+        PackageChunk,
+        ProviderComparisonFailure,
+        ProviderInputPayload,
+        Sha256,
+        compare_source_chunks,
+    )
+
+    invocation = InvocationId.generate()
+    chunks = tuple(
+        PackageChunk(
+            invocation_id=invocation,
+            index=index,
+            byte_start=index * 40,
+            byte_end=(index + 1) * 40,
+            text=f"UNIQUE-PROVIDER-{index}-X-{index * index}".ljust(39, "x") + "\n",
+            digest=Sha256.of(
+                (
+                    f"UNIQUE-PROVIDER-{index}-X-{index * index}".ljust(39, "x") + "\n"
+                ).encode()
+            ),
+        )
+        for index in range(3)
+    )
+    payload = ProviderInputPayload(
+        session_id="continued-native-session",
+        body=json.dumps(
+            {
+                "messages": [
+                    {
+                        "content": [
+                            {"type": "text", "text": chunks[0].text},
+                            {"type": "text", "text": chunks[1].text},
+                        ]
+                    },
+                    {"role": "user", "content": chunks[2].text},
+                ]
+            }
+        ).encode(),
+    )
+    assert compare_source_chunks(chunks, payload) == ModelInputMatch(
+        session_id="continued-native-session", chunk_count=3
+    )
+    reordered = ProviderInputPayload(
+        session_id="continued-native-session",
+        body=json.dumps([chunks[2].text, chunks[0].text, chunks[1].text]).encode(),
+    )
+    assert compare_source_chunks(chunks, reordered) == ProviderComparisonFailure(
+        kind="reordered", session_id="continued-native-session", chunk_index=0
+    )
+    compacted = ProviderInputPayload(
+        session_id="continued-native-session",
+        body=json.dumps(
+            {"messages": [chunks[0].text, "compacted remaining chunks"]}
+        ).encode(),
+    )
+    assert compare_source_chunks(chunks, compacted) == ProviderComparisonFailure(
+        kind="compacted", session_id="continued-native-session", chunk_index=1
+    )
+    spilled = ProviderInputPayload(
+        session_id="continued-native-session",
+        body=json.dumps(
+            {"messages": [chunks[0].text, chunks[2].text, "spilled tool output"]}
+        ).encode(),
+    )
+    assert compare_source_chunks(chunks, spilled) == ProviderComparisonFailure(
+        kind="spilled", session_id="continued-native-session", chunk_index=1
+    )
+
+
 def test_canonical_manifest_hash_omits_self_and_verifies_artifacts() -> None:
     from itree.harness import (
         EvidenceManifest,
