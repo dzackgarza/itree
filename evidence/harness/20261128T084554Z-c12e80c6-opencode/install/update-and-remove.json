@@ -1,0 +1,1055 @@
+{
+  "after_external": {
+    "skills": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/user-existing": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/user-existing/SKILL.md": [
+      "file",
+      1795856998809028837,
+      "af49fb47871aa4e7c420d9374f690462c3eddbf29b277cbe1ca0e43f4b28d638",
+      33188
+    ]
+  },
+  "after_project": {
+    ".agents": [
+      "symlink",
+      0,
+      "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/external",
+      41471
+    ],
+    ".claude": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/settings.json": [
+      "file",
+      1795857019085345531,
+      "cafc7f18b7678c90b246cb4be2d7c69fcf3ea8cb19cf14b45f85d51f14321198",
+      33188
+    ],
+    ".claude/settings.local.json": [
+      "file",
+      1795856998809721605,
+      "0816abf5dbd3452f47379cb4e7ea639a28955fccdd67c4afe2f600bf06e106b6",
+      33188
+    ],
+    ".claude/skills": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-analyze": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-analyze/SKILL.md": [
+      "file",
+      1795857001836584918,
+      "e513843448b3c9e8b758fb5a91ae435dcdbde76a23819c2d4e75bee5c411c687",
+      33188
+    ],
+    ".claude/skills/speckit-checklist": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-checklist/SKILL.md": [
+      "file",
+      1795857001866821671,
+      "285820987e6ce8861f855d02daf03b3e18194c0c8e3f443e5875b840648f124c",
+      33188
+    ],
+    ".claude/skills/speckit-clarify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-clarify/SKILL.md": [
+      "file",
+      1795857001842827740,
+      "22d1c09e8c417dc03cff381f7960c4b49f535a4a78748813926f2652a56e1758",
+      33188
+    ],
+    ".claude/skills/speckit-constitution": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-constitution/SKILL.md": [
+      "file",
+      1795857001846896612,
+      "ba741ca12ea11c62ddaac45cf89ed7b18ef32028b151acdc6c4dfa935390f93b",
+      33188
+    ],
+    ".claude/skills/speckit-converge": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-converge/SKILL.md": [
+      "file",
+      1795857001855845741,
+      "7216a5d153dc5b0c8a6de3d129bccff8c50431cd84512601e7d435814f1b3c41",
+      33188
+    ],
+    ".claude/skills/speckit-implement": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-implement/SKILL.md": [
+      "file",
+      1795857001850112310,
+      "2f2cc883a2a2bd1d4e0c1a6bdca5dc8c9a2cb4f47979de9d2fc0fe05d9e02c24",
+      33188
+    ],
+    ".claude/skills/speckit-plan": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-plan/SKILL.md": [
+      "file",
+      1795857001860286481,
+      "b99f71b4ab4e6c3b0043c0cf2f4a9c94d30280ad09252815a61d6e545808a08b",
+      33188
+    ],
+    ".claude/skills/speckit-specify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-specify/SKILL.md": [
+      "file",
+      1795857001872112222,
+      "c7cc45033a93a4c976426092b534e8d2087a04a00dc8be82008fe61bb511f0c4",
+      33188
+    ],
+    ".claude/skills/speckit-tasks": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-tasks/SKILL.md": [
+      "file",
+      1795857001878220583,
+      "c14657fbd4ba53136433011f133c7768e7b60f4da0be5b1d83040869a5c6a434",
+      33188
+    ],
+    ".codex": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".codex/config.toml": [
+      "file",
+      1795857019088043272,
+      "908cd5480d85356c1fc4d93824b0b2b1b68ea4c7a1693d5707cf8e751e4dd575",
+      33188
+    ],
+    ".opencode": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/commands": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/plugin": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/plugin/speckit-events.ts": [
+      "file",
+      1795857014757453927,
+      "9dcc8b701907ec3d78a3e4abea0dba88679fff5e162af910b528d440e5e3b3bf",
+      33188
+    ],
+    ".specify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/.gitignore": [
+      "file",
+      1795857017687595972,
+      "0a61c5378b0bb2e0f85babff99c8b166f2170a2c12378cd17d929aa19296ec88",
+      33188
+    ],
+    ".specify/extensions": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions.yml": [
+      "file",
+      1795857019077758336,
+      "c0b1bd720f3adb32b4203ecb9cc7de066be2e0803f01414ee09025b6509b820b",
+      33188
+    ],
+    ".specify/extensions/.backup": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/.backup/itree": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/.registry": [
+      "file",
+      1795857019077926979,
+      "f5b769632152096fb1d70002cb2210ba7149ec01f339d516ddbbee765280dde1",
+      33188
+    ],
+    ".specify/init-options.json": [
+      "file",
+      1795857017691249101,
+      "8d16c829880a46c5978ccf3c6949a85e0dca5e56a9e6708025407a9890b74a86",
+      33188
+    ],
+    ".specify/integration.json": [
+      "file",
+      1795857017690100159,
+      "5265796ad7baccf63d361028f58dfbee1f617b39cf2313550c0253a5e1cc3e55",
+      33188
+    ],
+    ".specify/integrations": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/integrations/claude.manifest.json": [
+      "file",
+      1795857019086595049,
+      "f1cd16db7b2e2f73ea436efcd798b4d72797d043657abd612a4db2fb307f47c8",
+      33188
+    ],
+    ".specify/integrations/codex.manifest.json": [
+      "file",
+      1795857019089312470,
+      "6e6291ca6a9b8410aabd499372180fbde10e4534dfca340184957985200f2846",
+      33188
+    ],
+    ".specify/integrations/opencode.manifest.json": [
+      "file",
+      1795857019091830528,
+      "b0a6319e22a479944a0124b7886f0c7920e21ed00cc800d76273e0a08cd3e298",
+      33188
+    ],
+    ".specify/integrations/speckit.manifest.json": [
+      "file",
+      1795857017688419200,
+      "2f5e5e0e9d541d5b6148189b5f1713ccb2639b2fd5b466c922db0bc9ffa9575e",
+      33188
+    ],
+    ".specify/itree-harness-state.json": [
+      "file",
+      1795857017855095385,
+      "6c7823240e52522bbf7620c82fae605ca6a4388d38f98fcfdf66f7262a77295a",
+      33188
+    ],
+    ".specify/scripts": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/scripts/bash": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/scripts/bash/check-prerequisites.sh": [
+      "file",
+      1795857017677677655,
+      "ac3d9bfd836c4e873bfb8fb5d898ba4c1d2f80d3488c2298148408a3830ac8d1",
+      33261
+    ],
+    ".specify/scripts/bash/common.sh": [
+      "file",
+      1795857017679801239,
+      "821b60c2b6d60cfbb8acda35b5d7fdbfd692375e65164446e2f2de68020ce952",
+      33261
+    ],
+    ".specify/scripts/bash/create-new-feature.sh": [
+      "file",
+      1795857017682665137,
+      "1e422acb000ab106b63ba1f9f9258bbcdc5b5c93f4e9f88588c0e671ad61b872",
+      33261
+    ],
+    ".specify/scripts/bash/markdown_sections.py": [
+      "file",
+      1795857017683620179,
+      "189e980b7c86f54c0886be57e3113cf47fc474467a08dff851144b5cc5e1fe39",
+      33188
+    ],
+    ".specify/scripts/bash/resolve-template.sh": [
+      "file",
+      1795857017680852765,
+      "829e227096abc8bf0889889ec9f792f503ca5d395b7836a8a7eb739ee75214e7",
+      33261
+    ],
+    ".specify/scripts/bash/setup-plan.sh": [
+      "file",
+      1795857017681762505,
+      "d378ec66ba20d2da01c71dad8935062c1c27f0bba890be9a6d3dda52ea056a4e",
+      33261
+    ],
+    ".specify/scripts/bash/setup-tasks.sh": [
+      "file",
+      1795857017678818411,
+      "cf6e99575a24b64ac01ffa3a50a40971ba95e3c1ec269b9a6dc3e35bbbb09191",
+      33261
+    ],
+    ".specify/templates": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/templates/checklist-template.md": [
+      "file",
+      1795857017684993937,
+      "3f4124a13ffbc0c2d8e979d9a08248f29ce53cc6c324a8303a6ae0d231b78836",
+      33188
+    ],
+    ".specify/templates/constitution-template.md": [
+      "file",
+      1795857017684357053,
+      "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3",
+      33188
+    ],
+    ".specify/templates/plan-template.md": [
+      "file",
+      1795857017686996602,
+      "5ef0e4c97b36e9f91372dc6eb8e5a7e515af8958cf1a9286e43a1ebd9bd48540",
+      33188
+    ],
+    ".specify/templates/spec-template.md": [
+      "file",
+      1795857017685624002,
+      "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e",
+      33188
+    ],
+    ".specify/templates/tasks-template.md": [
+      "file",
+      1795857017686354598,
+      "c731575d8099b3f871861186fbd1a592b51b2ba57fb99e1a0dab439ff6d5608f",
+      33188
+    ],
+    "AGENTS.md": [
+      "file",
+      1795856998809308765,
+      "16c3d79dd9810c52c08cf3a81b30a857d9551b8469e9033b213e8647ee059245",
+      33188
+    ],
+    "CLAUDE.md": [
+      "file",
+      1795856998809463526,
+      "20ffb017f08595bef07bd97e7011b575d2f0f13812798e72c425ecaa0e45fff3",
+      33188
+    ],
+    "opencode.json": [
+      "file",
+      1795857019090588929,
+      "51ee0daf96da83dbb24eb8172ae11c3581456c50e485c149fa9de3fb39ec5d63",
+      33188
+    ]
+  },
+  "before_external": {
+    "skills": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/speckit-itree-initialize": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/speckit-itree-initialize/SKILL.md": [
+      "file",
+      1795857004890720390,
+      "a26dc432f93ca2adb34d34c3830a15411a250145bf671f17b998dcdf8a5f0fc2",
+      33188
+    ],
+    "skills/speckit-itree-work": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/speckit-itree-work/SKILL.md": [
+      "file",
+      1795857004890640162,
+      "d43ba4912508a449015ee1e855f751ecaf2929a90700c2dc370ed409a5a8699c",
+      33188
+    ],
+    "skills/user-existing": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    "skills/user-existing/SKILL.md": [
+      "file",
+      1795856998809028837,
+      "af49fb47871aa4e7c420d9374f690462c3eddbf29b277cbe1ca0e43f4b28d638",
+      33188
+    ]
+  },
+  "before_project": {
+    ".agents": [
+      "symlink",
+      0,
+      "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/external",
+      41471
+    ],
+    ".claude": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/settings.json": [
+      "file",
+      1795857005434624873,
+      "35120e9297243aa2446666135692dc36bf7378eafb28e9b2c38ddcde19afecb7",
+      33188
+    ],
+    ".claude/settings.local.json": [
+      "file",
+      1795856998809721605,
+      "0816abf5dbd3452f47379cb4e7ea639a28955fccdd67c4afe2f600bf06e106b6",
+      33188
+    ],
+    ".claude/skills": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-analyze": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-analyze/SKILL.md": [
+      "file",
+      1795857001836584918,
+      "e513843448b3c9e8b758fb5a91ae435dcdbde76a23819c2d4e75bee5c411c687",
+      33188
+    ],
+    ".claude/skills/speckit-checklist": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-checklist/SKILL.md": [
+      "file",
+      1795857001866821671,
+      "285820987e6ce8861f855d02daf03b3e18194c0c8e3f443e5875b840648f124c",
+      33188
+    ],
+    ".claude/skills/speckit-clarify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-clarify/SKILL.md": [
+      "file",
+      1795857001842827740,
+      "22d1c09e8c417dc03cff381f7960c4b49f535a4a78748813926f2652a56e1758",
+      33188
+    ],
+    ".claude/skills/speckit-constitution": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-constitution/SKILL.md": [
+      "file",
+      1795857001846896612,
+      "ba741ca12ea11c62ddaac45cf89ed7b18ef32028b151acdc6c4dfa935390f93b",
+      33188
+    ],
+    ".claude/skills/speckit-converge": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-converge/SKILL.md": [
+      "file",
+      1795857001855845741,
+      "7216a5d153dc5b0c8a6de3d129bccff8c50431cd84512601e7d435814f1b3c41",
+      33188
+    ],
+    ".claude/skills/speckit-implement": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-implement/SKILL.md": [
+      "file",
+      1795857001850112310,
+      "2f2cc883a2a2bd1d4e0c1a6bdca5dc8c9a2cb4f47979de9d2fc0fe05d9e02c24",
+      33188
+    ],
+    ".claude/skills/speckit-itree-initialize": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-itree-initialize/SKILL.md": [
+      "file",
+      1795857006337922020,
+      "48d93148f97367b6a47b3e191099ea7c7a1edc8d92b91697eeaeffe923dd5e13",
+      33188
+    ],
+    ".claude/skills/speckit-itree-work": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-itree-work/SKILL.md": [
+      "file",
+      1795857006336467181,
+      "d19ef1118980596011f0265ae4d338abce437906812254f0f9c64407a3c0bae0",
+      33188
+    ],
+    ".claude/skills/speckit-plan": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-plan/SKILL.md": [
+      "file",
+      1795857001860286481,
+      "b99f71b4ab4e6c3b0043c0cf2f4a9c94d30280ad09252815a61d6e545808a08b",
+      33188
+    ],
+    ".claude/skills/speckit-specify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-specify/SKILL.md": [
+      "file",
+      1795857001872112222,
+      "c7cc45033a93a4c976426092b534e8d2087a04a00dc8be82008fe61bb511f0c4",
+      33188
+    ],
+    ".claude/skills/speckit-tasks": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".claude/skills/speckit-tasks/SKILL.md": [
+      "file",
+      1795857001878220583,
+      "c14657fbd4ba53136433011f133c7768e7b60f4da0be5b1d83040869a5c6a434",
+      33188
+    ],
+    ".codex": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".codex/config.toml": [
+      "file",
+      1795857005440139781,
+      "05b7d0f24587d59ca5c137f8772924eec61666c66c68ad0ebe6cb285d777a0cd",
+      33188
+    ],
+    ".opencode": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/commands": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/commands/speckit.itree.initialize.md": [
+      "file",
+      1795857007069351266,
+      "b07793e8a8b6150b68c805b53a548f84ea7ed882d932230b9a107eb64f396089",
+      33188
+    ],
+    ".opencode/commands/speckit.itree.work.md": [
+      "file",
+      1795857007068043808,
+      "9a90b5d2d0254a3078ca4cdcca396110352fdf839c1b0ff39ba6c3a1ad1f6ee2",
+      33188
+    ],
+    ".opencode/plugin": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".opencode/plugin/speckit-events.ts": [
+      "file",
+      1795857005445345933,
+      "9dcc8b701907ec3d78a3e4abea0dba88679fff5e162af910b528d440e5e3b3bf",
+      33188
+    ],
+    ".specify": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/.gitignore": [
+      "file",
+      1795857007979990253,
+      "0a61c5378b0bb2e0f85babff99c8b166f2170a2c12378cd17d929aa19296ec88",
+      33188
+    ],
+    ".specify/events.py": [
+      "file",
+      1795857005444570435,
+      "e78e7edb7dd8c5d3a86d61386eb4313ed5b1f8eb6891e496a04b2a53ff7ea984",
+      33261
+    ],
+    ".specify/extensions": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions.yml": [
+      "file",
+      1795857004888566274,
+      "f5165da3edaafb5c5100f24ba28bcfdcd831aa4101aba45d503193feedb70f8a",
+      33188
+    ],
+    ".specify/extensions/.registry": [
+      "file",
+      1795857007071351347,
+      "3292c4c4b4171ef7c6b3738981dd393abaa4f7ec3e3bcfc87434c2b647dfaad1",
+      33188
+    ],
+    ".specify/extensions/itree": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/itree/commands": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/itree/commands/initialize.md": [
+      "file",
+      1795857004889847631,
+      "d5ddef3a1b8cd069d9cf8bf4b646d4a488786e3d2190a87c1cd393df0f5f690f",
+      33188
+    ],
+    ".specify/extensions/itree/commands/work.md": [
+      "file",
+      1795857004890033564,
+      "827f49d1cc599522b8f3126445873b42e4480dfa6296eef95c411c101cbb483f",
+      33188
+    ],
+    ".specify/extensions/itree/extension.yml": [
+      "file",
+      1795857004890184567,
+      "aad4a6dd04fc9b92199c9150d7cdf8d8ce8e334d8bbaed166f03b7820b46dbcf",
+      33188
+    ],
+    ".specify/extensions/itree/scripts": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/itree/scripts/python": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/itree/scripts/python/__pycache__": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/extensions/itree/scripts/python/__pycache__/work_loader.cpython-314.pyc": [
+      "file",
+      1795857004890384208,
+      "d112751b90e90e15f1ea8aa873c0bf134ad139abba371d5c459a94334b931612",
+      33188
+    ],
+    ".specify/extensions/itree/scripts/python/initialize.py": [
+      "file",
+      1795857004890469106,
+      "52a7058ae90a71c772afde7de529d08dc01972367d3c766ef1c07fc32860434c",
+      33188
+    ],
+    ".specify/extensions/itree/scripts/python/work_loader.py": [
+      "file",
+      1795857004890539580,
+      "0ed28b81c2a1b95827ec4686c38e062b46786155170a98f0828749f0891faba5",
+      33188
+    ],
+    ".specify/init-options.json": [
+      "file",
+      1795857007986864925,
+      "8d16c829880a46c5978ccf3c6949a85e0dca5e56a9e6708025407a9890b74a86",
+      33188
+    ],
+    ".specify/integration.json": [
+      "file",
+      1795857007984728747,
+      "5265796ad7baccf63d361028f58dfbee1f617b39cf2313550c0253a5e1cc3e55",
+      33188
+    ],
+    ".specify/integrations": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/integrations/claude.manifest.json": [
+      "file",
+      1795857005435286428,
+      "52397cd3fdec53f50f399a99fb02c9f189dea037f25fa2b06e1fb067b779a7ed",
+      33188
+    ],
+    ".specify/integrations/codex.manifest.json": [
+      "file",
+      1795857005440835376,
+      "4130bfeaa80044d432bbc966f49c840a17bb38a79fc43a352f7989703787354f",
+      33188
+    ],
+    ".specify/integrations/opencode.manifest.json": [
+      "file",
+      1795857005446065792,
+      "7b06e0d12830f4182b3706502abfd380e2e62d30686ad13873dcbffc4d9382c6",
+      33188
+    ],
+    ".specify/integrations/speckit.manifest.json": [
+      "file",
+      1795857007981531882,
+      "2f5e5e0e9d541d5b6148189b5f1713ccb2639b2fd5b466c922db0bc9ffa9575e",
+      33188
+    ],
+    ".specify/itree-harness-state.json": [
+      "file",
+      1795857008187709047,
+      "80c5012299658a0abb87434f7b0cf2e4e8a936bc64ac2fb8202ec689d868dd62",
+      33188
+    ],
+    ".specify/scripts": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/scripts/bash": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/scripts/bash/check-prerequisites.sh": [
+      "file",
+      1795857007958607991,
+      "ac3d9bfd836c4e873bfb8fb5d898ba4c1d2f80d3488c2298148408a3830ac8d1",
+      33261
+    ],
+    ".specify/scripts/bash/common.sh": [
+      "file",
+      1795857007964060532,
+      "821b60c2b6d60cfbb8acda35b5d7fdbfd692375e65164446e2f2de68020ce952",
+      33261
+    ],
+    ".specify/scripts/bash/create-new-feature.sh": [
+      "file",
+      1795857007971008836,
+      "1e422acb000ab106b63ba1f9f9258bbcdc5b5c93f4e9f88588c0e671ad61b872",
+      33261
+    ],
+    ".specify/scripts/bash/markdown_sections.py": [
+      "file",
+      1795857007973011214,
+      "189e980b7c86f54c0886be57e3113cf47fc474467a08dff851144b5cc5e1fe39",
+      33188
+    ],
+    ".specify/scripts/bash/resolve-template.sh": [
+      "file",
+      1795857007966606238,
+      "829e227096abc8bf0889889ec9f792f503ca5d395b7836a8a7eb739ee75214e7",
+      33261
+    ],
+    ".specify/scripts/bash/setup-plan.sh": [
+      "file",
+      1795857007968924412,
+      "d378ec66ba20d2da01c71dad8935062c1c27f0bba890be9a6d3dda52ea056a4e",
+      33261
+    ],
+    ".specify/scripts/bash/setup-tasks.sh": [
+      "file",
+      1795857007961525197,
+      "cf6e99575a24b64ac01ffa3a50a40971ba95e3c1ec269b9a6dc3e35bbbb09191",
+      33261
+    ],
+    ".specify/templates": [
+      "directory",
+      0,
+      null,
+      16877
+    ],
+    ".specify/templates/checklist-template.md": [
+      "file",
+      1795857007975495459,
+      "3f4124a13ffbc0c2d8e979d9a08248f29ce53cc6c324a8303a6ae0d231b78836",
+      33188
+    ],
+    ".specify/templates/constitution-template.md": [
+      "file",
+      1795857007974387763,
+      "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3",
+      33188
+    ],
+    ".specify/templates/plan-template.md": [
+      "file",
+      1795857007978899206,
+      "5ef0e4c97b36e9f91372dc6eb8e5a7e515af8958cf1a9286e43a1ebd9bd48540",
+      33188
+    ],
+    ".specify/templates/spec-template.md": [
+      "file",
+      1795857007976719182,
+      "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e",
+      33188
+    ],
+    ".specify/templates/tasks-template.md": [
+      "file",
+      1795857007977805317,
+      "c731575d8099b3f871861186fbd1a592b51b2ba57fb99e1a0dab439ff6d5608f",
+      33188
+    ],
+    "AGENTS.md": [
+      "file",
+      1795856998809308765,
+      "16c3d79dd9810c52c08cf3a81b30a857d9551b8469e9033b213e8647ee059245",
+      33188
+    ],
+    "CLAUDE.md": [
+      "file",
+      1795856998809463526,
+      "20ffb017f08595bef07bd97e7011b575d2f0f13812798e72c425ecaa0e45fff3",
+      33188
+    ],
+    "opencode.json": [
+      "file",
+      1795857005445612436,
+      "ec7c917e280e244dd4bd8502c1b737a94e6a6247f48774167fec8daf9c4ed65d",
+      33188
+    ]
+  },
+  "harness": "opencode",
+  "preserved_external_unrelated": {
+    "skills/user-existing/SKILL.md": [
+      "file",
+      1795856998809028837,
+      "af49fb47871aa4e7c420d9374f690462c3eddbf29b277cbe1ca0e43f4b28d638",
+      33188
+    ]
+  },
+  "refresh": {
+    "exit": 0,
+    "outcome": {
+      "confirmed": [
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "stage-codex-core",
+          "ordinal": 0,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "install-claude",
+          "ordinal": 1,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "install-opencode",
+          "ordinal": 2,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "merge-codex-core",
+          "ordinal": 3,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "select-codex",
+          "ordinal": 4,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "register-itree",
+          "ordinal": 5,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "refresh-events",
+          "ordinal": 6,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "render-claude",
+          "ordinal": 7,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "render-codex",
+          "ordinal": 8,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "render-opencode",
+          "ordinal": 9,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "restore-default",
+          "ordinal": 10,
+          "status": "confirmed"
+        },
+        {
+          "artifact": "/tmp/opencode/itree-lifecycle-evidence-kjjrdrns/project",
+          "diagnostic": null,
+          "operation_id": "confirm",
+          "ordinal": 11,
+          "status": "confirmed"
+        }
+      ],
+      "failed": null,
+      "untouched": []
+    }
+  },
+  "registry_after_refresh": {
+    "extensions": {
+      "itree": {
+        "enabled": true,
+        "installed_at": "2026-11-28T09:10:14.028224+00:00",
+        "manifest_hash": "sha256:aad4a6dd04fc9b92199c9150d7cdf8d8ce8e334d8bbaed166f03b7820b46dbcf",
+        "priority": 10,
+        "registered_commands": {
+          "claude": [
+            "speckit.itree.work",
+            "speckit.itree.initialize"
+          ],
+          "codex": [
+            "speckit.itree.work",
+            "speckit.itree.initialize"
+          ],
+          "opencode": [
+            "speckit.itree.work",
+            "speckit.itree.initialize"
+          ]
+        },
+        "registered_skills": [],
+        "source": "local",
+        "version": "1.0.0"
+      }
+    },
+    "schema_version": "1.0"
+  },
+  "registry_after_remove": {
+    "extensions": {},
+    "schema_version": "1.0"
+  },
+  "remove": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "\n\u2713 Extension 'itree live work packages' removed successfully\n\nConfig files backed up to .specify/extensions/.backup/itree/\n\nTo reinstall: specify extension add itree\n"
+  },
+  "removed_entries_satisfied": true,
+  "update": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "--force: Will overwrite if already installed and overwrite modified or unowned \nskill resource copies (generic replaces only recorded resources)\n--force: Installing from \n/home/dzack/Dropbox/gitclones/itree/src/itree/resources/speckit_itree (will \noverwrite if already installed and overwrite modified or unowned skill resource \ncopies; generic replaces only recorded resources)...\n\n\u2713 Extension installed successfully!\n\nitree live work packages (v1.0.0)\n  Load an exact live GitHub issue work package through the installed itree \ndistribution\n\nProvided commands:\n  \u2022 speckit.itree.work - Load one live OWNER/REPO#N work package in exact \nordered chunks\n  \u2022 speckit.itree.initialize - Check itree prerequisites without selecting an \nissue\n"
+  }
+}
