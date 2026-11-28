@@ -26,6 +26,8 @@ def _worker(
 ) -> bool:
     if isinstance(subject, pytest.TestReport):
         return os.environ.get("PYTEST_XDIST_WORKER") is not None
+    if isinstance(subject, pytest.Session):
+        return hasattr(subject.config, "workerinput")
     if isinstance(subject, pytest.Config):
         return hasattr(subject, "workerinput")
     return hasattr(subject.config, "workerinput")
@@ -86,10 +88,8 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
+    session: pytest.Session, config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    if _worker(config):
-        return
     root = _controller_root(config)
     readonly = sum(item.get_closest_marker("serial") is None for item in items)
     serial = len(items) - readonly
@@ -139,7 +139,7 @@ def _finished(report: pytest.TestReport) -> None:
     _emit(root, f"done-{category}", report.nodeid)
     _emit(root, f"outcome-{category}-{report.outcome}", report.nodeid)
     if report.outcome != "passed":
-        _emit(root, "failures", report.node.nodeid)
+        _emit(root, "failures", report.nodeid)
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
