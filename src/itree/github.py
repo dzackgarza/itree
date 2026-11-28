@@ -1580,6 +1580,23 @@ class GithubApi(BaseModel):
             "PATCH", f"repos/{self.owner}/{self.repo}/issues/{number}", {"body": body}
         )
 
+    def dispatch_stage_drain(self, issue_node_id: str, issue_number: int) -> None:
+        assert issue_node_id and issue_number > 0, (issue_node_id, issue_number)
+        self._run_api_command(
+            [
+                "gh",
+                "workflow",
+                "run",
+                "itree-issue-writer.yml",
+                "-f",
+                f"issue_node_id={issue_node_id}",
+                "-f",
+                f"issue_number={issue_number}",
+            ],
+            "itree-issue-writer.yml",
+            timeout=30,
+        )
+
 
 def settle_parent(
     *,

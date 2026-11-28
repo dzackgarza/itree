@@ -12,34 +12,56 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from .github import GithubApi, GithubApiError
 from .models import (
+    ArtifactDraft,
+    ArtifactIndexEntry,
+    ArtifactKey,
+    ArtifactKind,
+    ArtifactPayload,
+    ArtifactProposal,
     AttemptId,
     DeclaredOrder,
     EvidenceRef,
+    FinalizedProposal,
     GithubIssue,
     GoalContribution,
     GoalId,
     IssueNodeId,
     IssueRef,
+    LegacyIntakeProposal,
     LocalTaskRef,
+    MissingPart,
     OpaqueSpan,
+    PartDescriptor,
     PendingEvidence,
+    PendingUpload,
     QualifiedTaskRef,
     RequestId,
     RequirementId,
     ResolvedEvidence,
+    RestartedAttempt,
+    SectionEditProposal,
     SectionReplacement,
+    SessionAdmissionRequest,
+    SessionReleaseRequest,
     Sha256,
     SourceSpan,
     StageModel,
     TaskDocument,
     TaskField,
+    TaskFieldProposal,
     TaskId,
     TaskParseFailure,
     TaskPrerequisite,
     TaskRecord,
+    UploadContent,
+    UploadManifest,
+    UploadPart,
+    UploadRejected,
+    UploadRejectionReason,
+    WriterSealInvalidContext,
+    UploadResolution,
 )
 from .work import (
-    IssueLayout,
     LegacyIssueLayout,
     ManagedIssueLayout,
     SectionName,
@@ -71,7 +93,7 @@ class ProjectionFailure(StageModel):
         "wrong_attempt",
         "unsupported_task_wire",
     ]
-    exit_code: Literal[2, 3, 4]
+    exit_code: Literal[2, 3, 4, 5]
     detail: str
 
 
@@ -928,8 +950,168 @@ def _original_text(layout: ValidIssueLayout) -> str:
     return _section(layout, SectionName.original_contract)
 
 
+def collect_artifact_drafts(directory: Path) -> tuple[ArtifactDraft, ...]:
+    drafts: list[ArtifactDraft] = []
+    single_files = (
+        ("research.md", "research", "research"),
+        ("data-model.md", "data-model", "data-model"),
+        ("quickstart.md", "quickstart", "quickstart"),
+    )
+    for filename, kind, key in single_files:
+        path = directory / filename
+        if path.is_file():
+            drafts.append(
+                ArtifactDraft(
+                    key=ArtifactKey(key),
+                    kind=_artifact_kind(kind),
+                    content=path.read_text(),
+                )
+            )
+    contract_dir = directory / "contracts"
+    if contract_dir.is_dir():
+        for path in sorted(contract_dir.glob("*.md")):
+            drafts.append(
+                ArtifactDraft(
+                    key=ArtifactKey(f"contracts/{path.stem}"),
+                    kind=_artifact_kind("contract"),
+                    content=path.read_text(),
+                )
+            )
+    families = (
+        ("clarifications", "clarification"),
+        ("findings", "finding"),
+        ("evidence", "evidence"),
+        ("checkpoints", "checkpoint"),
+        ("plan-history", "plan-history"),
+        ("task-history", "task-history"),
+    )
+    for folder, kind in families:
+        parent = directory / folder
+        if not parent.is_dir():
+            continue
+        for path in sorted(parent.glob("*.md")):
+            drafts.append(
+                ArtifactDraft(
+                    key=ArtifactKey(path.stem),
+                    kind=_artifact_kind(kind),
+                    content=path.read_text(),
+                )
+            )
+    return tuple(drafts)
+
+
+def _materialize_supporting_artifacts(
+    directory: Path, plan_text: str, api: GithubApi, issue: IssueRef
+) -> None:
+    if "itree-stage-artifact-index" not in plan_text:
+        return
+    from .stage_writer import (
+        _decode_stage_comment,
+        _job_authority,
+        _raw_history,
+        validate_writer_seal,
+    )
+
+    matched = re.search(r"```itree-stage-artifact-index\n[^\n]+\n```\n", plan_text)
+    if matched is None:
+        raise StageFailure(
+            ProjectionFailure(
+                reason="ambiguous_boundary",
+                exit_code=2,
+                detail="artifact index is not one deterministic fence",
+            )
+        )
+    _, raw_entries = _decode_stage_comment(matched.group(0))
+    entries = TypeAdapter(tuple[ArtifactIndexEntry, ...]).validate_json(
+        matched.group(0).splitlines()[1], strict=True
+    )
+    for entry in entries:
+        native = api.get_comment(entry.comment_id)
+        history = _raw_history(api, native)
+        if history is None:
+            raise StageFailure(
+                ProjectionFailure(
+                    reason="issue_unavailable",
+                    exit_code=3,
+                    detail=f"history unavailable for artifact {entry.key}",
+                )
+            )
+        try:
+            _, raw_payload = _decode_stage_comment(native.body)
+            payload = ArtifactPayload.model_validate_json(
+                canonical_payload_bytes_for_artifacts(raw_payload), strict=True
+            )
+        except (ValueError, TypeError, ValidationError) as error:
+            raise StageFailure(
+                ProjectionFailure(
+                    reason="unexpected_file_change",
+                    exit_code=3,
+                    detail=f"edited or mismatched artifact {entry.key}",
+                )
+            ) from error
+        expected_url = (
+            f"https://github.com/{issue.repo_ref.slug}/issues/{issue.number}"
+            f"#issuecomment-{entry.comment_id}"
+        )
+        intact = (
+            native.node_id == entry.comment_node_id
+            and native.html_url == expected_url == entry.url
+            and history.created_at == history.updated_at
+            and history.last_edited_at is None
+            and history.last_editor is None
+            and history.edit_count == 0
+            and history.history_exhausted
+            and payload.key == entry.key
+            and payload.kind == entry.kind
+            and payload.attempt_id == entry.attempt_id
+            and sha256_text(payload.content) == entry.content_sha256
+        )
+        if not intact:
+            raise StageFailure(
+                ProjectionFailure(
+                    reason="unexpected_file_change",
+                    exit_code=3,
+                    detail=f"edited or mismatched artifact {entry.key}",
+                )
+            )
+        if isinstance(
+            validate_writer_seal(
+                payload.writer_seal, _job_authority(api, payload.writer_seal)
+            ),
+            WriterSealInvalidContext,
+        ):
+            raise StageFailure(
+                ProjectionFailure(
+                    reason="issue_unavailable",
+                    exit_code=3,
+                    detail=f"invalid writer seal for artifact {entry.key}",
+                )
+            )
+        relative = {
+            "research": Path("research.md"),
+            "data-model": Path("data-model.md"),
+            "quickstart": Path("quickstart.md"),
+            "clarification": Path("clarifications") / f"{entry.key}.md",
+            "finding": Path("findings") / f"{entry.key}.md",
+            "evidence": Path("evidence") / f"{entry.key}.md",
+            "checkpoint": Path("checkpoints") / f"{entry.key}.md",
+            "plan-history": Path("plan-history") / f"{entry.key}.md",
+            "task-history": Path("task-history") / f"{entry.key}.md",
+        }.get(entry.kind, Path(f"{entry.key}.md"))
+        target = directory / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(payload.content, encoding="utf-8", newline="")
+
+
+def canonical_payload_bytes_for_artifacts(payload: JsonValue) -> bytes:
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
 def _write_materialization(
     issue: IssueRef,
+    api: GithubApi,
     live: GithubIssue,
     layout: ValidIssueLayout,
     attempt: AttemptId,
@@ -948,6 +1130,12 @@ def _write_materialization(
     for filename, name in sections:
         text = "" if isinstance(layout, LegacyIssueLayout) else _section(layout, name)
         directory.joinpath(filename).write_text(text, encoding="utf-8", newline="")
+    plan_text = (
+        ""
+        if isinstance(layout, LegacyIssueLayout)
+        else _section(layout, SectionName.plan)
+    )
+    _materialize_supporting_artifacts(directory, plan_text, api, issue)
     metadata = ScratchMetadata(
         version=1,
         issue_ref=issue,
@@ -977,8 +1165,9 @@ def _write_materialization(
 
 def stage_materialize(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     try:
-        live, layout = _read_layout(GithubApi.from_issue_ref(issue), issue)
-        return _write_materialization(issue, live, layout, attempt)
+        api = GithubApi.from_issue_ref(issue)
+        live, layout = _read_layout(api, issue)
+        return _write_materialization(issue, api, live, layout, attempt)
     except StageFailure as error:
         return _defect(error.failure)
 
@@ -1137,3 +1326,402 @@ def stage_drain(
     from .stage_writer import drain_stage
 
     return drain_stage(issue, expected_node)
+
+
+UploadProposal = (
+    SectionEditProposal
+    | LegacyIntakeProposal
+    | TaskFieldProposal
+    | ArtifactProposal
+    | SessionAdmissionRequest
+    | SessionReleaseRequest
+)
+
+
+def _model_payload(model: StageModel) -> JsonValue:
+    return JSON_VALUE_ADAPTER.validate_python(model.model_dump(mode="json"))
+
+
+def _canonical_upload_digest(payload: JsonValue) -> Sha256:
+    return Sha256(
+        hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def section_upload_contents(
+    proposal: SectionEditProposal,
+) -> tuple[UploadContent, ...]:
+    contents = [UploadContent(role="base_body", ordinal=0, payload=proposal.base_body)]
+    for replacement in proposal.changes:
+        contents.extend(
+            (
+                UploadContent(
+                    role=f"base:{replacement.section}",
+                    ordinal=0,
+                    payload=replacement.base_text,
+                ),
+                UploadContent(
+                    role=f"proposed:{replacement.section}",
+                    ordinal=0,
+                    payload=replacement.proposed_text,
+                ),
+            )
+        )
+    return tuple(contents)
+
+
+def task_upload_contents(
+    proposal: TaskFieldProposal,
+) -> tuple[UploadContent, ...]:
+    return (
+        UploadContent(role="base_body", ordinal=0, payload=proposal.base_body),
+        UploadContent(
+            role="full_task_base_sha256",
+            ordinal=0,
+            payload=proposal.full_task_base_sha256,
+        ),
+        UploadContent(role="base_value", ordinal=0, payload=proposal.base_value),
+        UploadContent(
+            role="proposed_value", ordinal=0, payload=proposal.proposed_value
+        ),
+    )
+
+
+def legacy_upload_contents(
+    proposal: LegacyIntakeProposal,
+) -> tuple[UploadContent, ...]:
+    return (
+        UploadContent(role="base_body", ordinal=0, payload=proposal.legacy_base),
+        UploadContent(role="requirements", ordinal=0, payload=proposal.requirements),
+        UploadContent(role="plan", ordinal=0, payload=proposal.plan),
+        UploadContent(role="tasks", ordinal=0, payload=proposal.tasks),
+    )
+
+
+def artifact_upload_contents(
+    proposal: ArtifactProposal,
+) -> tuple[UploadContent, ...]:
+    return (
+        UploadContent(role="base_body", ordinal=0, payload=proposal.base_body),
+        *(
+            UploadContent(
+                role=f"artifact:{artifact.kind}:{artifact.key}",
+                ordinal=0,
+                payload=artifact.content,
+            )
+            for artifact in proposal.artifacts
+        ),
+    )
+
+
+def build_upload_manifest(
+    proposal: UploadProposal, contents: tuple[UploadContent, ...]
+) -> UploadManifest:
+    targets: tuple[str, ...]
+    if isinstance(proposal, SectionEditProposal):
+        targets = tuple(replacement.section for replacement in proposal.changes)
+    elif isinstance(proposal, TaskFieldProposal):
+        targets = (f"task:{proposal.task_id}:{proposal.field.value}",)
+    elif isinstance(proposal, LegacyIntakeProposal):
+        targets = ("requirements", "plan", "tasks")
+    elif isinstance(proposal, ArtifactProposal):
+        targets = tuple(
+            f"artifact:{artifact.kind}:{artifact.key}"
+            for artifact in proposal.artifacts
+        )
+    else:
+        targets = (proposal.request_kind,)
+    parts = tuple(
+        PartDescriptor(
+            role=content.role,
+            ordinal=content.ordinal,
+            payload_sha256=sha256_text(content.payload),
+        )
+        for content in contents
+    )
+    base_roles = tuple(
+        content.role
+        for content in contents
+        if content.role in {"base_body", "base_value", "full_task_base_sha256"}
+        or content.role.startswith("base:")
+    )
+    proposed_roles = tuple(
+        content.role for content in contents if content.role not in base_roles
+    )
+    return UploadManifest(
+        version=1,
+        issue_node_id=proposal.issue_node_id,
+        issue_ref=proposal.issue_ref,
+        request_id=proposal.request_id,
+        attempt_id=proposal.attempt_id,
+        session_id=proposal.session_id,
+        base_body_sha256=(
+            proposal.entry_body_sha256
+            if isinstance(proposal, SessionAdmissionRequest)
+            else None
+            if isinstance(proposal, SessionReleaseRequest)
+            else proposal.base_body_sha256
+        ),
+        request_kind=proposal.request_kind,
+        targets=targets,
+        base_roles=base_roles,
+        proposed_roles=proposed_roles,
+        expected_part_count=len(parts),
+        parts=parts,
+        finalized_proposal_sha256=_canonical_upload_digest(_model_payload(proposal)),
+    )
+
+
+def _upload_part(manifest: UploadManifest, content: UploadContent) -> UploadPart:
+    return UploadPart(
+        version=1,
+        issue_node_id=manifest.issue_node_id,
+        issue_ref=manifest.issue_ref,
+        request_id=manifest.request_id,
+        attempt_id=manifest.attempt_id,
+        manifest_request_id=manifest.request_id,
+        manifest_payload_sha256=_canonical_upload_digest(_model_payload(manifest)),
+        role=content.role,
+        ordinal=content.ordinal,
+        payload=content.payload,
+        payload_sha256=sha256_text(content.payload),
+    )
+
+
+def make_upload_parts(
+    manifest: UploadManifest, contents: tuple[UploadContent, ...]
+) -> tuple[UploadPart, ...]:
+    return tuple(_upload_part(manifest, content) for content in contents)
+
+
+def _upload_rejection(reason: UploadRejectionReason) -> UploadRejected:
+    return UploadRejected(reason=reason)
+
+
+STAGE_SECTION_FIELDS: dict[str, Literal["requirements", "plan", "tasks"]] = {
+    "requirements": "requirements",
+    "plan": "plan",
+    "tasks": "tasks",
+}
+
+
+def _required_body_sha(manifest: UploadManifest) -> Sha256:
+    digest = manifest.base_body_sha256
+    assert digest is not None, manifest.request_kind
+    return digest
+
+
+def _artifact_kind(value: str) -> ArtifactKind:
+    match value:
+        case "research" | "data-model" | "contract" | "quickstart":
+            return value
+        case "clarification" | "finding" | "evidence" | "checkpoint":
+            return value
+        case "plan-history" | "task-history":
+            return value
+    raise AssertionError(value)
+
+
+def _complete_proposal(
+    manifest: UploadManifest, contents: dict[str, str]
+) -> UploadProposal:
+    assert manifest.base_body_sha256 is not None or manifest.request_kind in {
+        "session_admit",
+        "session_release",
+    }
+    if manifest.request_kind == "sections":
+        base = _layout_or_raise(contents["base_body"])
+        assert isinstance(base, ManagedIssueLayout)
+        replacements: list[SectionReplacement] = []
+        for section in manifest.targets:
+            assert section in {"requirements", "plan", "tasks"}, section
+            base_text = _section(base, SectionName(section))
+            proposed = contents[f"proposed:{section}"]
+            replacements.append(
+                SectionReplacement(
+                    section=STAGE_SECTION_FIELDS[section],
+                    base_text=base_text,
+                    proposed_text=proposed,
+                    base_sha256=sha256_text(base_text),
+                    proposed_sha256=sha256_text(proposed),
+                )
+            )
+        return SectionEditProposal(
+            version=1,
+            request_kind="sections",
+            issue_node_id=manifest.issue_node_id,
+            issue_ref=manifest.issue_ref,
+            request_id=manifest.request_id,
+            attempt_id=manifest.attempt_id,
+            session_id=manifest.session_id,
+            base_body_sha256=_required_body_sha(manifest),
+            base_body=contents["base_body"],
+            changes=tuple(replacements),
+        )
+    if manifest.request_kind == "task_field":
+        task_id, field = manifest.targets[0].split(":", 2)[1:]
+        return TaskFieldProposal(
+            version=1,
+            request_kind="task_field",
+            issue_node_id=manifest.issue_node_id,
+            issue_ref=manifest.issue_ref,
+            request_id=manifest.request_id,
+            attempt_id=manifest.attempt_id,
+            session_id=manifest.session_id,
+            base_body_sha256=_required_body_sha(manifest),
+            base_body=contents["base_body"],
+            task_id=TaskId(task_id),
+            field=TaskField(field),
+            full_task_base_sha256=Sha256(contents["full_task_base_sha256"]),
+            base_value=contents["base_value"],
+            proposed_value=contents["proposed_value"],
+        )
+    if manifest.request_kind == "legacy_intake":
+        return LegacyIntakeProposal(
+            version=1,
+            request_kind="legacy_intake",
+            issue_node_id=manifest.issue_node_id,
+            issue_ref=manifest.issue_ref,
+            request_id=manifest.request_id,
+            attempt_id=manifest.attempt_id,
+            session_id=manifest.session_id,
+            base_body_sha256=_required_body_sha(manifest),
+            legacy_base=contents["base_body"],
+            requirements=contents["requirements"],
+            plan=contents["plan"],
+            tasks=contents["tasks"],
+        )
+    if manifest.request_kind == "artifacts":
+        drafts: list[ArtifactDraft] = []
+        for target in manifest.targets:
+            _, kind, key = target.split(":", 2)
+            drafts.append(
+                ArtifactDraft(
+                    key=ArtifactKey(key),
+                    kind=_artifact_kind(kind),
+                    content=contents[target],
+                )
+            )
+        return ArtifactProposal(
+            version=1,
+            request_kind="artifacts",
+            issue_node_id=manifest.issue_node_id,
+            issue_ref=manifest.issue_ref,
+            request_id=manifest.request_id,
+            attempt_id=manifest.attempt_id,
+            session_id=manifest.session_id,
+            base_body_sha256=_required_body_sha(manifest),
+            base_body=contents["base_body"],
+            artifacts=tuple(drafts),
+        )
+    payload = json.loads(contents["session"])
+    if manifest.request_kind == "session_admit":
+        return SessionAdmissionRequest.model_validate_json(
+            contents["session"], strict=True
+        )
+    assert manifest.request_kind == "session_release", manifest.request_kind
+    return SessionReleaseRequest.model_validate_json(contents["session"], strict=True)
+
+
+def finalize_upload(
+    manifest: UploadManifest, parts: tuple[UploadPart, ...]
+) -> UploadResolution:
+    descriptors = {(part.role, part.ordinal) for part in manifest.parts}
+    seen: set[tuple[str, int]] = set()
+    expected_order = [
+        (descriptor.role, descriptor.ordinal) for descriptor in manifest.parts
+    ]
+    actual_order = [(part.role, part.ordinal) for part in parts]
+    if len(set(actual_order)) != len(actual_order):
+        return _upload_rejection("duplicate_part")
+    if any(identity not in descriptors for identity in actual_order):
+        return _upload_rejection("unexpected_part")
+    if actual_order != [
+        identity for identity in expected_order if identity in actual_order
+    ]:
+        return _upload_rejection("wrong_order")
+    by_identity: dict[tuple[str, int], UploadPart] = {}
+    for part in parts:
+        identity = (part.role, part.ordinal)
+        if identity in seen:
+            return _upload_rejection("duplicate_part")
+        seen.add(identity)
+        if identity not in descriptors:
+            return _upload_rejection("unexpected_part")
+        if part.manifest_request_id != manifest.request_id:
+            return _upload_rejection("manifest_mismatch")
+        if part.manifest_payload_sha256 != _canonical_upload_digest(
+            _model_payload(manifest)
+        ):
+            return _upload_rejection("manifest_mismatch")
+        expected_digest = next(
+            descriptor.payload_sha256
+            for descriptor in manifest.parts
+            if (descriptor.role, descriptor.ordinal) == identity
+        )
+        if (
+            part.payload_sha256 != expected_digest
+            or sha256_text(part.payload) != expected_digest
+        ):
+            return _upload_rejection("digest_mismatch")
+        by_identity[identity] = part
+    missing = tuple(
+        MissingPart(
+            role=descriptor.role,
+            ordinal=descriptor.ordinal,
+            expected_payload_sha256=descriptor.payload_sha256,
+        )
+        for descriptor in manifest.parts
+        if (descriptor.role, descriptor.ordinal) not in by_identity
+    )
+    if missing:
+        return PendingUpload(
+            validated_manifest=manifest,
+            present_sealed_parts=parts,
+            missing_parts=missing,
+        )
+    contents = {
+        descriptor.role: by_identity[(descriptor.role, descriptor.ordinal)].payload
+        for descriptor in manifest.parts
+    }
+    try:
+        proposal = _complete_proposal(manifest, contents)
+    except AssertionError, KeyError, ValueError, ValidationError, StageFailure:
+        return _upload_rejection("manifest_mismatch")
+    digest = _canonical_upload_digest(_model_payload(proposal))
+    if digest != manifest.finalized_proposal_sha256:
+        return _upload_rejection("digest_mismatch")
+    return FinalizedProposal(
+        manifest=manifest,
+        parts=parts,
+        logical_payload_sha256=digest,
+        proposal=_model_payload(proposal),
+    )
+
+
+def regenerate_upload_part(
+    manifest: UploadManifest,
+    present: tuple[UploadPart, ...],
+    regenerated: UploadPart,
+    *,
+    authenticated: bool,
+) -> UploadResolution | RestartedAttempt:
+    pending = finalize_upload(manifest, present)
+    if not isinstance(pending, PendingUpload):
+        return pending
+    if not authenticated:
+        return RestartedAttempt(
+            prior=pending,
+            required_new_attempt=AttemptId(f"{manifest.attempt_id}-restart"),
+        )
+    resumed = finalize_upload(manifest, (*present, regenerated))
+    if isinstance(resumed, UploadRejected):
+        return RestartedAttempt(
+            prior=pending,
+            required_new_attempt=AttemptId(f"{manifest.attempt_id}-restart"),
+        )
+    return resumed

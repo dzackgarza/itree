@@ -3,10 +3,22 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from itree.models import (
+    ArtifactDraft,
+    ArtifactProposal,
+    IssueRef,
+    RequestId,
+    SessionReleaseRequest,
+    StageModel,
+)
+from itree.stage import artifact_upload_contents, build_upload_manifest
+from itree.stage import sha256_text
+from itree.stage_writer import stage_comment_body
 from tests.stage_support import ISSUE_REF, ISSUE_NUMBER, SLUG, StageFixture
 
 
@@ -266,3 +278,225 @@ def test_edited_durable_submission_is_rejected_before_patch(tmp_path: Path) -> N
     assert "edited_record" in result.stdout
     assert fixture.patches() == []
     assert "tampered" not in fixture.issue_body()
+
+
+def test_unmanaged_body_change_after_session_entry_is_rejected(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature = _prepare_changed_plan(fixture, "A-ghost")
+    submitted = _write(fixture, "A-ghost", feature, writer=False)
+    assert submitted.returncode == 5
+    fixture.state["issue"]["body"] = fixture.issue_body().replace(
+        "Plan zero α", "Unmanaged plan edit"
+    )
+    fixture.save()
+
+    result = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+
+    assert result.returncode == 4
+    assert "external_mutation" in result.stdout
+    assert "Unmanaged plan edit" in fixture.issue_body()
+    assert "Plan recovered β" not in fixture.issue_body()
+    assert fixture.patches() == []
+
+
+def test_edit_after_final_read_before_release_cannot_create_intent_or_patch(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature = _prepare_changed_plan(fixture, "A-late-edit")
+    process = fixture.spawn(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-late-edit",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+        environment={"ITREE_STAGE_BARRIER_REQUEST": "request-A-late-edit"},
+    )
+    root = fixture.root / "writer"
+    deadline = time.monotonic() + 30
+    while not root.joinpath("checkpoint.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert root.joinpath("checkpoint.json").exists()
+    fixture.load()
+    proposal = next(
+        comment
+        for comment in fixture.state["comments"]
+        if '"request_kind":"sections"' in comment["body"]
+    )
+    proposal["body"] += "late-edit"
+    proposal["updated_at"] = "2026-11-28T02:00:00Z"
+    fixture.state["histories"][proposal["node_id"]].update(
+        {
+            "updatedAt": proposal["updated_at"],
+            "lastEditedAt": proposal["updated_at"],
+            "editor": {"login": "other"},
+            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "edit"}]},
+        }
+    )
+    fixture.save()
+    root.joinpath("release.json").write_text("release")
+
+    stdout, stderr = process.communicate(timeout=60)
+
+    assert process.returncode == 4, stdout + stderr
+    assert "edited_record" in stdout
+    assert fixture.patches() == []
+    assert not any(
+        '"status":"intended"' in comment["body"]
+        for comment in fixture.state["comments"]
+    )
+
+
+def test_edited_confirmed_receipt_is_invalidated_without_replay(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-receipt-edit")
+    first = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-receipt-edit",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert first.returncode == 0
+    fixture.load()
+    receipt = next(
+        comment
+        for comment in fixture.state["comments"]
+        if comment["body"].startswith("```itree-stage-receipt")
+        and '"status":"confirmed"' in comment["body"]
+    )
+    history = fixture.state["histories"][receipt["node_id"]]
+    receipt["updated_at"] = "2026-11-28T02:00:00Z"
+    history.update(
+        {
+            "updatedAt": receipt["updated_at"],
+            "lastEditedAt": receipt["updated_at"],
+            "editor": {"login": "other"},
+            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "late"}]},
+        }
+    )
+    fixture.save()
+
+    result = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+
+    assert result.returncode == 4
+    assert "seal_invalidated" in result.stdout
+    assert "replay" not in result.stdout
+    assert fixture.patches() == []
+
+
+def _post_model(fixture: StageFixture, fence: str, model: StageModel) -> None:
+    result = subprocess.run(
+        [
+            str(fixture.bindir / "gh"),
+            "api",
+            "-X",
+            "POST",
+            f"repos/{SLUG}/issues/{ISSUE_NUMBER}/comments",
+            "--input",
+            "-",
+        ],
+        input=json.dumps(
+            {"body": stage_comment_body(fence, model.model_dump(mode="json"))}
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+        env=fixture._environment(False, None),
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _release(
+    fixture: StageFixture, attempt: str, request_id: str, expected_id: int
+) -> None:
+    record = SessionReleaseRequest(
+        version=1,
+        request_kind="session_release",
+        issue_node_id="I_stage_node_71",
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id=request_id,
+        attempt_id=attempt,
+        session_id="session-" + attempt,
+        expected_last_scanned_comment_id=expected_id,
+    )
+    _post_model(fixture, "itree-stage-edit", record)
+
+
+def test_quiescent_confirmed_queue_releases_once(tmp_path: Path) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-release")
+    first = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-release",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert first.returncode == 0
+    fixture.load()
+    expected_id = max(comment["id"] for comment in fixture.state["comments"]) + 1
+    _release(fixture, "A-release", "release-A-release", expected_id)
+
+    result = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "session_released=session-A-release" in result.stdout
+    replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert replay.stdout.count("session_released=session-A-release:replay") == 1
+
+
+def test_pending_upload_blocks_session_release_and_any_body_effect(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-block-release")
+    first = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-block-release",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert first.returncode == 0
+    proposal = ArtifactProposal(
+        version=1,
+        request_kind="artifacts",
+        issue_node_id="I_stage_node_71",
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id="incomplete-artifact",
+        attempt_id="A-block-release",
+        session_id="session-A-block-release",
+        base_body_sha256=sha256_text(fixture.issue_body()),
+        base_body=fixture.issue_body(),
+        artifacts=(
+            ArtifactDraft(key="incomplete", kind="evidence", content="still absent\n"),
+        ),
+    )
+    manifest = build_upload_manifest(proposal, artifact_upload_contents(proposal))
+    _post_model(fixture, "itree-stage-upload-manifest", manifest)
+    fixture.load()
+    expected_id = max(comment["id"] for comment in fixture.state["comments"]) + 1
+    _release(fixture, "A-block-release", "release-A-block-release", expected_id)
+
+    result = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+
+    assert result.returncode == 5
+    assert "pending_upload" in result.stdout
+    assert "release_blocked" in result.stdout
+    assert "session_released" not in result.stdout
+    assert fixture.patches() == []

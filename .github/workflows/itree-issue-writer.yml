@@ -1,0 +1,67 @@
+name: itree issue writer
+'on':
+  issue_comment:
+    types:
+    - created
+  workflow_dispatch:
+    inputs:
+      issue_node_id:
+        description: Stable GitHub issue node ID
+        required: true
+        type: string
+      issue_number:
+        description: Issue number in this repository
+        required: true
+        type: string
+      after_final_read_barrier:
+        description: Enable only with the disposable acceptance marker
+        required: false
+        type: boolean
+        default: false
+      barrier_request_id:
+        description: Acceptance-only request paused after final read
+        required: false
+        type: string
+        default: ''
+permissions:
+  contents: read
+  issues: write
+  actions: read
+concurrency:
+  group: itree-issue-writer-${{ github.event.issue.node_id || inputs.issue_node_id
+    }}
+  cancel-in-progress: false
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out the executing workflow and writer
+      uses: actions/checkout@v4
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: latest
+        enable-cache: true
+    - name: Install the locked writer
+      run: uv sync --locked --no-dev
+    - name: Resolve the test-only barrier
+      if: inputs.after_final_read_barrier && hashFiles('.itree-stage-acceptance.json')
+        != ''
+      shell: bash
+      run: 'printf ''%s\n'' ''ITREE_STAGE_FIXTURE_ROOT=/tmp/opencode/itree-stage-writer''
+        >> "$GITHUB_ENV"
+
+        printf ''%s\n'' "ITREE_STAGE_BARRIER_REQUEST=${{ inputs.barrier_request_id
+        }}" >> "$GITHUB_ENV"'
+    - name: Drain durable issue proposals
+      shell: bash
+      run: 'ISSUE_NODE_ID="${{ github.event.issue.node_id || inputs.issue_node_id
+        }}"
+
+        ISSUE_NUMBER="${{ github.event.issue.number || inputs.issue_number }}"
+
+        ISSUE_REF="${{ github.repository }}#${ISSUE_NUMBER}"
+
+        export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+        uv run --locked itree stage drain "${ISSUE_REF}" --expected-node "${ISSUE_NODE_ID}"'

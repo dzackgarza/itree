@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from itree.models import (
@@ -75,7 +78,11 @@ def _writer_seal() -> WriterSeal:
         run_url=f"https://github.com/{SLUG}/actions/runs/101",
         job_url=f"https://github.com/{SLUG}/actions/runs/101/job/201",
         actions_installation_identity="github-actions",
-        effective_token_permissions={"contents": "read", "issues": "write"},
+        effective_token_permissions={
+            "contents": "read",
+            "issues": "write",
+            "actions": "read",
+        },
     )
 
 
@@ -89,7 +96,11 @@ def _authority() -> WriterAuthorityEvidence:
         workflow_path=seal.workflow_path,
         workflow_blob=seal.workflow_blob,
         workflow_sha256=seal.workflow_sha256,
-        workflow_permissions={"contents": "read", "issues": "write"},
+        workflow_permissions={
+            "contents": "read",
+            "issues": "write",
+            "actions": "read",
+        },
         run_id=seal.run_id,
         run_attempt=seal.run_attempt,
         job_id=seal.job_id,
@@ -236,6 +247,31 @@ def test_receipt_payload_excludes_native_self_transport_identity() -> None:
     )
     assert envelope.native_issue_comment.id == 101
     assert envelope.native_issue_comment.node_id == "IC_proposal"
+
+
+def test_actions_workflow_serializes_nodes_with_least_required_permissions() -> None:
+    workflow = yaml.safe_load(
+        Path(".github/workflows/itree-issue-writer.yml").read_text()
+    )
+
+    assert workflow["permissions"] == {
+        "contents": "read",
+        "issues": "write",
+        "actions": "read",
+    }
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    assert (
+        "github.event.issue.node_id || inputs.issue_node_id"
+        in workflow["concurrency"]["group"]
+    )
+    assert (
+        workflow["on"]["workflow_dispatch"]["inputs"]["after_final_read_barrier"][
+            "default"
+        ]
+        is False
+    )
+    jobs = workflow["jobs"]
+    assert "uv run --locked itree stage drain" in jobs["write"]["steps"][-1]["run"]
 
 
 def test_external_history_unavailable_is_not_a_writer_failure() -> None:

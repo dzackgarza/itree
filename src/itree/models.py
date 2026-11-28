@@ -1328,6 +1328,7 @@ class WriterSeal(StageModel):
         assert self.effective_token_permissions == {
             "contents": "read",
             "issues": "write",
+            "actions": "read",
         }, self.effective_token_permissions
         return self
 
@@ -1352,6 +1353,20 @@ class RequestIdentity(StageModel):
     issue_ref: IssueRef
     request_id: RequestId
     attempt_id: AttemptId
+
+
+ArtifactKind = Literal[
+    "research",
+    "data-model",
+    "contract",
+    "quickstart",
+    "clarification",
+    "finding",
+    "evidence",
+    "checkpoint",
+    "plan-history",
+    "task-history",
+]
 
 
 class ArtifactIndexEntry(StageModel):
@@ -1535,6 +1550,8 @@ class UploadManifest(StageModel):
     issue_ref: IssueRef
     request_id: RequestId
     attempt_id: AttemptId
+    session_id: SessionId
+    base_body_sha256: Sha256 | None = None
     request_kind: Literal[
         "sections",
         "task_field",
@@ -1590,9 +1607,43 @@ class FinalizedProposal(StageModel):
     manifest: UploadManifest
     parts: tuple[UploadPart, ...] = Field(min_length=1)
     logical_payload_sha256: Sha256
+    proposal: JsonValue
 
 
-UploadResolution = PendingUpload | FinalizedProposal
+UploadRejectionReason = Literal[
+    "duplicate_part",
+    "unexpected_part",
+    "wrong_order",
+    "digest_mismatch",
+    "manifest_mismatch",
+    "unauthenticated_regeneration",
+]
+
+
+class UploadRejected(StageModel):
+    kind: Literal["upload_rejected"] = "upload_rejected"
+    reason: UploadRejectionReason
+
+
+class UploadContent(StageModel):
+    role: str = Field(min_length=1)
+    ordinal: int = Field(ge=0)
+    payload: str
+
+
+class RestartedAttempt(StageModel):
+    kind: Literal["restarted_attempt"] = "restarted_attempt"
+    prior: PendingUpload
+    required_new_attempt: AttemptId
+
+
+class AdoptedNewAttempt(StageModel):
+    kind: Literal["adopted_new_attempt"] = "adopted_new_attempt"
+    prior: PendingUpload
+    new_attempt: AttemptId
+
+
+UploadResolution = PendingUpload | FinalizedProposal | UploadRejected
 
 
 class AdmissionRejected(StageModel):
@@ -1650,6 +1701,7 @@ class SectionEditProposal(StageModel):
     base_body_sha256: Sha256
     base_body: str
     changes: tuple[SectionReplacement, ...] = Field(min_length=1)
+    artifacts: tuple[ArtifactDraft, ...] = ()
 
 
 class SessionAdmissionRequest(StageModel):
@@ -1690,12 +1742,6 @@ class LegacyIntakeProposal(StageModel):
     tasks: str
 
 
-StageProposal = Annotated[
-    SectionEditProposal | LegacyIntakeProposal,
-    Field(discriminator="request_kind"),
-]
-
-
 class TaskFieldProposal(StageModel):
     version: Literal[1]
     request_kind: Literal["task_field"]
@@ -1705,11 +1751,18 @@ class TaskFieldProposal(StageModel):
     attempt_id: AttemptId
     session_id: SessionId
     base_body_sha256: Sha256
+    base_body: str
     task_id: TaskId
     field: TaskField
     full_task_base_sha256: Sha256
     base_value: str
     proposed_value: str
+
+
+StageProposal = Annotated[
+    SectionEditProposal | LegacyIntakeProposal | TaskFieldProposal,
+    Field(discriminator="request_kind"),
+]
 
 
 class ArtifactDraft(StageModel):
@@ -1787,6 +1840,19 @@ class StageHttpIndeterminate(StageModel):
 
 
 StageHttpOutcome = StageHttpApplied | StageHttpRejected | StageHttpIndeterminate
+
+
+class ArtifactProposal(StageModel):
+    version: Literal[1]
+    request_kind: Literal["artifacts"]
+    issue_node_id: IssueNodeId
+    issue_ref: IssueRef
+    request_id: RequestId
+    attempt_id: AttemptId
+    session_id: SessionId
+    base_body_sha256: Sha256
+    base_body: str
+    artifacts: tuple[ArtifactDraft, ...] = Field(min_length=1)
 
 
 class ArtifactPayload(StageModel):
