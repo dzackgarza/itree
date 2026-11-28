@@ -382,7 +382,10 @@ def _binding_for(
 
 
 def _job_authority(
-    api: GithubApi, seal: WriterSeal, binding: OperationLogBinding
+    api: GithubApi,
+    seal: WriterSeal,
+    binding: OperationLogBinding,
+    native_id: int | None = None,
 ) -> WriterAuthorityEvidence:
     job = api.get_actions_job(seal.job_id)
     content = api.get_repository_content(seal.workflow_path, job.head_sha)
@@ -394,30 +397,43 @@ def _job_authority(
     workflow = base64.b64decode(content.content)
     permissions = yaml.safe_load(workflow)["permissions"]
     assert isinstance(permissions, dict), permissions
-    step = next(
+    binding_steps = tuple(
         step
         for step in job.steps
         if step.name == "Record operation bindings"
         and step.status == "completed"
         and step.conclusion == "success"
     )
-    log_text = api.get_actions_job_step_log(seal.job_id, step.number)
-    for line in log_text.splitlines():
-        if '"operation_log_binding"' not in line:
-            continue
-        start = line.find("{")
-        assert start >= 0, line
-        try:
-            candidate = OperationLogBinding.model_validate_json(
-                line[start:], strict=True
-            )
-        except ValidationError:
-            continue
-        if candidate == binding:
-            matched = True
-            break
+    if binding_steps:
+        assert len(binding_steps) == 1, binding_steps
+        step = binding_steps[0]
+        log_text = api.get_actions_job_step_log(seal.job_id, step.number)
+        matched = False
+        for line in log_text.splitlines():
+            if '"operation_log_binding"' not in line:
+                continue
+            start = line.find("{")
+            assert start >= 0, line
+            try:
+                candidate = OperationLogBinding.model_validate_json(
+                    line[start:], strict=True
+                )
+            except ValidationError:
+                continue
+            if candidate == binding:
+                matched = True
+                break
     else:
         matched = False
+        if native_id is not None:
+            log_text = api.get_actions_job_log(seal.job_id)
+            markers = (
+                f"confirmed={binding.request_id}:{native_id}:",
+                f"rejected={binding.request_id}:{native_id}:",
+            )
+            matched = any(
+                marker in line for line in log_text.splitlines() for marker in markers
+            )
     return WriterAuthorityEvidence(
         repository=api.repo_ref.slug,
         default_branch=job.head_branch,
@@ -642,7 +658,8 @@ def _regenerated_authorized(
         "itree-stage-regenerated-part", _model_json(part)
     )
     return validate_writer_seal(
-        part.writer_seal, _job_authority(api, part.writer_seal, _binding_for(part))
+        part.writer_seal,
+        _job_authority(api, part.writer_seal, _binding_for(part), record.native.id),
     )
 
 
@@ -955,7 +972,7 @@ def _terminal(
         assert history.created_at == history.updated_at and history.is_zero_edit()
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
-        evidence = _job_authority(api, seal, _binding_for(payload))
+        evidence = _job_authority(api, seal, _binding_for(payload), current.id)
     except (
         GithubApiError,
         SealHistoryUnavailable,
@@ -1021,7 +1038,9 @@ def _artifact_comment(
         assert history.created_at == history.updated_at and history.is_zero_edit()
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
-        evidence = _job_authority(api, payload.writer_seal, _binding_for(payload))
+        evidence = _job_authority(
+            api, payload.writer_seal, _binding_for(payload), current.id
+        )
         checked = validate_writer_seal(payload.writer_seal, evidence)
         assert checked == payload.writer_seal
         assert current.body == stage_comment_body(
@@ -1093,7 +1112,9 @@ def _publish_artifacts(
             history = _raw_history(api, native)
             assert history is not None
             assert history.created_at == history.updated_at and history.is_zero_edit()
-            evidence = _job_authority(api, payload.writer_seal, _binding_for(payload))
+            evidence = _job_authority(
+                api, payload.writer_seal, _binding_for(payload), native.id
+            )
             assert (
                 validate_writer_seal(payload.writer_seal, evidence)
                 == payload.writer_seal
@@ -1206,7 +1227,9 @@ def _receipt_is_current(
         return (
             validate_writer_seal(
                 payload.writer_seal,
-                _job_authority(api, payload.writer_seal, _binding_for(payload)),
+                _job_authority(
+                    api, payload.writer_seal, _binding_for(payload), record.native.id
+                ),
             )
             == payload.writer_seal
         )

@@ -1427,6 +1427,16 @@ class GithubApi(BaseModel):
         proc = self._exec("GET", path)
         return ActionsJobMetadata.model_validate_json(proc.stdout)
 
+    def get_actions_job_log(self, job_id: int) -> str:
+        assert job_id > 0, job_id
+        path = f"repos/{self.owner}/{self.repo}/actions/jobs/{job_id}/logs"
+        proc = self._run_api_command(
+            ["gh", "api", "--allow-escape-sequences", "-X", "GET", path],
+            path,
+            timeout=120,
+        )
+        return proc.stdout
+
     def get_actions_job_step_log(self, job_id: int, step_number: int) -> str:
         assert job_id > 0 and step_number > 0, (job_id, step_number)
         path = f"repos/{self.owner}/{self.repo}/actions/jobs/{job_id}/steps/{step_number}/logs"

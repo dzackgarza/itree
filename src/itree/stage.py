@@ -1076,7 +1076,9 @@ def _materialize_supporting_artifacts(
         if isinstance(
             validate_writer_seal(
                 payload.writer_seal,
-                _job_authority(api, payload.writer_seal, _binding_for(payload)),
+                _job_authority(
+                    api, payload.writer_seal, _binding_for(payload), native.id
+                ),
             ),
             WriterSealInvalidContext,
         ):
