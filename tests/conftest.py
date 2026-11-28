@@ -18,14 +18,26 @@ from itree.models import FixtureState
 
 
 def _worker(
-    subject: pytest.Config | pytest.FixtureRequest | pytest.Session | pytest.Item,
+    subject: pytest.Config
+    | pytest.FixtureRequest
+    | pytest.Session
+    | pytest.Item
+    | pytest.TestReport,
 ) -> bool:
+    if isinstance(subject, pytest.TestReport):
+        return os.environ.get("PYTEST_XDIST_WORKER") is not None
     if isinstance(subject, pytest.Config):
         return hasattr(subject, "workerinput")
     return hasattr(subject.config, "workerinput")
 
 
-def _controller_root(config: pytest.Config) -> Path:
+def _controller_root(
+    _config: pytest.Config
+    | pytest.FixtureRequest
+    | pytest.Session
+    | pytest.Item
+    | pytest.TestReport,
+) -> Path:
     return Path(os.environ["ITREE_TEST_CONTROLLER_ROOT"])
 
 
@@ -121,17 +133,17 @@ def _stamp(root: Path, name: str, value: str) -> None:
 def _finished(report: pytest.TestReport) -> None:
     if report.when != "call":
         return
-    root: Path = _controller_root(report.node.config)
-    _emit(root, "workers", report.node.workerinput["workerid"])
-    category = "serial" if report.node.get_closest_marker("serial") else "readonly"
-    _emit(root, f"done-{category}", report.node.nodeid)
-    _emit(root, f"outcome-{category}-{report.outcome}", report.node.nodeid)
+    root = _controller_root(report)
+    _emit(root, "workers", os.environ["PYTEST_XDIST_WORKER"])
+    category = "serial" if "serial" in report.keywords else "readonly"
+    _emit(root, f"done-{category}", report.nodeid)
+    _emit(root, f"outcome-{category}-{report.outcome}", report.nodeid)
     if report.outcome != "passed":
         _emit(root, "failures", report.node.nodeid)
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    if _worker(report.config):
+    if _worker(report):
         _finished(report)
 
 
