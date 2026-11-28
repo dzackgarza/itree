@@ -107,28 +107,29 @@ def test_regeneration_requires_exact_digest_and_never_confirms_a_replacement() -
     absent = parts[-1]
     partial = parts[:-1]
 
-    unauthenticated = regenerate_upload_part(
-        manifest, partial, absent, authenticated=False
-    )
-    assert isinstance(unauthenticated, RestartedAttempt)
-    assert unauthenticated.prior.missing_parts[0].role == absent.role
+    unavailable = regenerate_upload_part(manifest, partial, lambda selected: ())
+    assert isinstance(unavailable, RestartedAttempt)
+    assert unavailable.prior.missing_parts[0].role == absent.role
 
-    substituted = make_upload_parts(
-        manifest,
-        (
-            UploadContent(
-                role=absent.role,
-                ordinal=absent.ordinal,
-                payload=absent.payload + "different",
-            ),
-        ),
-    )[0]
+    substituted = UploadContent(
+        role=absent.role,
+        ordinal=absent.ordinal,
+        payload=absent.payload + "different",
+    )
     rejected = regenerate_upload_part(
-        manifest, partial, substituted, authenticated=True
+        manifest, partial, lambda selected: (substituted,)
     )
     assert isinstance(rejected, RestartedAttempt)
 
-    exact = regenerate_upload_part(manifest, partial, absent, authenticated=True)
+    exact = regenerate_upload_part(
+        manifest,
+        partial,
+        lambda selected: (
+            UploadContent(
+                role=absent.role, ordinal=absent.ordinal, payload=absent.payload
+            ),
+        ),
+    )
     assert isinstance(exact, FinalizedProposal)
 
 
@@ -654,7 +655,9 @@ def test_rejected_only_upload_queue_replays_and_releases(tmp_path: Path) -> None
 def test_live_issue_reconstruction_matches_manifest_without_scratch(
     tmp_path: Path,
 ) -> None:
-    fixture = StageFixture(tmp_path / "fixture")
+    fixture = StageFixture(
+        tmp_path / "fixture", managed_body(plan="Plan finalized β\n")
+    )
     feature, _ = fixture.materialize("A-regenerate")
     admitted = fixture.run(
         "stage",
@@ -670,24 +673,33 @@ def test_live_issue_reconstruction_matches_manifest_without_scratch(
     proposal = _section_proposal().model_copy(
         update={"attempt_id": "A-regenerate", "session_id": "session-A-regenerate"}
     )
+    live_after_manifest = fixture.issue_body()
+    replacement = proposal.changes[0]
+    current_plan = next(
+        section.text
+        for section in _layout(live_after_manifest).sections
+        if section.name == SectionName.plan
+    )
+    proposal = proposal.model_copy(
+        update={
+            "base_body": live_after_manifest,
+            "base_body_sha256": sha256_text(live_after_manifest),
+            "changes": (
+                replacement.model_copy(
+                    update={
+                        "base_text": current_plan,
+                        "base_sha256": sha256_text(current_plan),
+                    }
+                ),
+            ),
+        }
+    )
     contents = section_upload_contents(proposal)
     manifest = build_upload_manifest(proposal, contents)
     parts = make_upload_parts(manifest, contents)
     _post_record(fixture, "itree-stage-upload-manifest", manifest)
     for part in parts[:-1]:
         _post_record(fixture, "itree-stage-upload-part", part)
-    pending = fixture.run(
-        "stage", "resume", ISSUE_REF, "--attempt", "A-regenerate", writer=True
-    )
-    assert pending.returncode == 5
-    assert "pending_upload" in pending.stdout
-    assert fixture.patches() == []
-    fixture.load()
-    fixture.state["issue"]["body"] = fixture.issue_body().replace(
-        "Plan zero α", "Plan finalized β"
-    )
-    fixture.save()
-
     recovered = fixture.run(
         "stage", "resume", ISSUE_REF, "--attempt", "A-regenerate", writer=True
     )
@@ -724,12 +736,6 @@ def test_live_issue_mismatch_requires_a_new_unconfirmed_attempt(tmp_path: Path) 
     _post_record(fixture, "itree-stage-upload-manifest", manifest)
     for part in parts[:-1]:
         _post_record(fixture, "itree-stage-upload-part", part)
-    pending = fixture.run(
-        "stage", "resume", ISSUE_REF, "--attempt", "A-no-regenerate", writer=True
-    )
-    assert pending.returncode == 5
-    assert "pending_upload" in pending.stdout
-
     blocked = fixture.run(
         "stage", "resume", ISSUE_REF, "--attempt", "A-no-regenerate", writer=True
     )

@@ -12,6 +12,7 @@ from itree.models import (
     ArtifactDraft,
     ArtifactProposal,
     IssueRef,
+    ReceiptPayload,
     RequestId,
     SessionReleaseRequest,
     StageModel,
@@ -271,7 +272,11 @@ def test_edited_durable_submission_is_rejected_before_patch(tmp_path: Path) -> N
             "updatedAt": proposal["updated_at"],
             "lastEditedAt": proposal["updated_at"],
             "editor": {"login": "other"},
-            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "edit-one"}]},
+            "userContentEdits": {
+                "totalCount": 1,
+                "nodes": [{"id": "edit-one"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
     )
     fixture.save()
@@ -337,7 +342,11 @@ def test_edit_after_final_read_before_release_cannot_create_intent_or_patch(
             "updatedAt": proposal["updated_at"],
             "lastEditedAt": proposal["updated_at"],
             "editor": {"login": "other"},
-            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "edit"}]},
+            "userContentEdits": {
+                "totalCount": 1,
+                "nodes": [{"id": "edit"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
     )
     fixture.save()
@@ -382,7 +391,11 @@ def test_edited_confirmed_receipt_is_invalidated_without_replay(tmp_path: Path) 
             "updatedAt": receipt["updated_at"],
             "lastEditedAt": receipt["updated_at"],
             "editor": {"login": "other"},
-            "userContentEdits": {"totalCount": 1, "nodes": [{"id": "late"}]},
+            "userContentEdits": {
+                "totalCount": 1,
+                "nodes": [{"id": "late"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
     )
     fixture.save()
@@ -456,6 +469,26 @@ def test_quiescent_confirmed_queue_releases_once(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "session_released=session-A-release" in result.stdout
+    fixture.load()
+    native = next(
+        comment
+        for comment in reversed(fixture.state["comments"])
+        if comment["body"].startswith("```itree-stage-receipt\n")
+        and '"status":"session_released"' in comment["body"]
+    )
+    receipt = ReceiptPayload.model_validate_json(
+        native["body"].splitlines()[1], strict=True
+    )
+    assert receipt.request_id == "release-A-release"
+    assert receipt.attempt_id == "A-release"
+    assert receipt.issue_node_id == "I_stage_node_71"
+    assert receipt.writer_seal.run_id == 101
+    assert receipt.writer_seal.job_id == 201
+    assert receipt.content.live_body_sha256 == sha256_text(fixture.issue_body())
+    assert any(
+        f"repos/{SLUG}/issues/comments/{native['id']}" in call["argv"]
+        for call in fixture.calls()
+    )
     replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
     assert replay.returncode == 0, replay.stdout + replay.stderr
     assert replay.stdout.count("session_released=session-A-release:replay") == 1
@@ -582,8 +615,10 @@ def test_direct_proposal_cannot_bypass_older_pending_manifest(tmp_path: Path) ->
     _post_model(fixture, "itree-stage-upload-manifest", manifest)
     _post_model(fixture, "itree-stage-upload-part", parts[0])
     later_feature, _ = fixture.materialize("A-order")
-    later_feature.joinpath("plan.md").write_text(
-        'Later direct plan\n```itree-contract\nkind = "audit"\nevidence = "narrows"\n```\n'
+    later_feature.joinpath("tasks.md").write_text(
+        later_feature.joinpath("tasks.md")
+        .read_text()
+        .replace("- [ ] T003", "- [x] T003")
     )
 
     blocked = fixture.run(
@@ -607,7 +642,7 @@ def test_direct_proposal_cannot_bypass_older_pending_manifest(tmp_path: Path) ->
     assert len(fixture.patches()) == 2
     assert "older-research" in fixture.issue_body()
     assert "older-evidence" in fixture.issue_body()
-    assert "Later direct plan" in fixture.issue_body()
+    assert "- [x] T003" in fixture.issue_body()
     replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
     assert replay.returncode == 0
     assert len(fixture.patches()) == 2

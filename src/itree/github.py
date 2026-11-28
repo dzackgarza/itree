@@ -1427,6 +1427,13 @@ class GithubApi(BaseModel):
         proc = self._exec("GET", path)
         return ActionsJobMetadata.model_validate_json(proc.stdout)
 
+    def get_actions_job_log(self, job_id: int) -> str:
+        assert job_id > 0, job_id
+        proc = self._exec(
+            "GET", f"repos/{self.owner}/{self.repo}/actions/jobs/{job_id}/logs"
+        )
+        return proc.stdout
+
     def get_actions_run_job(self, run_id: int, job_node_id: str) -> ActionsJobMetadata:
         assert run_id > 0 and job_node_id, (run_id, job_node_id)
         path = f"repos/{self.owner}/{self.repo}/actions/runs/{run_id}/jobs?per_page=100"
@@ -1438,9 +1445,63 @@ class GithubApi(BaseModel):
         return next(job for job in jobs if job.node_id == job_node_id)
 
     def get_comment_history(self, native: IssueComment) -> CommentHistory:
+        cursor: str | None = None
+        total_count: int | None = None
+        exhausted = False
+        while True:
+            query = (
+                "query SubmissionMetadata($id: ID!, $after: String) {"
+                "node(id: $id) { ... on IssueComment {"
+                "userContentEdits(first: 100, after: $after) {"
+                "totalCount pageInfo { hasNextPage endCursor }"
+                "} } }"
+            )
+            command = [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                f"query={query}",
+                "-F",
+                f"id={native.node_id}",
+            ]
+            if cursor is not None:
+                command.extend(["-F", f"after={cursor}"])
+            result = self._run_api_command(command, "graphql", timeout=120)
+            documents = _graphql_pages(result.stdout)
+            if len(documents) != 1:
+                raise SealHistoryUnavailable(native.node_id)
+            document = documents[0]
+            data = _graphql_data(document, native.node_id)
+            if data["node"] is None:
+                raise SealHistoryUnavailable(native.node_id)
+            edits = _object(
+                _object(data["node"], "comment")["userContentEdits"], "edit history"
+            )
+            observed = _integer(edits["totalCount"], "edit totalCount")
+            if total_count is not None and total_count != observed:
+                raise SealHistoryUnavailable(native.node_id)
+            total_count = observed
+            page_info = _object(edits["pageInfo"], "edit history page info")
+            has_next = page_info["hasNextPage"]
+            assert isinstance(has_next, bool), has_next
+            if not has_next:
+                exhausted = True
+                break
+            next_cursor = page_info["endCursor"]
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor == cursor
+            ):
+                raise SealHistoryUnavailable(native.node_id)
+            cursor = next_cursor
+        assert total_count is not None and exhausted
         return CommentHistory(
             created_at=native.created_at,
             updated_at=native.updated_at,
+            edit_total_count=total_count,
+            history_exhausted=exhausted,
         )
 
     @staticmethod

@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -1008,6 +1009,7 @@ def _materialize_supporting_artifacts(
     from .stage_writer import (
         _decode_stage_comment,
         _job_authority,
+        _binding_for,
         _raw_history,
         validate_writer_seal,
     )
@@ -1057,6 +1059,7 @@ def _materialize_supporting_artifacts(
             native.node_id == entry.comment_node_id
             and native.html_url == expected_url == entry.url
             and history.created_at == history.updated_at
+            and history.is_zero_edit()
             and payload.key == entry.key
             and payload.kind == entry.kind
             and payload.attempt_id == entry.attempt_id
@@ -1072,7 +1075,8 @@ def _materialize_supporting_artifacts(
             )
         if isinstance(
             validate_writer_seal(
-                payload.writer_seal, _job_authority(api, payload.writer_seal)
+                payload.writer_seal,
+                _job_authority(api, payload.writer_seal, _binding_for(payload)),
             ),
             WriterSealInvalidContext,
         ):
@@ -1699,25 +1703,34 @@ def finalize_upload(
     )
 
 
+LivePartReconstructor = Callable[[UploadManifest], tuple[UploadContent, ...]]
+
+
 def regenerate_upload_part(
     manifest: UploadManifest,
     present: tuple[UploadPart, ...],
-    regenerated: UploadPart,
-    *,
-    authenticated: bool,
+    reconstruct: LivePartReconstructor,
 ) -> UploadResolution | RestartedAttempt:
     pending = finalize_upload(manifest, present)
     if not isinstance(pending, PendingUpload):
         return pending
-    if not authenticated:
+    reconstructed = reconstruct(manifest)
+    if not reconstructed:
         return RestartedAttempt(
             prior=pending,
-            required_new_attempt=AttemptId(f"{manifest.attempt_id}-restart"),
+            required_new_attempt=AttemptId(f"{manifest.attempt_id}-new"),
         )
-    resumed = finalize_upload(manifest, (*present, regenerated))
+    expected = {missing.role for missing in pending.missing_parts}
+    if {part.role for part in reconstructed} != expected:
+        return RestartedAttempt(
+            prior=pending,
+            required_new_attempt=AttemptId(f"{manifest.attempt_id}-new"),
+        )
+    regenerated = make_upload_parts(manifest, reconstructed)
+    resumed = finalize_upload(manifest, present + regenerated)
     if isinstance(resumed, UploadRejected):
         return RestartedAttempt(
             prior=pending,
-            required_new_attempt=AttemptId(f"{manifest.attempt_id}-restart"),
+            required_new_attempt=AttemptId(f"{manifest.attempt_id}-new"),
         )
     return resumed

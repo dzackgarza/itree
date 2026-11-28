@@ -98,6 +98,21 @@ def example_state(body: str) -> dict[str, JsonValue]:
             "workflow_blob": COMMIT_SHA,
             "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
         },
+        "job_logs": [
+            json.dumps(
+                {
+                    "kind": "operation_log_binding",
+                    "operation_id": f"drain-{ISSUE_NODE_ID}",
+                    "issue_node_id": ISSUE_NODE_ID,
+                    "request_id": "drain",
+                    "attempt_id": "drain",
+                    "revision": COMMIT_SHA,
+                    "workflow_path": ".github/workflows/itree-issue-writer.yml",
+                    "workflow_sha256": hashlib.sha256(workflow).hexdigest(),
+                },
+                sort_keys=True,
+            )
+        ],
         "job": {
             "id": 201,
             "node_id": "J_writer",

@@ -33,6 +33,7 @@ from .models import (
     MergeConflictDetail,
     OperationFailureDetail,
     OperationId,
+    OperationLogBinding,
     ReceiptContent,
     ReceiptPayload,
     ReceiptRejectionReason,
@@ -54,11 +55,13 @@ from .models import (
     SubmissionSeal,
     TaskDocument,
     TaskFieldProposal,
+    UploadContent,
     UploadManifest,
     UploadPart,
     UploadRejected,
     PendingUpload,
     FinalizedProposal,
+    RestartedAttempt,
     WriterSeal,
     WriterSealInvalidContext,
 )
@@ -76,6 +79,7 @@ from .stage import (
     TaskWireFailure,
     cleanup_stage_scratch,
     collect_artifact_drafts,
+    regenerate_upload_part,
     merge_task_documents,
     merge_stage_values,
     parse_task_document,
@@ -208,6 +212,7 @@ def validate_submission_seal(
         history.created_at != native.created_at
         or history.updated_at != native.updated_at
         or history.created_at != history.updated_at
+        or not history.is_zero_edit()
     ):
         return _external_detail(native, "edited_record")
     try:
@@ -341,7 +346,38 @@ def _writer_runtime_seal(api: GithubApi) -> WriterSeal:
     )
 
 
-def _job_authority(api: GithubApi, seal: WriterSeal) -> WriterAuthorityEvidence:
+def _drain_binding(issue_node_id: IssueNodeId, seal: WriterSeal) -> OperationLogBinding:
+    return OperationLogBinding(
+        operation_id=OperationId(f"drain-{issue_node_id}"),
+        issue_node_id=issue_node_id,
+        request_id=RequestId("drain"),
+        attempt_id=AttemptId("drain"),
+        revision=seal.default_head_sha,
+        workflow_path=seal.workflow_path,
+        workflow_sha256=seal.workflow_sha256,
+    )
+
+
+def _binding_for(payload: ReceiptPayload | ArtifactPayload) -> OperationLogBinding:
+    operation = (
+        payload.operation_id or payload.request_id
+        if isinstance(payload, ReceiptPayload)
+        else payload.request_id
+    )
+    return OperationLogBinding(
+        operation_id=OperationId(operation),
+        issue_node_id=payload.issue_node_id,
+        request_id=payload.request_id,
+        attempt_id=payload.attempt_id,
+        revision=payload.writer_seal.default_head_sha,
+        workflow_path=payload.writer_seal.workflow_path,
+        workflow_sha256=payload.writer_seal.workflow_sha256,
+    )
+
+
+def _job_authority(
+    api: GithubApi, seal: WriterSeal, binding: OperationLogBinding
+) -> WriterAuthorityEvidence:
     job = api.get_actions_job(seal.job_id)
     content = api.get_repository_content(seal.workflow_path, job.head_sha)
     assert isinstance(content, GithubContentFile), content
@@ -352,6 +388,17 @@ def _job_authority(api: GithubApi, seal: WriterSeal) -> WriterAuthorityEvidence:
     workflow = base64.b64decode(content.content)
     permissions = yaml.safe_load(workflow)["permissions"]
     assert isinstance(permissions, dict), permissions
+    log_text = api.get_actions_job_log(seal.job_id)
+    for line in log_text.splitlines():
+        try:
+            candidate = json.loads(line)
+            if binding.model_dump(mode="json") == candidate:
+                matched = True
+                break
+        except json.JSONDecodeError, TypeError:
+            continue
+    else:
+        matched = False
     return WriterAuthorityEvidence(
         repository=api.repo_ref.slug,
         default_branch=job.head_branch,
@@ -371,7 +418,7 @@ def _job_authority(api: GithubApi, seal: WriterSeal) -> WriterAuthorityEvidence:
         run_url=job.run_url,
         job_url=job.html_url,
         actions_installation_identity="github-actions",
-        operation_log_matches=True,
+        operation_log_matches=matched,
         claimed_human_role=None,
     )
 
@@ -569,6 +616,7 @@ class UploadDrain(StageModel):
     pending: tuple[str, ...]
     failed: tuple[str, ...]
     rejections: tuple[ReceiptPayload, ...]
+    pending_native_id: int | None = None
 
 
 def _upload_models(records: tuple[DurableRecord, ...]) -> tuple[UploadManifest, ...]:
@@ -622,12 +670,9 @@ def _upload_proposals(
     pending: list[str] = []
     failed: list[str] = []
     rejections: list[ReceiptPayload] = []
+    pending_native_id: int | None = None
     manifests = _upload_models(records)
     for manifest in manifests:
-        session = sessions.get(manifest.session_id)
-        if session is None:
-            pending.append(f"{manifest.request_id}:editor_not_enrolled")
-            continue
         native = next(
             record.native
             for record in records
@@ -635,6 +680,11 @@ def _upload_proposals(
             and isinstance(record.payload, dict)
             and record.payload.get("request_id") == manifest.request_id
         )
+        session = sessions.get(manifest.session_id)
+        if session is None:
+            pending.append(f"{manifest.request_id}:editor_not_enrolled")
+            pending_native_id = native.id
+            break
         approved = _external_authorized(
             api, native, manifest, live, session.enrolled_actors, False
         )
@@ -688,6 +738,7 @@ def _upload_proposals(
                 f"{part.role}:{part.ordinal}" for part in state.missing_parts
             )
             pending.append(f"{manifest.request_id}:pending_upload:{missing}")
+            pending_native_id = native.id
             break
         if isinstance(state, UploadRejected):
             failed.append(f"{manifest.request_id}:{state.reason}")
@@ -725,11 +776,14 @@ def _upload_proposals(
             continue
         if record.payload.get("manifest_request_id") not in known_manifest_requests:
             pending.append("unknown:manifest_required")
+            if pending_native_id is None:
+                pending_native_id = record.native.id
     return UploadDrain(
         proposals=tuple(proposals),
         pending=tuple(pending),
         failed=tuple(failed),
         rejections=tuple(rejections),
+        pending_native_id=pending_native_id,
     )
 
 
@@ -832,12 +886,12 @@ def _terminal(
         current = api.get_comment(posted.id)
         history = _raw_history(api, current)
         assert history is not None
-        assert history.created_at == history.updated_at
-        assert history.created_at == history.updated_at
-        assert history.created_at == history.updated_at
+        assert history.created_at == history.updated_at and history.is_zero_edit()
+        assert history.created_at == history.updated_at and history.is_zero_edit()
+        assert history.created_at == history.updated_at and history.is_zero_edit()
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
-        evidence = _job_authority(api, seal)
+        evidence = _job_authority(api, seal, _binding_for(payload))
     except (
         GithubApiError,
         SealHistoryUnavailable,
@@ -898,12 +952,12 @@ def _artifact_comment(
         current = api.get_comment(posted.id)
         history = _raw_history(api, current)
         assert history is not None
-        assert history.created_at == history.updated_at
-        assert history.created_at == history.updated_at
-        assert history.created_at == history.updated_at
+        assert history.created_at == history.updated_at and history.is_zero_edit()
+        assert history.created_at == history.updated_at and history.is_zero_edit()
+        assert history.created_at == history.updated_at and history.is_zero_edit()
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
-        evidence = _job_authority(api, payload.writer_seal)
+        evidence = _job_authority(api, payload.writer_seal, _binding_for(payload))
         checked = validate_writer_seal(payload.writer_seal, evidence)
         assert checked == payload.writer_seal
         assert current.body == stage_comment_body(
@@ -974,8 +1028,8 @@ def _publish_artifacts(
             native = existing.native
             history = _raw_history(api, native)
             assert history is not None
-            assert history.created_at == history.updated_at
-            evidence = _job_authority(api, payload.writer_seal)
+            assert history.created_at == history.updated_at and history.is_zero_edit()
+            evidence = _job_authority(api, payload.writer_seal, _binding_for(payload))
             assert (
                 validate_writer_seal(payload.writer_seal, evidence)
                 == payload.writer_seal
@@ -992,6 +1046,36 @@ def _publish_artifacts(
             )
         )
     return tuple(published)
+
+
+def _with_current_plan_index(plan_text: str, proposed_plan: str) -> str:
+    entries = _current_artifact_index(plan_text)
+    if not entries:
+        return proposed_plan
+    index_body = stage_comment_body(
+        "itree-stage-artifact-index",
+        [entry.model_dump(mode="json") for entry in entries],
+    )
+    matched = re.search(r"```itree-stage-artifact-index\n[^\n]+\n```\n", proposed_plan)
+    if matched is None:
+        return proposed_plan + index_body
+    return (
+        proposed_plan[: matched.start()] + index_body + proposed_plan[matched.end() :]
+    )
+
+
+def _with_current_plan_replacement(
+    current: ManagedIssueLayout, replacement: SectionReplacement
+) -> SectionReplacement:
+    proposed_text = _with_current_plan_index(
+        _section(current, SectionName.plan), replacement.proposed_text
+    )
+    return replacement.model_copy(
+        update={
+            "proposed_text": proposed_text,
+            "proposed_sha256": sha256_text(proposed_text),
+        }
+    )
 
 
 def _candidate_with_artifacts(
@@ -1048,8 +1132,8 @@ def _receipt_is_current(
         native = api.get_comment(record.native.id)
         history = _raw_history(api, native)
         assert history is not None
-        assert history.created_at == history.updated_at
-        assert history.created_at == history.updated_at
+        assert history.created_at == history.updated_at and history.is_zero_edit()
+        assert history.created_at == history.updated_at and history.is_zero_edit()
         assert native.body == stage_comment_body(
             "itree-stage-receipt", _model_json(payload)
         )
@@ -1057,7 +1141,8 @@ def _receipt_is_current(
         assert native.performed_via_github_app.slug == "github-actions"
         return (
             validate_writer_seal(
-                payload.writer_seal, _job_authority(api, payload.writer_seal)
+                payload.writer_seal,
+                _job_authority(api, payload.writer_seal, _binding_for(payload)),
             )
             == payload.writer_seal
         )
@@ -1210,7 +1295,9 @@ def _drain_node(
     api = GithubApi.from_issue_ref(issue)
     live = _require_live_issue(api, issue, expected_node)
     seal = _writer_runtime_seal(api)
-    checked_seal = validate_writer_seal(seal, _job_authority(api, seal))
+    checked_seal = validate_writer_seal(
+        seal, _job_authority(api, seal, _drain_binding(require_issue_node(live), seal))
+    )
     if isinstance(checked_seal, WriterSealInvalidContext):
         return DrainReport(
             exit_code=4,
@@ -1235,6 +1322,7 @@ def _drain_node(
             edited = (
                 history.created_at != history.updated_at
                 or history.created_at != history.updated_at
+                or not history.is_zero_edit()
             )
             reason = "edited_record" if edited else "malformed_payload"
             return DrainReport(
@@ -1356,7 +1444,15 @@ def _drain_node(
         pending.extend(upload_drain.pending)
         failed.extend(upload_drain.failed)
         proposal_digests: dict[RequestId, Sha256] = {}
-        for proposal in (*_proposal_models(records), *upload_drain.proposals):
+        ordered_proposals = sorted(
+            (*_proposal_models(records), *upload_drain.proposals),
+            key=lambda proposal: (
+                _native_for_proposal(records, proposal.request_id).native.id
+            ),
+        )
+        for proposal in ordered_proposals:
+            if upload_drain.pending_native_id is not None:
+                break
             if attempt is not None and proposal.attempt_id != attempt:
                 continue
             request = proposal.request_id
@@ -1562,7 +1658,13 @@ def _drain_node(
                     assert isinstance(base, ManagedIssueLayout) and isinstance(
                         current, ManagedIssueLayout
                     )
-                    candidate = merge_stage_values(base, current, proposal.changes)
+                    changes = tuple(
+                        _with_current_plan_replacement(current, replacement)
+                        if replacement.section == "plan"
+                        else replacement
+                        for replacement in proposal.changes
+                    )
+                    candidate = merge_stage_values(base, current, changes)
             except StageFailure as error:
                 return DrainReport(
                     exit_code=error.failure.exit_code,
@@ -2208,6 +2310,190 @@ def _attempt_disposition(
     )
 
 
+def _live_base_value(
+    api: GithubApi,
+    live: GithubIssue,
+    manifest: UploadManifest,
+    descriptor_role: str,
+) -> str | None:
+    if manifest.request_kind in {"sections", "task_field", "legacy_intake"}:
+        if descriptor_role == "base_body":
+            return live.body or ""
+        layout = parse_issue_layout(live.body or "")
+        if layout.kind == "invalid":
+            return None
+        if descriptor_role.startswith("base:") or descriptor_role.startswith(
+            "proposed:"
+        ):
+            if layout.kind != "managed":
+                return None
+            assert isinstance(layout, ManagedIssueLayout)
+            section = descriptor_role.split(":", 1)[1]
+            if section not in {"requirements", "plan", "tasks"}:
+                return None
+            return _section(layout, SectionName(section))
+        if descriptor_role in {"requirements", "plan", "tasks"}:
+            if layout.kind != "managed":
+                return None
+            assert isinstance(layout, ManagedIssueLayout)
+            return _section(layout, SectionName(descriptor_role))
+        if descriptor_role in {"base_value", "proposed_value"}:
+            if layout.kind != "managed" or not manifest.targets:
+                return None
+            task_document = parse_task_document(_section(layout, SectionName.tasks))
+            if isinstance(task_document, TaskWireFailure) or not task_document.wrapped:
+                return None
+            target = manifest.targets[0].split(":", 2)
+            task = next(
+                (task for task in task_document.tasks if task.id == target[1]), None
+            )
+            if task is None:
+                return None
+            field = next(
+                span for name, span in task.field_spans.items() if name == target[2]
+            )
+            if target[2] == "state":
+                return "x" if task.state == "complete" else " "
+            return task.source[field.character_start : field.character_end]
+        if descriptor_role == "full_task_base_sha256":
+            if layout.kind != "managed" or not manifest.targets:
+                return None
+            task_document = parse_task_document(_section(layout, SectionName.tasks))
+            if isinstance(task_document, TaskWireFailure) or not task_document.wrapped:
+                return None
+            target = manifest.targets[0].split(":", 2)
+            task = next(
+                (task for task in task_document.tasks if task.id == target[1]), None
+            )
+            if task is None:
+                return None
+            return sha256_text(task.source)
+        return None
+    if descriptor_role == "base_body":
+        return live.body or ""
+    if not descriptor_role.startswith("artifact:"):
+        return None
+    _, kind, key = descriptor_role.split(":", 2)
+    layout = parse_issue_layout(live.body or "")
+    if layout.kind != "managed":
+        return None
+    assert isinstance(layout, ManagedIssueLayout)
+    for entry in _current_artifact_index(_section(layout, SectionName.plan)):
+        if entry.kind != kind or entry.key != key:
+            continue
+        native = api.get_comment(entry.comment_id)
+        payload = ArtifactPayload.model_validate_json(
+            native.body.splitlines()[1], strict=True
+        )
+        if (
+            payload.key == entry.key
+            and payload.kind == entry.kind
+            and payload.payload_sha256 == entry.content_sha256
+        ):
+            return payload.content
+    return None
+
+
+def _live_upload_contents(
+    api: GithubApi,
+    issue: IssueRef,
+    manifest: UploadManifest,
+    present: tuple[UploadPart, ...],
+) -> tuple[UploadContent, ...]:
+    live = _require_live_issue(api, issue, manifest.issue_node_id)
+    present_roles = {part.role for part in present}
+    contents: list[UploadContent] = []
+    for descriptor in manifest.parts:
+        if descriptor.role in present_roles:
+            continue
+        value = _live_base_value(api, live, manifest, descriptor.role)
+        if value is None:
+            return ()
+        contents.append(
+            UploadContent(
+                role=descriptor.role, ordinal=descriptor.ordinal, payload=value
+            )
+        )
+    return tuple(contents)
+
+
+def _regenerate_pending(issue: IssueRef, attempt: AttemptId) -> DrainReport | None:
+    api = GithubApi.from_issue_ref(issue)
+    live = _require_live_issue(api, issue, None)
+    records = _all_records(api, issue)
+    sessions = {
+        session.session_id: session
+        for session in _session_models(records)
+        if _receipt_by_request(records).get(session.request_id) is not None
+        and _receipt_by_request(records)[session.request_id].status
+        == "session_admitted"
+    }
+    for manifest in _upload_models(records):
+        if manifest.attempt_id != attempt:
+            continue
+        state = finalize_upload(manifest, _upload_part_models(records, manifest))
+        if isinstance(state, FinalizedProposal):
+            continue
+        if not isinstance(state, PendingUpload):
+            return DrainReport(
+                exit_code=5,
+                confirmed=False,
+                lines=(f"pending_upload={manifest.request_id}",),
+                pending=True,
+            )
+        native = next(
+            record.native
+            for record in records
+            if record.fence == "itree-stage-upload-manifest"
+            and isinstance(record.payload, dict)
+            and record.payload.get("request_id") == manifest.request_id
+        )
+        session = sessions.get(manifest.session_id)
+        if session is None:
+            return DrainReport(
+                exit_code=5,
+                confirmed=False,
+                lines=(f"pending_upload={manifest.request_id}:editor_not_enrolled",),
+                pending=True,
+            )
+        approved = _external_authorized(
+            api, native, manifest, live, session.enrolled_actors, False
+        )
+        if isinstance(approved, ExternalSubmissionDetail):
+            return DrainReport(
+                exit_code=4,
+                confirmed=False,
+                lines=(f"rejected={manifest.request_id}:{approved.reason}",),
+                pending=True,
+            )
+        present = _upload_part_models(records, manifest)
+        resumed = regenerate_upload_part(
+            manifest,
+            present,
+            lambda selected: _live_upload_contents(api, issue, selected, present),
+        )
+        if isinstance(resumed, RestartedAttempt):
+            return DrainReport(
+                exit_code=5,
+                confirmed=False,
+                lines=(f"new_attempt_required={resumed.required_new_attempt}",),
+                pending=True,
+            )
+        assert isinstance(resumed, FinalizedProposal), resumed
+        restored = resumed.parts[len(_upload_part_models(records, manifest)) :]
+        for part in restored:
+            posted = _post_record(api, issue, "itree-stage-upload-part", part)
+            if not isinstance(posted, IssueComment):
+                return DrainReport(
+                    exit_code=5,
+                    confirmed=False,
+                    lines=(f"receipt_unavailable={part.role}",),
+                    pending=True,
+                )
+        return None
+    return None
+
+
 def resume_stage(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     disposition = _attempt_disposition(issue, attempt)
     if disposition is not None:
@@ -2215,6 +2501,11 @@ def resume_stage(issue: IssueRef, attempt: AttemptId) -> StageCommandResult:
     if not _writer_enabled():
         return _dispatch_pending(issue, attempt)
     try:
+        regeneration = _regenerate_pending(issue, attempt)
+        if regeneration is not None:
+            return StageCommandResult(
+                exit_code=regeneration.exit_code, lines=regeneration.lines
+            )
         report = _drain_node(issue, None, attempt)
     except (GithubApiError, StageFailure) as error:
         if isinstance(error, StageFailure):

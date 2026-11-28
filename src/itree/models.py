@@ -1268,6 +1268,17 @@ class MergeConflictDetail(StageModel):
     competing_request_id: RequestId | None
 
 
+class OperationLogBinding(StageModel):
+    kind: Literal["operation_log_binding"] = "operation_log_binding"
+    operation_id: OperationId
+    issue_node_id: IssueNodeId
+    request_id: RequestId
+    attempt_id: AttemptId
+    revision: CommitSha
+    workflow_path: Literal[".github/workflows/itree-issue-writer.yml"]
+    workflow_sha256: Sha256
+
+
 class OperationFailureDetail(StageModel):
     kind: Literal["operation_failure"]
     reason: Literal[
@@ -1292,6 +1303,11 @@ OperationRejectionDetails = AdmissionRejectionDetails | OperationFailureDetail
 class CommentHistory(StageModel):
     created_at: str = Field(min_length=1)
     updated_at: str = Field(min_length=1)
+    edit_total_count: int = Field(ge=0)
+    history_exhausted: bool
+
+    def is_zero_edit(self) -> bool:
+        return self.edit_total_count == 0 and self.history_exhausted
 
 
 class SubmissionSeal(StageModel):
