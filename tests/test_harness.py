@@ -758,13 +758,16 @@ class InstallerFixture:
     trace: Path
 
 
+USER_SKILL_CONTENT = "---\nname: user-existing\ndescription: Existing user skill\n---\nUSER-EXTERNAL-SKILL\n"
+
+
 def _installer_fixture(root: Path) -> InstallerFixture:
     project = root / "project"
     external = root / "external"
     project.joinpath(".specify", "integrations").mkdir(parents=True)
     external.joinpath("skills", "user-existing").mkdir(parents=True)
     external.joinpath("skills", "user-existing", "SKILL.md").write_text(
-        "USER-EXTERNAL-SKILL\n"
+        USER_SKILL_CONTENT
     )
     project.joinpath("AGENTS.md").write_text("PROJECT-INSTRUCTIONS\n")
     project.joinpath("CLAUDE.md").write_text("CLAUDE-INSTRUCTIONS\n")
@@ -888,7 +891,7 @@ def test_real_linked_install_preserves_and_repeats_every_surface(
     ).is_file()
     assert (
         fixture.external.joinpath("skills", "user-existing", "SKILL.md").read_text()
-        == "USER-EXTERNAL-SKILL\n"
+        == USER_SKILL_CONTENT
     )
     for relative in (
         ".codex/config.toml",
