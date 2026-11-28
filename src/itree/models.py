@@ -1755,12 +1755,6 @@ class TaskFieldProposal(StageModel):
     proposed_value: str
 
 
-StageProposal = Annotated[
-    SectionEditProposal | LegacyIntakeProposal | TaskFieldProposal,
-    Field(discriminator="request_kind"),
-]
-
-
 class ArtifactDraft(StageModel):
     key: ArtifactKey
     kind: Literal[
@@ -1849,6 +1843,12 @@ class ArtifactProposal(StageModel):
     base_body_sha256: Sha256
     base_body: str
     artifacts: tuple[ArtifactDraft, ...] = Field(min_length=1)
+
+
+StageProposal = Annotated[
+    SectionEditProposal | LegacyIntakeProposal | TaskFieldProposal | ArtifactProposal,
+    Field(discriminator="request_kind"),
+]
 
 
 class ArtifactPayload(StageModel):

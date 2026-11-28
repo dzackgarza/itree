@@ -18,6 +18,7 @@ from .models import (
     ActionsJobMetadata,
     ArtifactDraft,
     ArtifactIndexEntry,
+    ArtifactProposal,
     ArtifactPayload,
     ActorLogin,
     AttemptId,
@@ -692,6 +693,7 @@ def _proposal_models(records: tuple[DurableRecord, ...]) -> tuple[StageProposal,
             "sections",
             "task_field",
             "legacy_intake",
+            "artifacts",
         }:
             continue
         proposals.append(
@@ -878,7 +880,7 @@ def _publish_artifacts(
     api: GithubApi,
     issue: IssueRef,
     records: tuple[DurableRecord, ...],
-    proposal: SectionEditProposal,
+    proposal: SectionEditProposal | ArtifactProposal,
     seal: WriterSeal,
 ) -> tuple[ArtifactIndexEntry, ...]:
     published: list[ArtifactIndexEntry] = []
@@ -1487,6 +1489,11 @@ def _drain_node(
                         candidate = build_legacy_intake(
                             base, proposal.requirements, proposal.plan, proposal.tasks
                         )
+                elif isinstance(proposal, ArtifactProposal):
+                    assert isinstance(base, ManagedIssueLayout) and isinstance(
+                        current, ManagedIssueLayout
+                    )
+                    candidate = merge_stage_values(base, current, ())
                 elif isinstance(proposal, TaskFieldProposal):
                     assert isinstance(base, ManagedIssueLayout) and isinstance(
                         current, ManagedIssueLayout
@@ -1568,7 +1575,7 @@ def _drain_node(
                 failed.append(request)
                 continue
             published: tuple[ArtifactIndexEntry, ...] = ()
-            if isinstance(proposal, SectionEditProposal):
+            if isinstance(proposal, SectionEditProposal | ArtifactProposal):
                 published = _publish_artifacts(api, issue, records, proposal, seal)
                 current_layout = _layout(candidate.body)
                 assert isinstance(current_layout, ManagedIssueLayout)

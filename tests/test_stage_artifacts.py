@@ -466,3 +466,72 @@ def test_artifact_families_publish_link_materialize_and_invalidate_on_edit(
     assert "edited or mismatched artifact" in blocked.stdout
     assert fixture.issue_body() == before
     assert len(fixture.patches()) == patches_before_block
+
+
+def test_artifact_manifest_recovers_and_indexes_only_after_final_part(
+    tmp_path: Path,
+) -> None:
+    fixture = StageFixture(tmp_path / "fixture")
+    feature, _ = fixture.materialize("A-multipart")
+    first = fixture.run(
+        "stage",
+        "write-back",
+        ISSUE_REF,
+        "--attempt",
+        "A-multipart",
+        "--feature-directory",
+        str(feature),
+        writer=True,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    body = fixture.issue_body()
+    proposal = ArtifactProposal(
+        version=1,
+        request_kind="artifacts",
+        issue_node_id=ISSUE_NODE_ID,
+        issue_ref=IssueRef.parse(ISSUE_REF),
+        request_id="artifacts-multipart",
+        attempt_id="A-multipart",
+        session_id="session-A-multipart",
+        base_body_sha256=sha256_text(body),
+        base_body=body,
+        artifacts=(
+            ArtifactDraft(
+                key="multipart-research",
+                kind="research",
+                content="Multipart research\n",
+            ),
+            ArtifactDraft(
+                key="multipart-evidence",
+                kind="evidence",
+                content="Multipart evidence\n",
+            ),
+        ),
+    )
+    contents = artifact_upload_contents(proposal)
+    manifest = build_upload_manifest(proposal, contents)
+    parts = make_upload_parts(manifest, contents)
+    _post_record(fixture, "itree-stage-upload-manifest", manifest)
+
+    pending = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert pending.returncode == 5
+    assert "pending_upload" in pending.stdout
+    assert fixture.patches() == []
+
+    for part in parts[:-1]:
+        _post_record(fixture, "itree-stage-upload-part", part)
+    still_pending = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert still_pending.returncode == 5
+    assert "pending_upload" in still_pending.stdout
+    assert fixture.patches() == []
+
+    _post_record(fixture, "itree-stage-upload-part", parts[-1])
+    completed = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert len(fixture.patches()) == 1
+    assert "itree-stage-artifact-index" in fixture.issue_body()
+    assert "multipart-research" in fixture.issue_body()
+    assert "multipart-evidence" in fixture.issue_body()
+    replay = fixture.run("stage", "drain", ISSUE_REF, writer=True)
+    assert replay.returncode == 0, replay.stdout + replay.stderr
+    assert len(fixture.patches()) == 1
