@@ -138,7 +138,6 @@ query WorkPackageIssueFamily($owner: String!, $name: String!, $number: Int!, $en
           author { login }
           createdAt
           updatedAt
-          lastEditedAt
           url
         }
         pageInfo { hasNextPage endCursor }
@@ -1077,10 +1076,7 @@ class GithubApi(BaseModel):
         proc = self._exec(
             "GET", f"repos/{self.owner}/{self.repo}/issues/comments/{comment_id}"
         )
-        payload = json.loads(proc.stdout)
-        if "last_edited_at" not in payload:
-            raise SealHistoryUnavailable(str(comment_id))
-        return IssueComment.model_validate(payload)
+        return IssueComment.model_validate_json(proc.stdout)
 
     def get_issue_family(self, number: int) -> GithubIssueFamily:
         issue: GithubIssue | None = None
@@ -1154,7 +1150,6 @@ class GithubApi(BaseModel):
                             "updated_at": _string(
                                 node["updatedAt"], "comment update time"
                             ),
-                            "last_edited_at": node["lastEditedAt"],
                             "html_url": _string(node["url"], "comment URL"),
                         }
                     )
@@ -1446,7 +1441,6 @@ class GithubApi(BaseModel):
         return CommentHistory(
             created_at=native.created_at,
             updated_at=native.updated_at,
-            last_edited_at=native.last_edited_at,
         )
 
     @staticmethod

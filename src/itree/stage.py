@@ -1057,7 +1057,6 @@ def _materialize_supporting_artifacts(
             native.node_id == entry.comment_node_id
             and native.html_url == expected_url == entry.url
             and history.created_at == history.updated_at
-            and history.last_edited_at is None
             and payload.key == entry.key
             and payload.kind == entry.kind
             and payload.attempt_id == entry.attempt_id

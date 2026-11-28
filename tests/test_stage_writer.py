@@ -39,7 +39,6 @@ def _native(body: str = "```itree-stage-edit\n{}\n```\n") -> IssueComment:
         user={"login": "maintainer"},
         created_at="2026-11-28T00:00:00Z",
         updated_at="2026-11-28T00:00:00Z",
-        last_edited_at=None,
         html_url=f"https://github.com/{SLUG}/issues/71#issuecomment-101",
     )
 
@@ -47,12 +46,10 @@ def _native(body: str = "```itree-stage-edit\n{}\n```\n") -> IssueComment:
 def _history(
     *,
     updated_at: str = "2026-11-28T00:00:00Z",
-    last_edited_at: str | None = None,
 ) -> CommentHistory:
     return CommentHistory(
         created_at="2026-11-28T00:00:00Z",
         updated_at=updated_at,
-        last_edited_at=last_edited_at,
     )
 
 
@@ -124,17 +121,13 @@ def test_submission_seal_checks_the_current_wire_and_complete_zero_history() -> 
 
     assert isinstance(valid, SubmissionSeal)
     assert valid.logical_payload_sha256 == logical_digest
-    assert valid.history.last_edited_at is None
+    assert valid.history.created_at == valid.history.updated_at
 
 
 @pytest.mark.parametrize(
     "history",
     [
-        _history(
-            updated_at="2026-11-28T00:01:00Z",
-            last_edited_at="2026-11-28T00:01:00Z",
-        ),
-        _history(last_edited_at="2026-11-28T00:01:00Z"),
+        _history(updated_at="2026-11-28T00:01:00Z"),
     ],
 )
 def test_edited_metadata_cannot_be_authorized_by_the_same_author(

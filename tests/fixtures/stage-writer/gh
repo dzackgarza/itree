@@ -91,7 +91,6 @@ with lock_path.open("a+b") as lock:
             "author_association": "OWNER",
             "created_at": timestamp,
             "updated_at": timestamp,
-            "last_edited_at": None,
             "html_url": issue["html_url"] + "#issuecomment-" + str(comment_id),
             "performed_via_github_app": {"id": 1, "node_id": "A_github", "slug": "github-actions"} if is_writer_record else None,
         }

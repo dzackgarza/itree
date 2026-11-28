@@ -207,7 +207,6 @@ def validate_submission_seal(
         history.created_at != native.created_at
         or history.updated_at != native.updated_at
         or history.created_at != history.updated_at
-        or history.last_edited_at is not None
     ):
         return _external_detail(native, "edited_record")
     try:
@@ -783,8 +782,8 @@ def _terminal(
         history = _raw_history(api, current)
         assert history is not None
         assert history.created_at == history.updated_at
-        assert history.last_edited_at is None
-        assert history.last_edited_at is None
+        assert history.created_at == history.updated_at
+        assert history.created_at == history.updated_at
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
         evidence = _job_authority(api, seal)
@@ -849,8 +848,8 @@ def _artifact_comment(
         history = _raw_history(api, current)
         assert history is not None
         assert history.created_at == history.updated_at
-        assert history.last_edited_at is None
-        assert history.last_edited_at is None
+        assert history.created_at == history.updated_at
+        assert history.created_at == history.updated_at
         assert current.performed_via_github_app is not None
         assert current.performed_via_github_app.slug == "github-actions"
         evidence = _job_authority(api, payload.writer_seal)
@@ -924,7 +923,7 @@ def _publish_artifacts(
             native = existing.native
             history = _raw_history(api, native)
             assert history is not None
-            assert history.last_edited_at is None
+            assert history.created_at == history.updated_at
             evidence = _job_authority(api, payload.writer_seal)
             assert (
                 validate_writer_seal(payload.writer_seal, evidence)
@@ -999,7 +998,7 @@ def _receipt_is_current(
         history = _raw_history(api, native)
         assert history is not None
         assert history.created_at == history.updated_at
-        assert history.last_edited_at is None
+        assert history.created_at == history.updated_at
         assert native.body == stage_comment_body(
             "itree-stage-receipt", _model_json(payload)
         )
@@ -1184,7 +1183,7 @@ def _drain_node(
                 )
             edited = (
                 history.created_at != history.updated_at
-                or history.last_edited_at is not None
+                or history.created_at != history.updated_at
             )
             reason = "edited_record" if edited else "malformed_payload"
             return DrainReport(

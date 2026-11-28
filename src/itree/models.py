@@ -971,7 +971,6 @@ class IssueComment(BaseModel):
     author: str = Field(alias="user")
     created_at: str
     updated_at: str
-    last_edited_at: str | None = None
     html_url: str
     performed_via_github_app: GithubInstallation | None = None
 
@@ -1293,7 +1292,6 @@ OperationRejectionDetails = AdmissionRejectionDetails | OperationFailureDetail
 class CommentHistory(StageModel):
     created_at: str = Field(min_length=1)
     updated_at: str = Field(min_length=1)
-    last_edited_at: str | None
 
 
 class SubmissionSeal(StageModel):
